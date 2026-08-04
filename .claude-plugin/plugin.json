@@ -1,0 +1,8 @@
+{
+  "name": "bdr",
+  "description": "Boundary-driven refactoring for pull requests, with evidence-backed phase gates and a resumable audit trail.",
+  "version": "0.3.0",
+  "author": {
+    "name": "BDR Contributors"
+  }
+}

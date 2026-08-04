@@ -1,0 +1,20 @@
+{
+  "name": "bdr-team",
+  "interface": {
+    "displayName": "BDR Team"
+  },
+  "plugins": [
+    {
+      "name": "bdr",
+      "source": {
+        "source": "local",
+        "path": "./plugins/bdr"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

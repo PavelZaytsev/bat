@@ -1,0 +1,7 @@
+interface:
+  display_name: "Boundary-Driven Refactor"
+  short_description: "Refactor PRs with a verified audit trail"
+  default_prompt: "Use $refactor (or @refactor in ChatGPT) to refactor this PR with BDR and leave a verified audit trail."
+
+policy:
+  allow_implicit_invocation: false
