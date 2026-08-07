@@ -1,0 +1,4 @@
+# Recorded benchmark output is content-addressed evidence. Its exact bytes, including
+# trailing blank lines, are validated by scripts/check_benchmark_artifacts.py.
+benchmarks/pilot/runs/**/artifacts/command-output/*.txt -whitespace
+benchmarks/pilot/runs/**/artifacts/final.patch -whitespace

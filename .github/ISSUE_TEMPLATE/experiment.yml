@@ -1,0 +1,97 @@
+name: Model or cluster experiment
+description: Plan or record a reproducible BAT run against hosted or open-weight models.
+title: "[Experiment] "
+labels:
+  - type:experiment
+  - area:benchmarks
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Record enough detail for another person to repeat the run. Preserve blocked and negative
+        results. Unavailable measurements are null with a reason, never zero.
+
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+      placeholder: A specific model/runtime configuration will reach a valid terminal state within a stated budget.
+    validations:
+      required: true
+
+  - type: textarea
+    id: case
+    attributes:
+      label: Case and oracle isolation
+      description: Target project/case, license, pinned base/head, known-bug handling, and how the actor is blinded.
+    validations:
+      required: true
+
+  - type: textarea
+    id: bat_identity
+    attributes:
+      label: BAT and BDR identity
+      description: Pin the BAT Git commit, engine version, methodology revision, and invocation prompt.
+    validations:
+      required: true
+
+  - type: textarea
+    id: model
+    attributes:
+      label: Model configuration
+      description: Provider, exact model ID, quantization, context size, reasoning setting, sampling settings, and host.
+      placeholder: open-weight; gpt-oss-120b; Q4_K_M; 64k context; exo
+    validations:
+      required: true
+
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Runtime and hardware topology
+      description: exo/llama.cpp/API runtime and version, machines, chips, memory, interconnect, and worker layout.
+    validations:
+      required: true
+
+  - type: textarea
+    id: limits
+    attributes:
+      label: Limits and controls
+      description: Wall-time, token/context, retry, network, subagent, writer, and fixed-point limits.
+    validations:
+      required: true
+
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Fill after execution; use null plus a reason for unavailable measurements.
+      placeholder: |
+        Terminal state:
+        Known bugs fixed:
+        Novel bugs validated:
+        Self-induced regressions:
+        Test invocations:
+        Input/cached/output/reasoning tokens:
+        Tokens per second:
+        Wall time:
+        Cost:
+
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Reproducibility artifacts
+      description: Safe paths or links to manifests, tracker/journal, command summaries, patch, bundle, and evaluator report.
+
+  - type: checkboxes
+    id: controls
+    attributes:
+      label: Experiment controls
+      options:
+        - label: The actor cannot read the oracle or future fix.
+          required: true
+        - label: Model, runtime, hardware, prompt, and BAT revision are pinned.
+          required: true
+        - label: I will preserve environment blocks and negative results.
+          required: true
+        - label: Artifacts contain no credentials or unauthorized proprietary material.
+          required: true

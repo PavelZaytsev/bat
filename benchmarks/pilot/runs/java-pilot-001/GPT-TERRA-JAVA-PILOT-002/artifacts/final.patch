@@ -32,3 +32,4 @@ index 9c9ad43..d2ee960 100644
      @Test
      void testAddObjectRespectsMaxTotal() throws Exception {
          genericObjectPool.setMaxTotal(1);
+

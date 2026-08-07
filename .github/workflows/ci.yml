@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Contract and artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up current Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Compile repository Python
+        run: >-
+          python -m py_compile
+          scripts/bdr.py
+          skills/refactor/scripts/bdr.py
+          scripts/check_plugin_manifests.py
+          scripts/check_benchmark_artifacts.py
+
+      - name: Validate tracked JSON and generated examples
+        run: |
+          git ls-files -z -- '*.json' | xargs -0 -n1 python -m json.tool >/dev/null
+          python scripts/bdr.py examples | python -m json.tool >/dev/null
+
+      - name: Exercise the public CLI contract
+        run: |
+          bin/bdr --version
+          bin/bdr rules
+
+      - name: Validate package manifests
+        run: python scripts/check_plugin_manifests.py
+
+      - name: Validate benchmark artifact graph
+        run: python scripts/check_benchmark_artifacts.py
+
+  engine:
+    name: Engine (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+            label: Linux / Python 3.10
+          - os: ubuntu-latest
+            python: "3.14"
+            label: Linux / Python 3.14
+          - os: windows-latest
+            python: "3.14"
+            label: Windows / Python 3.14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Run the adversarial engine suite
+        run: python scripts/bdr.py selftest
+
+      - name: Exercise the POSIX launcher
+        if: runner.os != 'Windows'
+        run: bin/bdr --version
+
+      - name: Exercise the Windows launcher
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: bin\bdr.cmd --version
+
+  required:
+    name: Required
+    if: always()
+    needs:
+      - contract
+      - engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job
+        env:
+          CONTRACT_RESULT: ${{ needs.contract.result }}
+          ENGINE_RESULT: ${{ needs.engine.result }}
+        run: test "$CONTRACT_RESULT" = success && test "$ENGINE_RESULT" = success
