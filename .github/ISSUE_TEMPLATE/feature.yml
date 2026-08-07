@@ -1,0 +1,81 @@
+name: Feature
+description: Propose a focused BAT capability or BDR methodology change.
+title: "[Feature] "
+labels:
+  - type:feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        BAT is the product; BDR is the methodology. Describe the missing capability and its
+        observable outcome before choosing an implementation.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - BAT runtime or controller
+        - BDR state engine or methodology
+        - OpenAI adapter or hosted models
+        - gpt-oss or local runtime
+        - Benchmark infrastructure
+        - Packaging and installation
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What cannot be done reliably today, and who is affected?
+      placeholder: Describe the current limitation with a concrete example.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe externally observable behavior, not just an implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Optional design direction, constraints, or alternatives already considered.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ] Observable criterion one
+        - [ ] Observable criterion two
+    validations:
+      required: true
+
+  - type: textarea
+    id: economics
+    attributes:
+      label: Token and execution economics
+      description: Expected effect on model tokens, test invocations, wall time, or cluster demand.
+
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: What should remain outside this issue?
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Issue hygiene
+      options:
+        - label: I searched existing issues for the same capability.
+          required: true
+        - label: I removed credentials, proprietary code, and sensitive logs.
+          required: true

@@ -6,3 +6,4 @@ result: VALID revision=19 state=ready_for_review
 audit_command: bdr audit --summary
 audit_exit_code: 0
 events: 20
+

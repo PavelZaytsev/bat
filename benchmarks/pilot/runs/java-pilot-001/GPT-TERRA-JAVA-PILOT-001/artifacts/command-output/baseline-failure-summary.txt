@@ -4,3 +4,4 @@ command: docker run --rm --network=none -v /private/tmp/bdr-pilot-pool-case-019f
 exit_code: 1
 result: Apache RAT rejected .bdr/progress.yaml and .bdr/events.jsonl as unapproved files before Java tests ran.
 classification: benchmark_harness_environment_failure
+

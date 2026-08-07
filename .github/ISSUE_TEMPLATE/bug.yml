@@ -1,0 +1,86 @@
+name: Bug report
+description: Report incorrect BAT behavior or a broken BDR invariant.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Include the smallest safe reproduction and the evidence that distinguishes expected from
+        actual behavior. Redact tokens, private source, user paths, and unrelated logs.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - BAT runtime or controller
+        - BDR state engine, methodology, or phase gate
+        - OpenAI adapter or hosted models
+        - gpt-oss or local runtime
+        - Benchmark infrastructure
+        - Packaging and installation
+        - CI and developer workflow
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: BAT version or commit
+      placeholder: v0.4.0 or full Git commit
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python, Git, host, model/runtime, and relevant cluster topology.
+      placeholder: macOS 15; Python 3.14; Git 2.x; exo; gpt-oss-20b
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Exact safe steps or command sequence that reproduces the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and evidence
+      description: Include exit codes and short, sanitized evidence. Attach artifacts only when safe.
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Does this cause a false ready state, missed bug, regression, lost audit data, or wasted execution?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Report hygiene
+      options:
+        - label: I reproduced this against the latest relevant BAT revision.
+          required: true
+        - label: I searched existing issues for this failure.
+          required: true
+        - label: I removed credentials, proprietary code, and sensitive logs.
+          required: true
