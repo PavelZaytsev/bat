@@ -2,6 +2,7 @@
 
 ## Contents
 
+- [Compatibility namespace](#compatibility-namespace)
 - [Operating contract](#operating-contract)
 - [Start, inspect, and mutate](#start-inspect-and-mutate)
 - [Operation payloads](#operation-payloads)
@@ -11,6 +12,15 @@
 - [Migration](#migration)
 - [Audit and recovery](#audit-and-recovery)
 - [Engine limits](#engine-limits)
+
+## Compatibility namespace
+
+BAT is the product; BDR is the methodology and state protocol. Machine-facing names that encode
+that protocol remain BDR names: the `bdr` CLI and engine, `.bdr/` state directory, `BDR_ACTOR`
+environment variable, `bdr.dev/*` schemas, and BDR run, slice, finding, evidence, dependency,
+decision, and foreign-fact identifiers. A BAT product or plugin rename does not migrate those
+interfaces. Any future protocol migration must be explicit, versioned, and backward-compatible
+with recorded state and audit artifacts.
 
 ## Operating contract
 

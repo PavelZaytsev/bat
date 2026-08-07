@@ -1,8 +1,17 @@
 # Autonomy contract
 
+This is a provider-, model-, and host-neutral BDR contract. It applies to BAT and to any other
+conforming BDR executor; product packaging does not broaden the authority granted by an
+invocation.
+
 ## What unattended means
 
-The runner avoids discretionary questions and proceeds through every safe, authorized action it can. It cannot suppress host permission dialogs, authentication challenges, policy approvals, user cancellation, machine failure, or execution limits. Ask the host only for permission required by an action already authorized below. If permission is denied or unavailable, do not find a workaround: continue work that does not require it, or enter `blocked_environment` when it is required for trustworthy completion.
+A conforming BDR executor avoids discretionary questions and proceeds through every safe,
+authorized action it can. It cannot suppress host permission dialogs, authentication challenges,
+policy approvals, user cancellation, machine failure, or execution limits. Ask the host only for
+permission required by an action already authorized below. If permission is denied or unavailable,
+do not find a workaround: continue work that does not require it, or enter `blocked_environment`
+when it is required for trustworthy completion.
 
 If the host ends execution, a terminal handoff is best-effort. Persisted state must remain resumable, but the framework must not claim the run reached a terminal state.
 

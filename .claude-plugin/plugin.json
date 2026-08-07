@@ -1,8 +1,8 @@
 {
-  "name": "bdr",
-  "description": "Boundary-driven refactoring for pull requests, with evidence-backed phase gates and a resumable audit trail.",
-  "version": "0.4.0",
+  "name": "bat",
+  "description": "BAT implements Boundary-Driven Refactoring for pull requests, with evidence-backed phase gates and a resumable audit trail.",
+  "version": "0.5.0",
   "author": {
-    "name": "BDR Contributors"
+    "name": "BAT Contributors"
   }
 }

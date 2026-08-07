@@ -1,11 +1,17 @@
-# BDR V2 pilot
+# BAT pilot: BDR V2
 
-This directory holds the first controlled execution of BDR V2. The pilot is deliberately small:
-one authentic Java change, one sealed regression oracle, one GPT deployment, and one writer.
+This directory holds the first controlled execution of BDR V2 using the implementation now shipped
+as BAT. The pilot is deliberately small: one authentic Java change, one sealed regression oracle,
+one GPT deployment, and one writer.
 
 The acting model receives only an isolated two-commit target repository and the installed BDR
-workflow. It does not receive the upstream future history, issue, reference fix, oracle, or hidden
-test. Evaluator material under `private/` must be mounted outside the actor's readable sandbox.
+workflow now shipped by BAT. It does not receive the upstream future history, issue, reference fix,
+oracle, or hidden test. Evaluator material under `private/` must be mounted outside the actor's
+readable sandbox.
+
+The recorded runs intentionally retain BDR engine names, `.bdr/` state paths, schemas, and evidence
+identifiers. Those identify the methodology and its audit protocol; they are not obsolete BAT
+product branding.
 
 ## First case
 

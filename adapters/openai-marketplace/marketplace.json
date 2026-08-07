@@ -1,14 +1,14 @@
 {
-  "name": "bdr-team",
+  "name": "bat-team",
   "interface": {
-    "displayName": "BDR Team"
+    "displayName": "BAT Team"
   },
   "plugins": [
     {
-      "name": "bdr",
+      "name": "bat",
       "source": {
         "source": "local",
-        "path": "./plugins/bdr"
+        "path": "./plugins/bat"
       },
       "policy": {
         "installation": "AVAILABLE",

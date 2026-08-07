@@ -1,16 +1,47 @@
-# Install BDR privately
+# Install BAT privately
 
-BDR has one portable skill and three thin adapters:
+BAT (**BugAnnihilatorThreethousand**) is a product that implements BDR (**Boundary-Driven
+Refactoring**). BAT packages one portable BDR skill and three thin host adapters:
 
 | layer | file | responsibility |
 |---|---|---|
-| portable workflow | `skills/refactor/SKILL.md` | method routing, autonomy contract, and terminal behavior |
-| Claude Code adapter | `.claude-plugin/plugin.json` | plugin identity and `/bdr:refactor` namespace |
+| portable BDR workflow | `skills/refactor/SKILL.md` | method routing, autonomy contract, and terminal behavior |
+| Claude Code adapter | `.claude-plugin/plugin.json` | BAT plugin identity and `/bat:refactor` namespace |
 | ChatGPT adapter | `skills/refactor/agents/openai.yaml` | `@refactor` presentation and invocation metadata |
-| Codex adapter | `.codex-plugin/plugin.json` | plugin identity and `$refactor` skill discovery |
+| Codex adapter | `.codex-plugin/plugin.json` | BAT plugin identity and `$refactor` skill discovery |
 
-Keep these files in one private, versioned source repository. Do not copy and independently edit the
-method into each product or application repository; that creates multiple protocol authorities.
+Keep these BAT files in one private, versioned source repository. Within one BAT deployment, do not
+copy and independently edit the method into each target or application repository; that creates
+multiple protocol authorities. Independent products may implement and version BDR under their own
+authority without adopting BAT's packaging or product identity.
+
+## Upgrading from a pre-0.5 `bdr` package
+
+BAT 0.5.0 intentionally makes an alpha-breaking product namespace change. The plugin/package ID is
+now `bat`, the local marketplace ID is `bat-team`, and the Claude Code namespaced command is
+`/bat:refactor`. The old `bdr`, `bdr-team`, and `/bdr:refactor` product entrypoints are not aliases.
+
+Remove the old package from the host's plugin manager, replace any copied marketplace descriptor
+with the 0.5.0 descriptor, install `bat`, and restart the host before starting a new session. Do not
+leave both packages installed: they expose the same portable `refactor` skill and may collide.
+
+This migration does not rename the BDR methodology contract. The `bdr` engine command, `.bdr/`
+state directory, `BDR_ACTOR` environment variable, BDR identifiers, and `bdr.dev/*` schemas remain
+stable. Existing target-repository state must not be renamed or deleted during the reinstall.
+
+## Updating clones after the repository rename
+
+The canonical repository is now `PavelZaytsev/bat`. Existing clones keep their history and working
+tree; point `origin` at the new SSH URL:
+
+```bash
+git remote set-url origin git@github.com:PavelZaytsev/bat.git
+git remote -v
+```
+
+Use `https://github.com/PavelZaytsev/bat.git` instead when the clone is configured for HTTPS.
+Update bookmarks, badges, marketplace source records, CI allowlists, webhooks, and automation to
+the new URL rather than depending on the former `PavelZaytsev/bdr` address.
 
 ## Preconditions
 
@@ -24,48 +55,50 @@ Before starting a run, the developer should have:
 - workspace trust and host permissions appropriate for editing code and running the approved test
   commands.
 
-GitHub synchronization is optional. Without credentials or network access, BDR records an outbox
-and ends `verification_pending` rather than inventing remote issue IDs or silently losing updates.
+GitHub synchronization is optional. Without credentials or network access, BAT records the BDR
+projection in an outbox and ends `verification_pending` rather than inventing remote issue IDs or
+silently losing updates.
 
 ## Claude Code
 
 For development, load the repository directly for one session:
 
 ```bash
-claude --plugin-dir /absolute/path/to/bdr
+claude --plugin-dir /absolute/path/to/bat
 ```
 
-For a team, publish BDR through a private Claude Code marketplace and install it at **user** scope
+For a team, publish BAT through a private Claude Code marketplace and install it at **user** scope
 so it is available in arbitrary repositories:
 
 ```bash
 claude plugin marketplace add YOUR_ORG/YOUR_MARKETPLACE
-claude plugin install bdr@YOUR_MARKETPLACE --scope user
+claude plugin install bat@YOUR_MARKETPLACE --scope user
 ```
 
-An organization can instead register the private marketplace and enable BDR through managed
+An organization can instead register the private marketplace and enable BAT through managed
 settings. A repository-level plugin declaration is not a zero-install distribution mechanism:
 each collaborator must still trust the repository and consent to installing external plugin code.
 
 Start a new session, check out the PR head, and run:
 
 ```text
-/bdr:refactor this PR
+/bat:refactor this PR
 ```
 
-You may also pass a PR number or URL. `/bdr:refactor` is the stable namespaced form. Claude Code
-2.1.216 and newer also exposes bare `/refactor` when no other command has that name.
+You may also pass a PR number or URL. `/bat:refactor` is the stable namespaced form. Claude Code can
+also expose bare `/refactor` when no other command has that name.
 
-For the exact short command on older clients, deploy `adapters/claude-bare/refactor/` as a
-standalone personal or managed Claude skill named `refactor` (for a personal installation, copy
-that directory to `~/.claude/skills/refactor/`). The shim contains no method copy: it delegates to
-the installed `bdr:refactor` skill and fails closed when the plugin is absent. Check for a collision
-with an existing personal/enterprise `/refactor` before deploying it.
+For the exact short command on clients that do not expose it, deploy
+`adapters/claude-bare/refactor/` as a standalone personal or managed Claude skill named `refactor`
+(for a personal installation, copy that directory to `~/.claude/skills/refactor/`). The shim
+contains no method copy: it delegates to the installed `bat:refactor` skill and fails closed when
+the plugin is absent. Check for a collision with an existing personal/enterprise `/refactor` before
+deploying it.
 
 ### Claude permissions
 
 Installing a plugin does not enable autonomous permissions. For long runs, use your organization's
-approved permission mode and narrow allow rules for the BDR entrypoint, repository reads and edits,
+approved permission mode and narrow allow rules for the BAT entrypoint, repository reads and edits,
 the project's test commands, and the specific `git` or `gh` operations you intend to permit.
 
 Claude Code auto mode can reduce routine prompts, but it must be enabled by the developer or an
@@ -80,19 +113,19 @@ Official references: [plugins](https://code.claude.com/docs/en/plugins),
 
 ## ChatGPT
 
-Publish and install the **complete BDR plugin folder** through a private marketplace. ChatGPT and
+Publish and install the **complete BAT plugin folder** through a private marketplace. ChatGPT and
 Codex share the `.codex-plugin/plugin.json` package. Do not upload only `SKILL.md` or only
 `skills/refactor/`: the workflow also needs its references and the deterministic runner under
 `scripts/` (plus `bin/` launchers where the host exposes them).
 
 For a local smoke test, use the ready-made catalog descriptor under
-`adapters/openai-marketplace/`. Make a separate marketplace root, place the complete BDR folder at
-`plugins/bdr/`, and copy that descriptor to `.agents/plugins/marketplace.json`. Restart the ChatGPT
-desktop app, select **BDR Team** in the Plugins Directory, and install **BDR**. Keeping the catalog
+`adapters/openai-marketplace/`. Make a separate marketplace root, place the complete BAT folder at
+`plugins/bat/`, and copy that descriptor to `.agents/plugins/marketplace.json`. Restart the ChatGPT
+desktop app, select **BAT Team** in the Plugins Directory, and install **BAT**. Keeping the catalog
 outside the plugin prevents a recursive plugin copy.
 
 In ChatGPT Work or the desktop app, enable the private/local marketplace source in the Plugins
-Directory, install BDR, and start a new Work chat against the authorized local project. The exact
+Directory, install BAT, and start a new Work chat against the authorized local project. The exact
 marketplace controls depend on workspace policy; an administrator may need to distribute or allow
 the private source.
 
@@ -102,7 +135,7 @@ After the private skill is enabled for the workspace, invoke it from a coding co
 @refactor this PR
 ```
 
-The ChatGPT workspace and connector policies remain authoritative. BDR cannot self-grant repository
+The ChatGPT workspace and connector policies remain authoritative. BAT cannot self-grant repository
 write access, shell execution, GitHub access, or permission to perform external side effects.
 
 Official references: [plugin packaging](https://developers.openai.com/plugins/build/plugins) and
@@ -110,17 +143,17 @@ Official references: [plugin packaging](https://developers.openai.com/plugins/bu
 
 ## Codex
 
-The Codex adapter discovers the same portable skill through `.codex-plugin/plugin.json`. Publish
-the plugin from a private organization marketplace, then install it using that marketplace's real
-name:
+The Codex adapter discovers the same portable BDR skill through `.codex-plugin/plugin.json`.
+Publish the BAT plugin from a private organization marketplace, then install it using that
+marketplace's real name:
 
 ```bash
 codex plugin marketplace add /path/to/private-marketplace-root
-codex plugin add bdr@YOUR_MARKETPLACE
+codex plugin add bat@YOUR_MARKETPLACE
 ```
 
 For the local smoke-test layout above, replace `/path/to/private-marketplace-root` with its
-`team-bdr-marketplace` directory and install `bdr@bdr-team`.
+`team-bat-marketplace` directory and install `bat@bat-team`.
 
 The marketplace-add step is for an explicitly configured private marketplace. A locally managed
 personal marketplace at `~/.agents/plugins/marketplace.json` is discovered implicitly and does not
@@ -158,7 +191,8 @@ packet. It must not claim `ready_for_review` merely because the agent ran out of
 
 Pilot on a non-critical PR before broad deployment. Confirm that:
 
-1. the host exposes the expected invocation and loads the same `skills/refactor/SKILL.md`;
+1. the host exposes the expected BAT invocation and loads the same BDR workflow from
+   `skills/refactor/SKILL.md`;
 2. `.bdr/progress.yaml` and `.bdr/events.jsonl` are created in the target repository, not in plugin
    cache or host configuration directories;
 3. a stopped session resumes from repository state without relying on chat prose;
