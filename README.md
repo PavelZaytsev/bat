@@ -39,6 +39,23 @@ The agent:
 7. projects stable BDR IDs into GitHub issues when authorized, or leaves an idempotent outbox when
    synchronization is unavailable.
 
+### Lean verification cadence
+
+BDR is deliberate about evidence, not about repeatedly running the same suite. A run takes one
+baseline signal. EXPOSE runs a focused regression test that fails. REPRESENT, ROUTE, and COLLAPSE
+use code, invariant, producer/consumer, and diff evidence; they do not require a test run merely
+because a phase changed. SATURATE runs one focused green selection covering the new regression and
+its adjacent slice cases. FALSIFY runs the focused counterfactual red test and may reuse that
+SATURATE result only when the workspace is unchanged after restoring the counterfactual. Run the
+broad integration, chaos, benchmark, or public suite once at the final fixed point and record that
+successful run in the fixed-point gate. Run it again only if later semantic or code work invalidates
+it.
+
+For one ordinary Java slice, that is five test invocations: baseline, EXPOSE red, SATURATE green,
+FALSIFY counterfactual red, and the final broad suite. With `N` independent slices, the ordinary
+budget is `2 + 3N`; extra runs require a concrete operational risk, workspace drift, or newly found
+work—not a phase number.
+
 The repository tracker is current state. Git, `.bdr/events.jsonl`, and digest-bound evidence
 records are history. GitHub is a projection, not a second editable source of truth.
 

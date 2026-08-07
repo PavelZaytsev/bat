@@ -27,10 +27,12 @@ from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
 
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 SCHEMA = "bdr.dev/tracker"
 SCHEMA_VERSION = 2
+LEAN_GATE_MINIMUM_VERSION = "2.2.0"
 PHASES = ("expose", "represent", "route", "collapse", "saturate", "falsify")
+STRUCTURAL_PHASES = {"represent", "route", "collapse"}
 RUN_STATES = {
     "preflighting", "auditing", "executing", "verifying", "ready_for_review",
     "verification_pending", "needs_human", "blocked_environment", "stale_input",
@@ -422,16 +424,360 @@ def audit_exclusions(audit_dir: str, tracker_path: str | None = None) -> list[st
     ]
 
 
+def git_blob_oid(data: bytes, object_format: str) -> str:
+    if object_format not in {"sha1", "sha256"}:
+        raise BdrError(f"unsupported Git object format {object_format!r}")
+    hasher = hashlib.new(object_format)
+    hasher.update(f"blob {len(data)}\0".encode())
+    hasher.update(data)
+    return hasher.hexdigest()
+
+
+def git_worktree_blob_oid(root: Path, relative: str, data: bytes, object_format: str) -> str:
+    """Hash worktree bytes exactly as Git would store them for this path."""
+    if object_format not in {"sha1", "sha256"}:
+        raise BdrError(f"unsupported Git object format {object_format!r}")
+    command = [
+        "git", "--no-replace-objects", "hash-object", f"--path={relative}", "--stdin",
+    ]
+    completed = subprocess.run(
+        command, cwd=root, input=data, capture_output=True, check=False,
+    )
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).decode("utf-8", errors="replace").strip()
+        raise BdrError(
+            f"cannot apply Git clean conversion while fingerprinting {relative!r}: "
+            f"{detail or f'exit {completed.returncode}'}"
+        )
+    try:
+        oid = completed.stdout.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise BdrError(f"Git returned a non-ASCII object ID for {relative!r}") from exc
+    expected_length = hashlib.new(object_format).digest_size * 2
+    if len(oid) != expected_length or any(character not in "0123456789abcdef" for character in oid):
+        raise BdrError(f"Git returned an invalid object ID for {relative!r}")
+    return oid
+
+
+def changed_paths(
+    root: Path,
+    base: str,
+    target: str | None,
+    audit_dir: str,
+    tracker_path: str | None,
+) -> list[str]:
+    excluded = audit_exclusions(audit_dir, tracker_path)
+    revision_args = [base] if target is None else [base, target]
+    tracked = run_command(
+        [
+            "git", "diff", "--no-ext-diff", "--ignore-submodules=none", "--no-renames",
+            "--name-only", "-z", *revision_args, "--", ".", *excluded,
+        ],
+        root,
+    ).stdout.split("\0")
+    paths = {path for path in tracked if path}
+    if target is None:
+        others = run_command(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", ".", *excluded],
+            root,
+        ).stdout.split("\0")
+        paths.update(path for path in others if path)
+    return sorted(paths)
+
+
+def tracked_worktree_modes(
+    root: Path, base: str, audit_dir: str, tracker_path: str | None,
+) -> dict[str, str]:
+    """Return the modes Git would use for tracked paths changed from base."""
+    excluded = audit_exclusions(audit_dir, tracker_path)
+    raw = run_command(
+        [
+            "git", "diff", "--no-ext-diff", "--ignore-submodules=none", "--no-renames",
+            "--raw", "--no-abbrev", "-z", base, "--", ".", *excluded,
+        ],
+        root,
+    ).stdout.split("\0")
+    if raw and raw[-1] == "":
+        raw.pop()
+    if len(raw) % 2:
+        raise BdrError("cannot parse Git's tracked worktree mode inventory")
+    modes: dict[str, str] = {}
+    for index in range(0, len(raw), 2):
+        metadata, relative = raw[index], raw[index + 1]
+        fields = metadata.split()
+        if (
+            len(fields) != 5
+            or not fields[0].startswith(":")
+            or re.fullmatch(r"[0-7]{6}", fields[0][1:]) is None
+            or re.fullmatch(r"[0-7]{6}", fields[1]) is None
+            or not relative
+        ):
+            raise BdrError("cannot parse Git's tracked worktree mode inventory")
+        if relative in modes:
+            raise BdrError(f"Git reported duplicate tracked worktree entries for {relative!r}")
+        modes[relative] = fields[1]
+    return modes
+
+
+def untracked_paths(
+    root: Path, audit_dir: str, tracker_path: str | None,
+) -> set[str]:
+    excluded = audit_exclusions(audit_dir, tracker_path)
+    raw = run_command(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", ".", *excluded],
+        root,
+    ).stdout.split("\0")
+    paths: set[str] = set()
+    for relative in raw:
+        if not relative:
+            continue
+        # Git reports an embedded untracked repository with a trailing slash;
+        # its eventual tree entry has no slash.
+        normalized = relative[:-1] if relative.endswith("/") else relative
+        if not normalized:
+            raise BdrError("Git returned an invalid untracked path")
+        paths.add(normalized)
+    return paths
+
+
+def git_filemode_enabled(root: Path) -> bool:
+    result = run_command(
+        ["git", "config", "--type=bool", "--get", "core.filemode"], root, required=False,
+    )
+    if result.returncode == 1 and not result.stdout and not result.stderr:
+        return True
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise BdrError(f"cannot read Git core.fileMode: {detail}")
+    value = result.stdout.strip().lower()
+    if value not in {"true", "false"}:
+        raise BdrError(f"Git returned an invalid core.fileMode value {value!r}")
+    return value == "true"
+
+
+def ensure_git_index_visible(
+    root: Path, label: str = "repository", visited_git_dirs: set[Path] | None = None,
+) -> None:
+    """Reject index flags that can hide worktree bytes from Git comparisons."""
+    visited = visited_git_dirs if visited_git_dirs is not None else set()
+    git_dir_result = run_command(
+        ["git", "rev-parse", "--absolute-git-dir"], root, required=False,
+    )
+    if git_dir_result.returncode or not git_dir_result.stdout.strip():
+        raise BdrError(f"cannot resolve Git metadata while checking {label}")
+    git_dir = Path(git_dir_result.stdout.strip()).resolve()
+    if git_dir in visited:
+        return
+    visited.add(git_dir)
+
+    entries = run_command(["git", "ls-files", "--stage", "-v", "-z"], root).stdout.split("\0")
+    nested: set[str] = set()
+    for entry in entries:
+        if not entry:
+            continue
+        if len(entry) < 4 or entry[1] != " " or "\t" not in entry[2:]:
+            raise BdrError(f"cannot parse Git index visibility for {label}")
+        tag = entry[0]
+        metadata, relative = entry[2:].split("\t", 1)
+        fields = metadata.split()
+        if len(fields) != 3 or re.fullmatch(r"[0-7]{6}", fields[0]) is None or not relative:
+            raise BdrError(f"cannot parse Git index visibility for {label}")
+        if tag.islower():
+            raise BdrError(
+                f"{label} has assume-unchanged index entry {relative!r}; "
+                "Git could hide uncommitted bytes from delivery verification"
+            )
+        candidate = root / relative
+        if tag == "S" and path_entry_exists(candidate):
+            raise BdrError(
+                f"{label} has a present skip-worktree entry {relative!r}; "
+                "Git could hide uncommitted bytes from delivery verification"
+            )
+        if fields[0] == "160000":
+            nested.add(relative)
+
+    resolved_root = root.resolve()
+    for relative in sorted(nested):
+        candidate = root / relative
+        if not path_entry_exists(candidate):
+            continue
+        metadata = os.lstat(candidate)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise BdrError(f"indexed submodule {relative!r} in {label} is not a directory")
+        resolved_candidate = candidate.resolve()
+        try:
+            resolved_candidate.relative_to(resolved_root)
+        except ValueError as exc:
+            raise BdrError(f"indexed submodule {relative!r} escapes {label}") from exc
+        nested_root = run_command(
+            ["git", "rev-parse", "--show-toplevel"], candidate, required=False,
+        )
+        independent_checkout = (
+            not nested_root.returncode
+            and bool(nested_root.stdout.strip())
+            and Path(nested_root.stdout.strip()).resolve() == resolved_candidate
+        )
+        if not independent_checkout:
+            try:
+                with os.scandir(candidate) as entries:
+                    empty = next(entries, None) is None
+            except OSError as exc:
+                raise BdrError(
+                    f"cannot inspect indexed submodule {relative!r} in {label}"
+                ) from exc
+            if empty:
+                # A non-recursive clone commonly materializes an uninitialized
+                # submodule as an empty directory. It contains no hidden bytes.
+                continue
+            raise BdrError(f"indexed submodule {relative!r} in {label} is not an independent checkout")
+        ensure_git_index_visible(
+            resolved_candidate, f"submodule {relative!r}", visited,
+        )
+
+
+def worktree_delta_sha256(
+    root: Path, base: str, audit_dir: str = ".bdr", tracker_path: str | None = None,
+) -> str:
+    ensure_git_index_visible(root)
+    object_format = git_value(root, "rev-parse", "--show-object-format")
+    tracked_modes = tracked_worktree_modes(root, base, audit_dir, tracker_path)
+    untracked = untracked_paths(root, audit_dir, tracker_path)
+    paths = sorted(set(tracked_modes) | untracked)
+    filemode_enabled = git_filemode_enabled(root) if untracked else True
+    records: list[dict[str, str]] = []
+    for relative in paths:
+        candidate = root / relative
+        if relative in untracked:
+            effective_mode: str | None = None
+        else:
+            effective_mode = tracked_modes[relative]
+        if effective_mode == "000000":
+            if path_entry_exists(candidate):
+                raise BdrError(
+                    f"tracked deletion is shadowed by an ignored or ambiguous worktree path: {relative!r}"
+                )
+            records.append({"path": relative, "kind": "deleted"})
+            continue
+        try:
+            metadata = os.lstat(candidate)
+        except FileNotFoundError as exc:
+            raise BdrError(f"changed workspace path disappeared during fingerprinting: {relative!r}") from exc
+        if effective_mode is None:
+            if stat.S_ISLNK(metadata.st_mode):
+                effective_mode = "120000"
+            elif stat.S_ISREG(metadata.st_mode):
+                executable = filemode_enabled and bool(metadata.st_mode & stat.S_IXUSR)
+                effective_mode = "100755" if executable else "100644"
+            elif stat.S_ISDIR(metadata.st_mode):
+                effective_mode = "160000"
+            else:
+                raise BdrError(f"cannot fingerprint special changed path {relative!r}")
+        if effective_mode == "120000":
+            if stat.S_ISLNK(metadata.st_mode):
+                data = os.readlink(candidate).encode()
+                oid = git_blob_oid(data, object_format)
+            elif stat.S_ISREG(metadata.st_mode):
+                # With core.symlinks=false Git materializes an indexed symlink as
+                # a regular file containing its target, preserves mode 120000,
+                # and still applies the path's clean conversion when it is added.
+                data = read_bytes_no_follow(candidate, "changed workspace symlink")
+                oid = git_worktree_blob_oid(root, relative, data, object_format)
+            else:
+                raise BdrError(f"changed Git symlink has incompatible worktree type: {relative!r}")
+            records.append({
+                "path": relative, "kind": "blob", "mode": effective_mode,
+                "oid": oid,
+            })
+        elif effective_mode in {"100644", "100755"}:
+            if not stat.S_ISREG(metadata.st_mode):
+                raise BdrError(f"changed Git file has incompatible worktree type: {relative!r}")
+            data = read_bytes_no_follow(candidate, "changed workspace file")
+            records.append({
+                "path": relative, "kind": "blob", "mode": effective_mode,
+                "oid": git_worktree_blob_oid(root, relative, data, object_format),
+            })
+        elif effective_mode == "160000":
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise BdrError(f"changed Git submodule has incompatible worktree type: {relative!r}")
+            submodule = run_command(["git", "rev-parse", "HEAD"], candidate, required=False)
+            oid = submodule.stdout.strip()
+            if submodule.returncode or not is_canonical_commit_oid(oid):
+                raise BdrError(f"cannot fingerprint changed directory {relative!r} as a Git submodule")
+            ensure_git_index_visible(candidate, f"submodule {relative!r}")
+            submodule_status = run_command(
+                [
+                    "git", "status", "--porcelain=v1", "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ],
+                candidate,
+                required=False,
+            )
+            if submodule_status.returncode:
+                detail = submodule_status.stderr.strip() or submodule_status.stdout.strip()
+                raise BdrError(
+                    f"cannot inspect changed submodule {relative!r}: "
+                    f"{detail or f'exit {submodule_status.returncode}'}"
+                )
+            if submodule_status.stdout:
+                raise BdrError(
+                    f"changed submodule {relative!r} has uncommitted content that a parent delivery cannot bind"
+                )
+            records.append({"path": relative, "kind": "commit", "mode": effective_mode, "oid": oid})
+        else:
+            raise BdrError(f"cannot fingerprint changed Git mode {effective_mode!r} for {relative!r}")
+    return digest(records)
+
+
+def commit_delta_sha256(
+    root: Path,
+    base: str,
+    commit: str,
+    audit_dir: str = ".bdr",
+    tracker_path: str | None = None,
+) -> str:
+    records: list[dict[str, str]] = []
+    for relative in changed_paths(root, base, commit, audit_dir, tracker_path):
+        raw = run_command(
+            ["git", "ls-tree", "-z", commit, "--", f":(literal){relative}"], root
+        ).stdout
+        if not raw:
+            records.append({"path": relative, "kind": "deleted"})
+            continue
+        line = raw[:-1] if raw.endswith("\0") else raw
+        try:
+            metadata, observed_path = line.split("\t", 1)
+            mode, kind, oid = metadata.split(" ", 2)
+        except ValueError as exc:
+            raise BdrError(f"cannot parse delivered tree entry for {relative!r}") from exc
+        if observed_path != relative or kind not in {"blob", "commit"}:
+            raise BdrError(f"delivered tree entry for {relative!r} is ambiguous")
+        records.append({"path": relative, "kind": kind, "mode": mode, "oid": oid})
+    return digest(records)
+
+
 def workspace_snapshot(
-    root: Path, audit_dir: str = ".bdr", tracker_path: str | None = None,
+    root: Path,
+    audit_dir: str = ".bdr",
+    tracker_path: str | None = None,
+    *,
+    include_content_delta: bool = False,
+    require_visible_index: bool = False,
 ) -> dict[str, Any]:
+    if require_visible_index and not include_content_delta:
+        ensure_git_index_visible(root)
     head = git_value(root, "rev-parse", "HEAD")
     excluded = audit_exclusions(audit_dir, tracker_path)
     diff = run_command(
-        ["git", "diff", "--no-ext-diff", "--binary", "HEAD", "--", ".", *excluded], root
+        [
+            "git", "diff", "--no-ext-diff", "--ignore-submodules=none", "--binary",
+            "HEAD", "--", ".", *excluded,
+        ], root
     ).stdout.encode()
     staged = run_command(
-        ["git", "diff", "--no-ext-diff", "--binary", "--cached", "HEAD", "--", ".", *excluded], root
+        [
+            "git", "diff", "--no-ext-diff", "--ignore-submodules=none", "--binary",
+            "--cached", "HEAD", "--", ".", *excluded,
+        ], root
     ).stdout.encode()
     others = run_command(
         ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", ".", *excluded], root
@@ -461,12 +807,17 @@ def workspace_snapshot(
                 "kind": f"special:{stat.S_IFMT(metadata.st_mode):o}",
                 "sha256": digest(str(metadata.st_mode).encode()),
             })
-    return {
+    snapshot = {
         "head_sha": head,
         "worktree_sha256": digest(diff + b"\0" + staged + b"\0" + canonical_bytes(untracked)),
         "dirty": bool(diff or staged or untracked),
         "captured_at": utc_now(),
     }
+    if include_content_delta:
+        snapshot["content_delta_sha256"] = worktree_delta_sha256(
+            root, head, audit_dir, tracker_path
+        )
+    return snapshot
 
 
 def state_path(raw: str, root: Path | None = None) -> Path:
@@ -759,6 +1110,15 @@ def version_tuple(value: Any) -> tuple[int, int, int] | None:
     return parts if len(parts) == 3 else None
 
 
+def require_validator_version(state: dict[str, Any], required: str) -> None:
+    current = version_tuple(state.get("minimum_validator_version"))
+    target = version_tuple(required)
+    if current is None or target is None:
+        raise BdrError("tracker has an invalid validator version")
+    if current < target:
+        state["minimum_validator_version"] = required
+
+
 def evidence_exists(state: dict[str, Any], evidence_id: Any) -> bool:
     return is_nonempty_string(evidence_id) and evidence_id in state.get("evidence", {})
 
@@ -768,6 +1128,180 @@ def evidence_has_kind(state: dict[str, Any], evidence_id: Any, kinds: set[str]) 
         return False
     record = state["evidence"][evidence_id]
     return isinstance(record, dict) and is_enum(record.get("kind"), kinds)
+
+
+def successful_command_records(records: Any) -> bool:
+    return command_records_valid(records) and all(record.get("exit_code") == 0 for record in records)
+
+
+def live_phase_attempt_for_evidence(
+    state: dict[str, Any], evidence_id: Any, phase: str, expected_slice: str | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    if not is_nonempty_string(evidence_id):
+        return None
+    for sid, slice_ in state.get("slices", {}).items():
+        if expected_slice is not None and sid != expected_slice:
+            continue
+        attempts = slice_.get("phase_attempts", []) if isinstance(slice_, dict) else []
+        if not isinstance(attempts, list):
+            continue
+        live_positions = live_passed_attempt_positions(slice_)
+        for position, attempt in enumerate(attempts):
+            if (
+                position in live_positions
+                and isinstance(attempt, dict)
+                and attempt.get("result") == "passed"
+                and attempt.get("phase") == phase
+                and attempt.get("gate_evidence") == evidence_id
+            ):
+                return sid, attempt
+    return None
+
+
+def saturate_verification_attempt(
+    state: dict[str, Any], evidence_id: Any, expected_slice: str | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    linked = live_phase_attempt_for_evidence(state, evidence_id, "saturate", expected_slice)
+    if linked is None:
+        return None
+    gate = state.get("evidence", {}).get(evidence_id)
+    if (
+        not isinstance(gate, dict)
+        or gate.get("kind") != "phase_gate"
+        or gate.get("phase") != "saturate"
+        or not successful_command_records(gate.get("commands"))
+    ):
+        return None
+    return linked
+
+
+def historical_saturate_verification_attempt(
+    state: dict[str, Any], evidence_id: Any, expected_slice: str | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    if not is_nonempty_string(evidence_id):
+        return None
+    gate = state.get("evidence", {}).get(evidence_id)
+    if (
+        not isinstance(gate, dict)
+        or gate.get("kind") != "phase_gate"
+        or gate.get("phase") != "saturate"
+        or not successful_command_records(gate.get("commands"))
+    ):
+        return None
+    for sid, slice_ in state.get("slices", {}).items():
+        if expected_slice is not None and sid != expected_slice:
+            continue
+        attempts = slice_.get("phase_attempts", []) if isinstance(slice_, dict) else []
+        if not isinstance(attempts, list):
+            continue
+        for attempt in attempts:
+            if (
+                isinstance(attempt, dict)
+                and attempt.get("phase") == "saturate"
+                and attempt.get("result") == "passed"
+                and attempt.get("gate_evidence") == evidence_id
+            ):
+                return sid, attempt
+    return None
+
+
+def saturate_reuse_is_falsified(
+    state: dict[str, Any], evidence_id: Any, expected_slice: str, *, allow_active: bool,
+) -> bool:
+    linked = saturate_verification_attempt(state, evidence_id, expected_slice)
+    if linked is None:
+        return False
+    _, saturate_attempt = linked
+    active = state.get("active_operation")
+    if (
+        allow_active
+        and isinstance(active, dict)
+        and active.get("slice") == expected_slice
+        and active.get("phase") == "falsify"
+        and checkpoints_have_same_workspace(
+            state, saturate_attempt.get("post_checkpoint"), active.get("pre_checkpoint")
+        )
+    ):
+        return True
+    attempt = passed_falsify_attempt_reusing_saturate(state, evidence_id, expected_slice)
+    if attempt is None:
+        return False
+    return checkpoints_have_same_workspace(
+        state, saturate_attempt.get("post_checkpoint"), attempt.get("pre_checkpoint")
+    ) and checkpoints_have_same_workspace(
+        state, attempt.get("pre_checkpoint"), attempt.get("post_checkpoint")
+    )
+
+
+def passed_falsify_attempt_reusing_saturate(
+    state: dict[str, Any], evidence_id: Any, expected_slice: str,
+) -> dict[str, Any] | None:
+    slice_ = state.get("slices", {}).get(expected_slice)
+    attempts = slice_.get("phase_attempts", []) if isinstance(slice_, dict) else []
+    if not isinstance(attempts, list):
+        return None
+    live_positions = live_passed_attempt_positions(slice_)
+    for position, attempt in enumerate(attempts):
+        if (
+            position not in live_positions
+            or not isinstance(attempt, dict)
+            or attempt.get("phase") != "falsify"
+            or attempt.get("result") != "passed"
+        ):
+            continue
+        gate = state.get("evidence", {}).get(attempt.get("gate_evidence"))
+        if not isinstance(gate, dict) or gate.get("saturate_evidence") != evidence_id:
+            continue
+        return attempt
+    return None
+
+
+def passing_verification_evidence(
+    state: dict[str, Any], evidence_id: Any, expected_slice: str | None = None,
+    *, allow_active_falsify: bool = False,
+) -> bool:
+    if evidence_has_kind(state, evidence_id, {"test", "verification"}):
+        return True
+    minimum = version_tuple(state.get("minimum_validator_version"))
+    lean_minimum = version_tuple(LEAN_GATE_MINIMUM_VERSION)
+    return (
+        minimum is not None
+        and lean_minimum is not None
+        and minimum >= lean_minimum
+        and isinstance(expected_slice, str)
+        and saturate_reuse_is_falsified(
+            state, evidence_id, expected_slice, allow_active=allow_active_falsify
+        )
+    )
+
+
+def checkpoints_have_same_workspace(state: dict[str, Any], left: Any, right: Any) -> bool:
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    left_record = state.get("checkpoints", {}).get(left)
+    right_record = state.get("checkpoints", {}).get(right)
+    if not isinstance(left_record, dict) or not isinstance(right_record, dict):
+        return False
+    left_identity = (
+        left_record.get("head_sha"), left_record.get("worktree_sha256"),
+        left_record.get("content_delta_sha256"), left_record.get("dirty")
+    )
+    right_identity = (
+        right_record.get("head_sha"), right_record.get("worktree_sha256"),
+        right_record.get("content_delta_sha256"), right_record.get("dirty")
+    )
+    if (
+        not is_canonical_commit_oid(left_identity[0])
+        or not is_sha256(left_identity[1])
+        or not is_sha256(left_identity[2])
+        or not isinstance(left_identity[3], bool)
+        or not is_canonical_commit_oid(right_identity[0])
+        or not is_sha256(right_identity[1])
+        or not is_sha256(right_identity[2])
+        or not isinstance(right_identity[3], bool)
+    ):
+        return False
+    return left_identity == right_identity
 
 
 def command_records_valid(records: Any) -> bool:
@@ -798,23 +1332,33 @@ def phase_gate_errors(state: dict[str, Any], sid: str, slice_: dict[str, Any], a
         return errors
     if gate.get("slice") != sid:
         errors.append(f"gate evidence {evidence_id} does not belong to slice {sid}")
-    if not command_records_valid(gate.get("commands")):
-        errors.append("gate commands must record command, exit_code, and output digest/artifact")
+    commands_supplied = "commands" in gate
+    commands = gate.get("commands")
+    commands_required = phase in {"expose", "saturate"}
+    if commands_required and not command_records_valid(commands):
+        errors.append(f"{phase.upper()} commands must record command, exit_code, and output digest/artifact")
+    elif commands_supplied and not command_records_valid(commands):
+        errors.append("optional gate commands, when supplied, must be a non-empty valid command record list")
     elif phase == "expose":
-        if not any(record.get("exit_code") != 0 for record in gate["commands"]):
+        if not any(record.get("exit_code") != 0 for record in commands):
             errors.append("EXPOSE must record a deliberately failing command")
-    elif any(record.get("exit_code") != 0 for record in gate["commands"]):
+    elif commands_supplied and any(record.get("exit_code") != 0 for record in commands):
         errors.append(f"passed {phase} gate contains a failing verification command")
+
+    relevant_facts = {
+        ffid for ffid, fact in state.get("foreign_facts", {}).items()
+        if isinstance(fact, dict)
+        and isinstance(fact.get("depended_on_by", []), list)
+        and sid in fact.get("depended_on_by", [])
+    }
+    review_supplied = "foreign_fact_review" in gate
     review = gate.get("foreign_fact_review")
-    if not isinstance(review, dict) or review.get("performed") is not True:
-        errors.append("foreign_fact_review.performed must be true, even when no facts were discovered")
+    if not review_supplied:
+        if phase == "falsify" and relevant_facts:
+            errors.append("FALSIFY must review every foreign fact relied on by the slice")
+    elif not isinstance(review, dict) or review.get("performed") is not True:
+        errors.append("foreign_fact_review.performed must be true when a review record is supplied")
     else:
-        relevant_facts = {
-            ffid for ffid, fact in state.get("foreign_facts", {}).items()
-            if isinstance(fact, dict)
-            and isinstance(fact.get("depended_on_by", []), list)
-            and sid in fact.get("depended_on_by", [])
-        }
         reviewed = review.get("reviewed")
         if (
             not isinstance(reviewed, list)
@@ -822,6 +1366,16 @@ def phase_gate_errors(state: dict[str, Any], sid: str, slice_: dict[str, Any], a
             or set(reviewed) != relevant_facts
         ):
             errors.append("foreign_fact_review.reviewed must exactly match facts relied on by this slice")
+
+    lean_gate = (
+        (phase in STRUCTURAL_PHASES and not commands_supplied)
+        or (phase == "falsify" and (not commands_supplied or "saturate_evidence" in gate))
+        or not review_supplied
+    )
+    minimum = version_tuple(state.get("minimum_validator_version"))
+    lean_minimum = version_tuple(LEAN_GATE_MINIMUM_VERSION)
+    if lean_gate and (minimum is None or lean_minimum is None or minimum < lean_minimum):
+        errors.append(f"lean phase evidence requires validator {LEAN_GATE_MINIMUM_VERSION} or newer")
     if phase == "expose":
         for key in ("finding_id", "test", "baseline_ref"):
             if not is_nonempty_string(gate.get(key)):
@@ -882,6 +1436,32 @@ def phase_gate_errors(state: dict[str, Any], sid: str, slice_: dict[str, Any], a
         if gate.get("input_space_covered") is not True:
             errors.append("SATURATE must cover the EXPOSE input space")
     elif phase == "falsify":
+        saturate_supplied = "saturate_evidence" in gate
+        saturate_evidence = gate.get("saturate_evidence")
+        gate_validator = version_tuple(gate.get("validator_version"))
+        if saturate_supplied:
+            linked = saturate_verification_attempt(state, saturate_evidence, sid)
+            if linked is None:
+                errors.append("FALSIFY saturate_evidence must name this slice's current live SATURATE gate")
+            else:
+                _, saturate_attempt = linked
+                if not checkpoints_have_same_workspace(
+                    state, saturate_attempt.get("post_checkpoint"), attempt.get("pre_checkpoint")
+                ):
+                    errors.append("workspace changed between SATURATE verification and FALSIFY")
+                if not checkpoints_have_same_workspace(
+                    state, attempt.get("pre_checkpoint"), attempt.get("post_checkpoint")
+                ):
+                    errors.append("FALSIFY did not restore the SATURATE-verified workspace")
+        if (
+            gate_validator is not None
+            and lean_minimum is not None
+            and gate_validator >= lean_minimum
+            and not saturate_supplied
+        ):
+            errors.append("FALSIFY under validator 2.2 requires reusable SATURATE evidence; rewind and rerun SATURATE after workspace changes")
+        elif not commands_supplied and not saturate_supplied:
+            errors.append("FALSIFY requires successful commands or reusable SATURATE evidence")
         owners = {
             fid for fid, finding in state.get("findings", {}).items()
             if isinstance(finding, dict)
@@ -1073,7 +1653,7 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
         if value.get("kind") == "phase_gate":
             phase = value.get("phase")
             common = {
-                "kind", "phase", "slice", "commands", "foreign_fact_review", "recorded_at",
+                "kind", "phase", "slice", "commands", "foreign_fact_review", "validator_version", "recorded_at",
                 "notes", "blocked", "failure",
             }
             specific = {
@@ -1082,7 +1662,7 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
                 "route": {"producers", "consumers", "predictions_frozen", "new_abstraction_introduced", "introduced"},
                 "collapse": {"prediction_verdicts", "died", "no_death_expected"},
                 "saturate": {"structural_tests", "operational_proofs", "input_space_covered"},
-                "falsify": {"finding_verdicts", "rescan"},
+                "falsify": {"finding_verdicts", "rescan", "saturate_evidence"},
             }
             if not is_enum(phase, PHASES):
                 add_error(errors, "V005", f"phase gate {evidence_id} has invalid phase {phase!r}")
@@ -1092,6 +1672,22 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
                 not isinstance(value.get("finding_id"), str) or value.get("finding_id") not in findings
             ):
                 add_error(errors, "V005", f"EXPOSE gate {evidence_id} references no existing finding")
+            if (
+                "saturate_evidence" in value
+                and (minimum is None or minimum < version_tuple(LEAN_GATE_MINIMUM_VERSION))  # type: ignore[operator]
+            ):
+                add_error(
+                    errors, "V005",
+                    f"phase gate {evidence_id} uses SATURATE reuse below validator {LEAN_GATE_MINIMUM_VERSION}",
+                )
+            gate_validator = version_tuple(value.get("validator_version"))
+            if "validator_version" in value and (
+                gate_validator is None
+                or minimum is None
+                or gate_validator > version_tuple(VERSION)  # type: ignore[operator]
+                or minimum < gate_validator
+            ):
+                add_error(errors, "V005", f"phase gate {evidence_id} has an unsupported validator_version")
             phase_fields = specific.get(phase, set()) if isinstance(phase, str) else set()
             reject_unknown_keys(errors, "V005", f"phase gate {evidence_id}", value, common | phase_fields)
 
@@ -1218,13 +1814,42 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
                     continue
                 reject_unknown_keys(errors, "V001", f"slice {sid} delivery", delivery, {
                     "kind", "evidence", "recorded_at", "semantic_revision", "sha", "tree", "subject", "reason",
+                    "verified_checkpoint", "content_delta_sha256",
                 })
-                if not evidence_has_kind(state, delivery.get("evidence"), DELIVERY_EVIDENCE_KINDS):
+                delivery_is_fresh = delivery.get("semantic_revision") == state.get("semantic_revision")
+                delivery_evidence_valid = passing_verification_evidence(
+                    state, delivery.get("evidence"), sid
+                )
+                if not delivery_is_fresh and not delivery_evidence_valid:
+                    delivery_evidence_valid = (
+                        evidence_has_kind(state, delivery.get("evidence"), {"test", "verification"})
+                        or (
+                            minimum is not None
+                            and minimum >= version_tuple(LEAN_GATE_MINIMUM_VERSION)  # type: ignore[operator]
+                            and historical_saturate_verification_attempt(
+                                state, delivery.get("evidence"), sid
+                            ) is not None
+                        )
+                    )
+                if not delivery_evidence_valid:
                     add_error(
                         errors,
                         "V008",
-                        f"slice {sid} delivery requires {sorted(DELIVERY_EVIDENCE_KINDS)} evidence",
+                        f"slice {sid} delivery requires passing test/verification or FALSIFY-linked SATURATE evidence",
                     )
+                evidence_record = evidence.get(delivery.get("evidence"))
+                if isinstance(evidence_record, dict) and evidence_record.get("phase") == "saturate":
+                    if delivery.get("kind") != "commit":
+                        add_error(errors, "V008", f"slice {sid} SATURATE evidence cannot attest no_code_change")
+                    verified_checkpoint = delivery.get("verified_checkpoint")
+                    checkpoint_record = state["checkpoints"].get(verified_checkpoint)
+                    if (
+                        not isinstance(checkpoint_record, dict)
+                        or not is_sha256(checkpoint_record.get("content_delta_sha256"))
+                        or delivery.get("content_delta_sha256")
+                        != checkpoint_record.get("content_delta_sha256")
+                    ):
+                        add_error(errors, "V008", f"slice {sid} SATURATE delivery lacks its verified content fingerprint")
                 if (
                     not is_json_integer(delivery.get("semantic_revision"), 0)
                     or delivery["semantic_revision"] > state["semantic_revision"]
@@ -1321,15 +1946,19 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
                 }
                 reject_unknown_keys(errors, "V004", f"finding {fid} resolution", resolution, allowed_resolution)
                 if kind == "fixed":
-                    if not evidence_has_kind(state, resolution.get("passing_test"), {"test", "verification"}) or not evidence_has_kind(
-                        state, resolution.get("counterfactual_test"), {"counterfactual_test"}
-                    ):
+                    if not passing_verification_evidence(
+                        state, resolution.get("passing_test"), current_owner(finding),
+                        allow_active_falsify=True,
+                    ) or not evidence_has_kind(state, resolution.get("counterfactual_test"), {"counterfactual_test"}):
                         add_error(errors, "V004", f"finding {fid} fixed without passing and counterfactual evidence")
                 elif kind == "split":
                     children = resolution.get("remainders")
                     if (
                         not is_nonempty_string(resolution.get("fixed_scope"))
-                        or not evidence_has_kind(state, resolution.get("passing_test"), {"test", "verification"})
+                        or not passing_verification_evidence(
+                            state, resolution.get("passing_test"), current_owner(finding),
+                            allow_active_falsify=True,
+                        )
                         or not evidence_has_kind(state, resolution.get("counterfactual_test"), {"counterfactual_test"})
                     ):
                         add_error(errors, "V004", f"finding {fid} split lacks fixed-scope and counterfactual proof")
@@ -1368,11 +1997,32 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
             add_error(errors, "V004", f"finding {fid}.resolution_history must be a list")
         else:
             for previous in history:
-                if not isinstance(previous, dict) or not is_enum(previous.get("kind"), {"blocked_external", "needs_human"}):
+                if not isinstance(previous, dict) or not is_enum(previous.get("kind"), RESOLUTION_KINDS):
                     add_error(errors, "V004", f"finding {fid} has invalid reopened-resolution history")
                     continue
                 if not evidence_exists(state, previous.get("reopen_evidence")) or not is_nonempty_string(previous.get("reopened_at")):
                     add_error(errors, "V004", f"finding {fid} resolution history lacks reopen evidence")
+                if previous.get("kind") in {"fixed", "split"}:
+                    verification_slice = previous.get("verification_slice")
+                    if (
+                        minimum is None
+                        or minimum < version_tuple(LEAN_GATE_MINIMUM_VERSION)  # type: ignore[operator]
+                        or not isinstance(verification_slice, str)
+                        or verification_slice not in slices
+                    ):
+                        add_error(errors, "V004", f"finding {fid} historical repair requires validator 2.2 ownership metadata")
+                    elif (
+                        not (
+                            evidence_has_kind(state, previous.get("passing_test"), {"test", "verification"})
+                            or historical_saturate_verification_attempt(
+                                state, previous.get("passing_test"), verification_slice
+                            ) is not None
+                        )
+                        or not evidence_has_kind(
+                            state, previous.get("counterfactual_test"), {"counterfactual_test"}
+                        )
+                    ):
+                        add_error(errors, "V004", f"finding {fid} historical repair lacks typed proof")
 
         origin = finding.get("origin")
         if origin is not None:
@@ -1386,13 +2036,18 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
             else:
                 parent = findings[origin["parent"]]
                 parent_resolution = parent.get("resolution") if isinstance(parent, dict) else None
-                remainders = parent_resolution.get("remainders") if isinstance(parent_resolution, dict) else None
-                if (
-                    not isinstance(parent_resolution, dict)
-                    or parent_resolution.get("kind") != "split"
-                    or not isinstance(remainders, list)
-                    or fid not in remainders
-                ):
+                parent_history = parent.get("resolution_history", []) if isinstance(parent, dict) else []
+                candidates = [parent_resolution] + (
+                    parent_history if isinstance(parent_history, list) else []
+                )
+                reciprocal = any(
+                    isinstance(candidate, dict)
+                    and candidate.get("kind") == "split"
+                    and isinstance(candidate.get("remainders"), list)
+                    and fid in candidate["remainders"]
+                    for candidate in candidates
+                )
+                if not reciprocal:
                     add_error(errors, "V004", f"finding {fid} points to parent {origin['parent']} without reciprocal split")
 
     def visit_split(node: str, trail: list[str]) -> None:
@@ -1481,7 +2136,8 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
             add_error(errors, "V001", f"fixed-point pass {position} must be an object")
             continue
         reject_unknown_keys(errors, "V001", f"fixed-point pass {position}", record, {
-            "number", "new_merge_blocking_findings", "evidence", "at", "notes", "semantic_revision", "checkpoint",
+            "number", "new_merge_blocking_findings", "evidence", "commands", "at", "notes",
+            "semantic_revision", "checkpoint",
         })
         if (
             not is_json_integer(record.get("number"), 1)
@@ -1491,6 +2147,16 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
             add_error(errors, "V008", f"fixed-point pass {position} has invalid number/count")
         if not evidence_has_kind(state, record.get("evidence"), FIXED_POINT_EVIDENCE_KINDS):
             add_error(errors, "V008", f"fixed-point pass {position} lacks typed rescan evidence")
+        commands_supplied = "commands" in record
+        if commands_supplied and (
+            minimum is None or minimum < version_tuple(LEAN_GATE_MINIMUM_VERSION)  # type: ignore[operator]
+        ):
+            add_error(
+                errors, "V008",
+                f"fixed-point pass {position} uses final-suite commands below validator {LEAN_GATE_MINIMUM_VERSION}",
+            )
+        elif commands_supplied and not successful_command_records(record.get("commands")):
+            add_error(errors, "V008", f"fixed-point pass {position} has invalid or failing final-suite commands")
         if not is_json_integer(record.get("semantic_revision"), 0):
             add_error(errors, "V008", f"fixed-point pass {position} lacks a semantic revision")
         if not isinstance(record.get("checkpoint"), str) or record.get("checkpoint") not in state["checkpoints"]:
@@ -1681,6 +2347,13 @@ def validate_readiness(state: dict[str, Any], errors: list[tuple[str, str]]) -> 
         add_error(errors, "V008", "ready_for_review without a clean final fixed-point pass")
     elif passes[-1].get("semantic_revision") != state.get("semantic_revision"):
         add_error(errors, "V008", "final fixed-point pass predates semantic changes")
+    elif (
+        version_tuple(state.get("minimum_validator_version")) is not None
+        and version_tuple(state.get("minimum_validator_version"))
+        >= version_tuple(LEAN_GATE_MINIMUM_VERSION)  # type: ignore[operator]
+        and not successful_command_records(passes[-1].get("commands"))
+    ):
+        add_error(errors, "V008", "final fixed-point pass lacks successful final-suite commands")
     github_mode = (state.get("policy") or {}).get("github_projection")
     if github_mode == "outbox":
         add_error(errors, "V008", "ready_for_review is unavailable in outbox-only mode; synchronize or explicitly turn projection off")
@@ -1846,9 +2519,17 @@ def checkpoint(state: dict[str, Any], root: Path, label: str) -> str:
     checkpoint_id = next_id(state["checkpoints"], "CP")
     source = state.get("source") or {}
     audit_dir = source.get("audit_dir", ".bdr")
+    include_content_delta = ":saturate:post:" in label or ":falsify:" in label
+    require_visible_index = include_content_delta or label.startswith("fixed-point:")
     state["checkpoints"][checkpoint_id] = {
         "label": label,
-        **workspace_snapshot(root, audit_dir, source.get("tracker_path")),
+        **workspace_snapshot(
+            root,
+            audit_dir,
+            source.get("tracker_path"),
+            include_content_delta=include_content_delta,
+            require_visible_index=require_visible_index,
+        ),
     }
     return checkpoint_id
 
@@ -2197,6 +2878,20 @@ def apply_one(
         if current_owner(finding) is None:
             raise BdrError(f"unassigned finding {finding_id} cannot be resolved")
         resolution = copy.deepcopy(require_mapping(operation, "resolution"))
+        if (
+            resolution.get("kind") in {"fixed", "split"}
+            and saturate_verification_attempt(
+                state, resolution.get("passing_test"), current_owner(finding)
+            ) is not None
+        ):
+            owner = current_owner(finding)
+            if not isinstance(owner, str) or not saturate_reuse_is_falsified(
+                state, resolution.get("passing_test"), owner, allow_active=True
+            ):
+                raise BdrError(
+                    "SATURATE passing evidence may resolve a finding only during its unchanged FALSIFY phase"
+                )
+            require_validator_version(state, LEAN_GATE_MINIMUM_VERSION)
         resolution.setdefault("at", utc_now())
         finding["resolution"] = resolution
         return {"finding_id": finding_id, "resolution": resolution.get("kind")}
@@ -2261,6 +2956,20 @@ def apply_one(
         if result not in {"passed", "failed", "blocked"}:
             raise BdrError("finish result must be passed, failed, or blocked")
         gate = copy.deepcopy(require_mapping(operation, "gate"))
+        if (
+            "saturate_evidence" in gate
+            or (
+                result == "passed"
+                and (
+                    (phase in STRUCTURAL_PHASES and "commands" not in gate)
+                    or "foreign_fact_review" not in gate
+                )
+            )
+        ):
+            require_validator_version(state, LEAN_GATE_MINIMUM_VERSION)
+        if result == "passed" and phase == "falsify":
+            gate["validator_version"] = VERSION
+            require_validator_version(state, VERSION)
         gate["kind"] = "phase_gate"
         gate["phase"] = phase
         gate["slice"] = slice_id
@@ -2296,6 +3005,28 @@ def apply_one(
         evidence_id = operation.get("evidence")
         if not evidence_exists(state, evidence_id):
             raise BdrError("rewind requires existing evidence")
+        if PHASES.index(target) <= PHASES.index("falsify"):
+            for finding in state["findings"].values():
+                if not isinstance(finding, dict) or current_owner(finding) != slice_id:
+                    continue
+                resolution = finding.get("resolution")
+                if (
+                    not isinstance(resolution, dict)
+                    or resolution.get("kind") not in {"fixed", "split"}
+                    or saturate_verification_attempt(
+                        state, resolution.get("passing_test"), slice_id
+                    ) is None
+                ):
+                    continue
+                history = copy.deepcopy(resolution)
+                history.update({
+                    "reopened_at": utc_now(),
+                    "reopen_evidence": evidence_id,
+                    "reopen_reason": f"phase rewind to {target}",
+                    "verification_slice": slice_id,
+                })
+                finding.setdefault("resolution_history", []).append(history)
+                finding["resolution"] = None
         slice_["phase_attempts"].append({
             "phase": progress["next_phase"] or PHASES[-1],
             "result": "rewound",
@@ -2316,9 +3047,12 @@ def apply_one(
         if not is_enum(delivery_kind, DELIVERY_KINDS):
             raise BdrError("delivery kind must be commit or no_code_change")
         evidence_id = operation.get("evidence")
-        if not evidence_has_kind(state, evidence_id, DELIVERY_EVIDENCE_KINDS):
+        uses_saturate = saturate_verification_attempt(state, evidence_id, slice_id) is not None
+        if uses_saturate:
+            require_validator_version(state, LEAN_GATE_MINIMUM_VERSION)
+        if not passing_verification_evidence(state, evidence_id, slice_id):
             raise BdrError(
-                f"delivery requires existing {sorted(DELIVERY_EVIDENCE_KINDS)} evidence"
+                "delivery requires existing passing test/verification or FALSIFY-linked SATURATE evidence"
             )
         delivery: dict[str, Any] = {
             "kind": delivery_kind,
@@ -2344,6 +3078,43 @@ def apply_one(
             )
             if ancestor.returncode:
                 raise BdrError("delivery commit is not descended from the pinned target head")
+            if uses_saturate:
+                falsify_attempt = passed_falsify_attempt_reusing_saturate(
+                    state, evidence_id, slice_id
+                )
+                checkpoint_record = (
+                    state["checkpoints"].get(falsify_attempt.get("post_checkpoint"))
+                    if isinstance(falsify_attempt, dict)
+                    else None
+                )
+                if not isinstance(checkpoint_record, dict):
+                    raise BdrError("SATURATE delivery has no FALSIFY workspace checkpoint")
+                verified_base = checkpoint_record.get("head_sha")
+                verified_delta = checkpoint_record.get("content_delta_sha256")
+                if not is_canonical_commit_oid(verified_base) or not is_sha256(verified_delta):
+                    raise BdrError("FALSIFY checkpoint lacks a deliverable content fingerprint")
+                includes_verified_base = run_command(
+                    ["git", "merge-base", "--is-ancestor", verified_base, sha],
+                    root,
+                    required=False,
+                )
+                if includes_verified_base.returncode:
+                    raise BdrError("delivery commit does not descend from the FALSIFY-verified base")
+                delivered_delta = commit_delta_sha256(
+                    root,
+                    verified_base,
+                    sha,
+                    state["source"].get("audit_dir", ".bdr"),
+                    state["source"].get("tracker_path"),
+                )
+                if delivered_delta != verified_delta:
+                    raise BdrError(
+                        "delivery commit content differs from the SATURATE/FALSIFY-verified workspace"
+                    )
+                delivery.update({
+                    "verified_checkpoint": falsify_attempt["post_checkpoint"],
+                    "content_delta_sha256": verified_delta,
+                })
             for other_id, other in state["slices"].items():
                 if any(item.get("kind") == "commit" and item.get("sha") == sha for item in other.get("deliveries", [])):
                     if other_id != slice_id:
@@ -2379,6 +3150,8 @@ def apply_one(
                 "subject": git_value(root, "show", "-s", "--format=%s", sha),
             })
         else:
+            if uses_saturate:
+                raise BdrError("no_code_change delivery requires standalone test/verification evidence")
             reason = operation.get("reason")
             if not is_nonempty_string(reason):
                 raise BdrError("no_code_change delivery requires a reason")
@@ -2429,6 +3202,9 @@ def apply_one(
             raise BdrError("fixed-point pass requires a non-negative new_merge_blocking_findings count")
         if not evidence_has_kind(state, record.get("evidence"), FIXED_POINT_EVIDENCE_KINDS):
             raise BdrError("fixed-point pass requires existing typed rescan evidence")
+        if not successful_command_records(record.get("commands")):
+            raise BdrError("fixed-point pass requires successful final-suite command evidence")
+        require_validator_version(state, LEAN_GATE_MINIMUM_VERSION)
         record.setdefault("number", len(passes) + 1)
         record.setdefault("at", utc_now())
         record["semantic_revision"] = state["semantic_revision"]
@@ -2680,6 +3456,30 @@ def delivery_attribution_errors(
             if previous is not None:
                 errors.append(f"delivery commit {sha} is currently attributed more than once ({previous}, {sid})")
             owners[sha] = sid
+            evidence_record = state.get("evidence", {}).get(delivery.get("evidence"))
+            if isinstance(evidence_record, dict) and evidence_record.get("phase") == "saturate":
+                checkpoint_record = state.get("checkpoints", {}).get(delivery.get("verified_checkpoint"))
+                if not isinstance(checkpoint_record, dict):
+                    errors.append(f"slice {sid} SATURATE delivery has no verified checkpoint")
+                    continue
+                base = checkpoint_record.get("head_sha")
+                expected_delta = checkpoint_record.get("content_delta_sha256")
+                if not is_canonical_commit_oid(base) or not is_sha256(expected_delta):
+                    errors.append(f"slice {sid} SATURATE delivery checkpoint is malformed")
+                    continue
+                try:
+                    observed_delta = commit_delta_sha256(
+                        root,
+                        base,
+                        sha,
+                        state.get("source", {}).get("audit_dir", ".bdr"),
+                        state.get("source", {}).get("tracker_path"),
+                    )
+                except BdrError as exc:
+                    errors.append(f"slice {sid} SATURATE delivery cannot be fingerprinted: {exc}")
+                    continue
+                if observed_delta != expected_delta:
+                    errors.append(f"slice {sid} delivery commit differs from its verified workspace")
     if require_complete:
         missing = [sha for sha in frontier if sha not in owners]
         if missing:
@@ -2730,7 +3530,8 @@ def fixed_point_workspace_errors(state: dict[str, Any], root: Path) -> list[str]
         return ["final fixed-point workspace checkpoint is missing"]
     source = state.get("source") or {}
     observed = workspace_snapshot(
-        root, source.get("audit_dir", ".bdr"), source.get("tracker_path")
+        root, source.get("audit_dir", ".bdr"), source.get("tracker_path"),
+        require_visible_index=True,
     )
     errors: list[str] = []
     if observed["head_sha"] != expected.get("head_sha"):
@@ -3173,9 +3974,11 @@ def fixture_state(root: Path) -> dict[str, Any]:
         pr=None, github_mode="off", max_fixed_point_passes=3, max_phase_attempts=3, run_id="BDR-SELFTEST",
     )
     state = new_state(root, args)
+    # This fixture intentionally models the fully command-backed 2.1 form.
+    state["minimum_validator_version"] = "2.1.0"
     command = [{"command": "fixture-test", "exit_code": 0, "output_digest": "sha256:fixture"}]
     state["run"]["baseline"] = {"usable": True, "commands": command, "captured_at": utc_now()}
-    snapshot = workspace_snapshot(root)
+    snapshot = workspace_snapshot(root, include_content_delta=True)
     state["checkpoints"] = {
         "CP-0001": {"label": "fixture-pre", **snapshot},
         "CP-0002": {"label": "fixture-post", **snapshot},
@@ -3266,6 +4069,167 @@ def selftest() -> list[str]:
         if errors:
             raise BdrError("selftest fixture is not valid: " + render_validation(errors))
         passed.append("valid fixture")
+
+        legacy_v2 = copy.deepcopy(state)
+        if validate_state(legacy_v2):
+            raise BdrError("2.1.0 command-backed tracker is no longer valid")
+        passed.append("2.1.0 command-backed tracker compatibility")
+
+        upgraded_legacy_history = copy.deepcopy(state)
+        upgraded_legacy_history["minimum_validator_version"] = LEAN_GATE_MINIMUM_VERSION
+        upgraded_legacy_history["run"]["state"] = "auditing"
+        if validate_state(upgraded_legacy_history):
+            raise BdrError("raising the validator floor invalidated historical 2.1 gates or passes")
+        passed.append("historical 2.1 evidence survives a later validator upgrade")
+
+        lean_state = copy.deepcopy(state)
+        lean_state["minimum_validator_version"] = LEAN_GATE_MINIMUM_VERSION
+        lean_state["fixed_point"]["passes"][0]["commands"] = [{
+            "command": "fixture-final-suite", "exit_code": 0,
+            "output_digest": "sha256:final-suite",
+        }]
+        for evidence_id in ("E-0021", "E-0022", "E-0023"):
+            lean_state["evidence"][evidence_id].pop("commands")
+        lean_state["evidence"]["E-0025"].pop("commands")
+        lean_state["evidence"]["E-0025"]["saturate_evidence"] = "E-0024"
+        lean_state["evidence"]["E-0025"]["validator_version"] = LEAN_GATE_MINIMUM_VERSION
+        lean_state["findings"]["F-0001"]["resolution"]["passing_test"] = "E-0024"
+        lean_delivery = lean_state["slices"]["S-0001"]["deliveries"][0]
+        lean_delivery.update({
+            "kind": "commit", "evidence": "E-0024", "sha": "1" * 40, "tree": "2" * 40,
+            "subject": "lean fixture", "verified_checkpoint": "CP-0002",
+            "content_delta_sha256": lean_state["checkpoints"]["CP-0002"]["content_delta_sha256"],
+        })
+        lean_delivery.pop("reason", None)
+        if validate_state(lean_state):
+            raise BdrError("lean structural gates and SATURATE reuse were rejected")
+        passed.append("lean structural gates and SATURATE reuse")
+
+        for evidence_id in ("E-0021", "E-0022", "E-0023"):
+            for label, commands in (
+                ("empty", []),
+                ("malformed", [{"command": "fixture", "exit_code": 0}]),
+                ("failing", [{"command": "fixture", "exit_code": 1, "output_digest": "sha256:failure"}]),
+            ):
+                broken = copy.deepcopy(lean_state)
+                broken["evidence"][evidence_id]["commands"] = commands
+                if "V005" not in {rule for rule, _ in validate_state(broken)}:
+                    raise BdrError(f"optional structural {label} commands were silently accepted")
+        passed.append("optional structural command records remain strict")
+
+        for label, mutation in (
+            ("missing", lambda gate: gate.pop("commands")),
+            ("empty", lambda gate: gate.update(commands=[])),
+            ("all green", lambda gate: gate.update(commands=[{
+                "command": "fixture-expose", "exit_code": 0, "output_digest": "sha256:green",
+            }])),
+        ):
+            broken = copy.deepcopy(state)
+            mutation(broken["evidence"]["E-0020"])
+            if "V005" not in {rule for rule, _ in validate_state(broken)}:
+                raise BdrError(f"EXPOSE {label} command evidence was accepted")
+        passed.append("EXPOSE still requires intended red evidence")
+
+        for label, mutation in (
+            ("missing", lambda gate: gate.pop("commands")),
+            ("empty", lambda gate: gate.update(commands=[])),
+            ("failing", lambda gate: gate.update(commands=[{
+                "command": "fixture-saturate", "exit_code": 1, "output_digest": "sha256:failure",
+            }])),
+        ):
+            broken = copy.deepcopy(state)
+            mutation(broken["evidence"]["E-0024"])
+            if "V005" not in {rule for rule, _ in validate_state(broken)}:
+                raise BdrError(f"SATURATE {label} command evidence was accepted")
+        passed.append("SATURATE still requires focused green evidence")
+
+        falsify_without_proof = copy.deepcopy(lean_state)
+        falsify_without_proof["evidence"]["E-0025"].pop("saturate_evidence")
+        if "V005" not in {rule for rule, _ in validate_state(falsify_without_proof)}:
+            raise BdrError("commandless FALSIFY without SATURATE reuse was accepted")
+        for label, evidence_id in (
+            ("missing", "E-NOPE"),
+            ("wrong phase", "E-0023"),
+            ("unlinked clone", "E-0099"),
+        ):
+            broken = copy.deepcopy(lean_state)
+            if evidence_id == "E-0099":
+                broken["evidence"][evidence_id] = copy.deepcopy(broken["evidence"]["E-0024"])
+            broken["evidence"]["E-0025"]["saturate_evidence"] = evidence_id
+            if "V005" not in {rule for rule, _ in validate_state(broken)}:
+                raise BdrError(f"FALSIFY {label} SATURATE reference was accepted")
+        passed.append("FALSIFY requires current live SATURATE evidence")
+
+        for relation in ("before", "during"):
+            for key, replacement in (
+                ("head_sha", "0" * 40),
+                ("worktree_sha256", "0" * 64),
+                ("content_delta_sha256", "0" * 64),
+                ("dirty", not state["checkpoints"]["CP-0002"]["dirty"]),
+            ):
+                broken = copy.deepcopy(lean_state)
+                broken["checkpoints"]["CP-0003"] = copy.deepcopy(broken["checkpoints"]["CP-0002"])
+                broken["checkpoints"]["CP-0003"][key] = replacement
+                falsify_attempt = broken["slices"]["S-0001"]["phase_attempts"][-1]
+                falsify_attempt["pre_checkpoint" if relation == "before" else "post_checkpoint"] = "CP-0003"
+                if "V005" not in {rule for rule, _ in validate_state(broken)}:
+                    raise BdrError(f"FALSIFY workspace change {relation} phase ({key}) was accepted")
+        passed.append("SATURATE reuse is workspace-fingerprint bound")
+
+        old_minimum_lean = copy.deepcopy(lean_state)
+        old_minimum_lean["minimum_validator_version"] = "2.1.0"
+        old_minimum_lean["fixed_point"]["passes"][0].pop("commands")
+        if "V005" not in {rule for rule, _ in validate_state(old_minimum_lean)}:
+            raise BdrError("lean evidence did not require the 2.2.0 validator")
+        passed.append("lean evidence raises the validator floor")
+
+        old_minimum_reuse = copy.deepcopy(state)
+        old_minimum_reuse["minimum_validator_version"] = "2.1.0"
+        old_minimum_reuse["findings"]["F-0001"]["resolution"]["passing_test"] = "E-0024"
+        old_minimum_reuse["slices"]["S-0001"]["deliveries"][0]["evidence"] = "E-0024"
+        reuse_rules = {rule for rule, _ in validate_state(old_minimum_reuse)}
+        if not {"V004", "V008"}.issubset(reuse_rules):
+            raise BdrError("SATURATE resolution/delivery reuse bypassed the 2.2.0 validator floor")
+        passed.append("SATURATE resolution and delivery reuse require validator 2.2.0")
+
+        old_minimum_falsify_field = copy.deepcopy(state)
+        old_minimum_falsify_field["evidence"]["E-0025"]["saturate_evidence"] = "E-0024"
+        if "V005" not in {rule for rule, _ in validate_state(old_minimum_falsify_field)}:
+            raise BdrError("command-backed FALSIFY bypassed the SATURATE reuse validator floor")
+        passed.append("SATURATE reuse field always raises the validator floor")
+
+        command_only_falsify = copy.deepcopy(lean_state)
+        command_only_falsify["evidence"]["E-0025"].pop("saturate_evidence")
+        command_only_falsify["evidence"]["E-0025"]["commands"] = [{
+            "command": "not-a-focused-proof", "exit_code": 0,
+            "output_digest": "sha256:irrelevant-success",
+        }]
+        if "V005" not in {rule for rule, _ in validate_state(command_only_falsify)}:
+            raise BdrError("2.2 FALSIFY accepted commands as a substitute for fresh SATURATE proof")
+        passed.append("2.2 FALSIFY requires fresh SATURATE proof")
+
+        null_review = copy.deepcopy(lean_state)
+        null_review["evidence"]["E-0021"]["foreign_fact_review"] = None
+        if "V005" not in {rule for rule, _ in validate_state(null_review)}:
+            raise BdrError("explicit null foreign_fact_review was treated as omission")
+        passed.append("explicit null review is rejected")
+
+        for label, commands in (
+            ("missing", None),
+            ("empty", []),
+            ("failing", [{
+                "command": "fixture-final-suite", "exit_code": 1,
+                "output_digest": "sha256:final-suite-failure",
+            }]),
+        ):
+            broken = copy.deepcopy(lean_state)
+            if commands is None:
+                broken["fixed_point"]["passes"][0].pop("commands")
+            else:
+                broken["fixed_point"]["passes"][0]["commands"] = commands
+            if "V008" not in {rule for rule, _ in validate_state(broken)}:
+                raise BdrError(f"2.2 fixed point accepted {label} final-suite commands")
+        passed.append("2.2 fixed point requires successful final-suite commands")
 
         cases: list[tuple[str, Callable[[dict[str, Any]], None], str]] = [
             ("schema", lambda s: s.update(schema="wrong"), "V001"),
@@ -3405,6 +4369,50 @@ def selftest() -> list[str]:
                 + "; ".join(rewound_phase_errors)
             )
         passed.append("rewound historical gates do not freeze current claims")
+
+        for rewind_target in ("falsify", "saturate"):
+            lean_rewind = copy.deepcopy(lean_state)
+            apply_one(lean_rewind, {
+                "type": "rewind_phase", "slice": "S-0001", "rewind_to": rewind_target,
+                "reason": "final boundary changed", "evidence": "E-0001",
+            }, root)
+            lean_rewind["semantic_revision"] += 1
+            if validate_state(lean_rewind):
+                raise BdrError(
+                    f"SATURATE-backed resolution or delivery made {rewind_target} rewind impossible"
+                )
+            reopened = lean_rewind["findings"]["F-0001"]
+            if reopened["resolution"] is not None or not reopened["resolution_history"]:
+                raise BdrError(
+                    f"{rewind_target} rewind did not preserve and reopen the SATURATE-backed resolution"
+                )
+        passed.append("rewind reopens SATURATE-backed resolutions and stales delivery")
+
+        reassigned_history = copy.deepcopy(lean_rewind)
+        reassigned_history["evidence"]["E-REASSIGN"] = {
+            "kind": "code_read", "claim": "re-derived owner after rewind",
+        }
+        reassigned_history["slices"]["S-0002"] = {
+            "name": "reassigned boundary", "kind": "boundary", "merge_policy": "optional",
+            "boundary": {"authority": "producer", "fact": "ownership", "consumer_decision": "release"},
+            "depends_on": [], "collapse_predictions": {}, "operational_obligations": [],
+            "phase_attempts": [], "deliveries": [],
+        }
+        next_revision = reassigned_history["revision"] + 1
+        reassigned_history["findings"]["F-0001"]["ownership"].append({
+            "from": "S-0001", "to": "S-0002", "k_verification": "E-REASSIGN",
+            "at": utc_now(), "revision": next_revision,
+        })
+        reassigned_history["revision"] = next_revision
+        if validate_state(reassigned_history):
+            raise BdrError("reassigning a rewound finding invalidated its historical SATURATE proof")
+        passed.append("rewound SATURATE proof retains its original verification slice")
+
+        old_floor_history = copy.deepcopy(lean_rewind)
+        old_floor_history["minimum_validator_version"] = "2.1.0"
+        if "V004" not in {rule for rule, _ in validate_state(old_floor_history)}:
+            raise BdrError("fixed resolution history bypassed the 2.2 validator floor")
+        passed.append("fixed resolution history requires validator 2.2")
 
         try:
             loads_strict('{"a": 1, "a": 2}', "duplicate fixture")
@@ -3823,7 +4831,7 @@ def selftest() -> list[str]:
             "type": "batch",
             "operations": [
                 {"type": "add_evidence", "id": "E-0001", "evidence": {"kind": "code_read", "claim": "K belongs here"}},
-                {"type": "add_evidence", "id": "E-0002", "evidence": {"kind": "test", "claim": "fixed test passes"}},
+                {"type": "add_evidence", "id": "E-0002", "evidence": {"kind": "test", "claim": "intermediate commit verification"}},
                 {"type": "add_evidence", "id": "E-0003", "evidence": {"kind": "counterfactual_test", "claim": "reversion fails"}},
                 {"type": "add_evidence", "id": "E-0004", "evidence": {"kind": "rescan", "claim": "clean rescan"}},
                 {
@@ -3857,25 +4865,48 @@ def selftest() -> list[str]:
             "saturate": {"structural_tests": ["borrower cannot close"], "operational_proofs": {}, "input_space_covered": True},
             "falsify": {"finding_verdicts": {"F-0001": "fixed"}, "rescan": {"performed": True}},
         }
+        saturate_evidence: str | None = None
         for phase in PHASES:
+            if phase == "saturate":
+                (integration / "Fixture.java").write_text(
+                    "final class Fixture { int value; int first; int second; }\n",
+                    encoding="utf-8",
+                )
+            perform({"type": "begin_phase", "slice": "S-0001", "phase": phase})
             if phase == "falsify":
+                if saturate_evidence is None:
+                    raise BdrError("lean phase flow reached FALSIFY without SATURATE evidence")
                 perform({
                     "type": "resolve_finding", "finding": "F-0001",
-                    "resolution": {"kind": "fixed", "passing_test": "E-0002", "counterfactual_test": "E-0003"},
+                    "resolution": {
+                        "kind": "fixed", "passing_test": saturate_evidence,
+                        "counterfactual_test": "E-0003",
+                    },
                 })
-            perform({"type": "begin_phase", "slice": "S-0001", "phase": phase})
-            commands = [{
-                "command": f"fixture-{phase}",
-                "exit_code": 1 if phase == "expose" else 0,
-                "output_digest": f"sha256:{phase}",
-            }]
-            perform({
+            gate = {**phase_payloads[phase]}
+            if phase == "expose":
+                gate["commands"] = [{
+                    "command": "fixture-focused-expose", "exit_code": 1,
+                    "output_digest": "sha256:expose-assertion-failure",
+                }]
+            elif phase == "saturate":
+                gate["commands"] = [{
+                    "command": "fixture-focused-saturate", "exit_code": 0,
+                    "output_digest": "sha256:saturate-focused-success",
+                }]
+            elif phase == "falsify":
+                gate["saturate_evidence"] = saturate_evidence
+            changed = perform({
                 "type": "finish_phase", "slice": "S-0001", "phase": phase, "result": "passed",
-                "gate": {
-                    "commands": commands, "foreign_fact_review": {"performed": True, "reviewed": []},
-                    **phase_payloads[phase],
-                },
+                "gate": gate,
             })
+            if phase == "saturate":
+                candidate = changed["slices"]["S-0001"]["phase_attempts"][-1].get("gate_evidence")
+                if not isinstance(candidate, str):
+                    raise BdrError("SATURATE did not produce reusable gate evidence")
+                saturate_evidence = candidate
+        if saturate_evidence is None:
+            raise BdrError("lean phase flow completed without SATURATE evidence")
         (integration / "Fixture.java").write_text("final class Fixture { int value; int first; }\n", encoding="utf-8")
         run_command(["git", "add", "Fixture.java"], integration)
         run_command(["git", "commit", "-q", "-m", "delivery one"], integration)
@@ -3891,7 +4922,22 @@ def selftest() -> list[str]:
                 integration_tracker,
                 {
                     "type": "record_delivery", "slice": "S-0001", "kind": "commit",
-                    "sha": second_delivery_sha, "evidence": "E-0002",
+                    "sha": first_delivery_sha, "evidence": saturate_evidence,
+                },
+                revision,
+                "selftest",
+                integration,
+            )
+            raise BdrError("partial post-FALSIFY commit reused whole-workspace SATURATE evidence")
+        except BdrError as exc:
+            if "content differs" not in str(exc):
+                raise
+        try:
+            mutate_state(
+                integration_tracker,
+                {
+                    "type": "record_delivery", "slice": "S-0001", "kind": "commit",
+                    "sha": second_delivery_sha, "evidence": saturate_evidence,
                 },
                 revision,
                 "selftest",
@@ -3907,7 +4953,7 @@ def selftest() -> list[str]:
         })
         perform({
             "type": "record_delivery", "slice": "S-0001", "kind": "commit",
-            "sha": second_delivery_sha, "evidence": "E-0002",
+            "sha": second_delivery_sha, "evidence": saturate_evidence,
         })
         stale_delivery_state = copy.deepcopy(load_json_file(integration_tracker))
         stale_delivery_state["semantic_revision"] += 1
@@ -3926,7 +4972,17 @@ def selftest() -> list[str]:
         next_action = derive_next_action(phase_priority_state)
         if next_action.get("action") != "begin_phase" or next_action.get("slice") != "S-0002":
             raise BdrError("stale delivery guidance masked a runnable later slice phase")
-        perform({"type": "record_fixed_point", "pass": {"new_merge_blocking_findings": 0, "evidence": "E-0004"}})
+        perform({
+            "type": "record_fixed_point",
+            "pass": {
+                "new_merge_blocking_findings": 0,
+                "evidence": "E-0004",
+                "commands": [{
+                    "command": "fixture-final-public-suite", "exit_code": 0,
+                    "output_digest": "sha256:final-public-suite-success",
+                }],
+            },
+        })
         perform({"type": "configure_github", "mode": "sync"})
         projected = perform({"type": "project_github"})
         create_item = projected["github"]["outbox"][0]
@@ -3990,6 +5046,196 @@ def selftest() -> list[str]:
         passed.append("idempotent GitHub projection workflow")
         passed.append("atomic GitHub create mapping and payload collision rejection")
         passed.append("rejected mutation rollback")
+
+        normalized = root / "normalized-content"
+        normalized.mkdir()
+        run_command(["git", "init", "-q"], normalized)
+        run_command(["git", "config", "user.email", "bdr-selftest@example.invalid"], normalized)
+        run_command(["git", "config", "user.name", "BDR Selftest"], normalized)
+        run_command(["git", "config", "core.autocrlf", "false"], normalized)
+        run_command(["git", "config", "core.safecrlf", "false"], normalized)
+        run_command(["git", "config", "core.fileMode", "false"], normalized)
+        (normalized / ".gitattributes").write_text("*.txt text eol=crlf\n", encoding="utf-8")
+        (normalized / "sample.txt").write_bytes(b"base\r\n")
+        run_command(["git", "add", ".gitattributes", "sample.txt"], normalized)
+        run_command(["git", "commit", "-q", "-m", "normalized base"], normalized)
+        normalized_base = canonical_commit_oid(normalized, "HEAD", "normalized base")
+        (normalized / "sample.txt").write_bytes(b"changed\r\n")
+        normalized_workspace_delta = worktree_delta_sha256(normalized, normalized_base)
+        run_command(["git", "add", "sample.txt"], normalized)
+        run_command(["git", "commit", "-q", "-m", "normalized delivery"], normalized)
+        normalized_delivery = canonical_commit_oid(normalized, "HEAD", "normalized delivery")
+        normalized_blob = git_value(normalized, "rev-parse", f"{normalized_delivery}:sample.txt")
+        object_format = git_value(normalized, "rev-parse", "--show-object-format")
+        if normalized_blob == git_blob_oid(b"changed\r\n", object_format):
+            raise BdrError("Git-normalization fixture did not actually convert CRLF worktree bytes")
+        normalized_commit_delta = commit_delta_sha256(
+            normalized, normalized_base, normalized_delivery,
+        )
+        if normalized_workspace_delta != normalized_commit_delta:
+            raise BdrError("path-aware Git clean conversion changed the verified delivery fingerprint")
+        passed.append("Git-normalized worktree and delivery content identity")
+
+        normalized_base = normalized_delivery
+        (normalized / "sample.txt").chmod(0o755)
+        if os.lstat(normalized / "sample.txt").st_mode & 0o111:
+            (normalized / "sample.txt").write_bytes(b"mode-change\r\n")
+            filemode_workspace_delta = worktree_delta_sha256(normalized, normalized_base)
+            run_command(["git", "add", "sample.txt"], normalized)
+            run_command(["git", "commit", "-q", "-m", "filemode delivery"], normalized)
+            filemode_delivery = canonical_commit_oid(normalized, "HEAD", "filemode delivery")
+            delivered_mode = git_value(
+                normalized, "ls-tree", filemode_delivery, "--", "sample.txt",
+            ).split()[0]
+            if delivered_mode != "100644":
+                raise BdrError("core.fileMode=false fixture did not preserve the indexed mode")
+            if filemode_workspace_delta != commit_delta_sha256(
+                normalized, normalized_base, filemode_delivery,
+            ):
+                raise BdrError("core.fileMode=false changed the verified delivery fingerprint")
+            passed.append("core.fileMode=false worktree and delivery identity")
+
+        if symlink_supported:
+            symlink_modes = root / "symlink-modes"
+            symlink_modes.mkdir()
+            run_command(["git", "init", "-q"], symlink_modes)
+            run_command(["git", "config", "user.email", "bdr-selftest@example.invalid"], symlink_modes)
+            run_command(["git", "config", "user.name", "BDR Selftest"], symlink_modes)
+            (symlink_modes / ".gitattributes").write_text("link text eol=lf\n", encoding="utf-8")
+            (symlink_modes / "link").symlink_to("first-target")
+            run_command(["git", "add", ".gitattributes", "link"], symlink_modes)
+            run_command(["git", "commit", "-q", "-m", "symlink base"], symlink_modes)
+            symlink_base = canonical_commit_oid(symlink_modes, "HEAD", "symlink base")
+            run_command(["git", "config", "core.symlinks", "false"], symlink_modes)
+            (symlink_modes / "link").unlink()
+            (symlink_modes / "link").write_bytes(b"second-target\r\n")
+            symlink_workspace_delta = worktree_delta_sha256(symlink_modes, symlink_base)
+            run_command(["git", "add", "link"], symlink_modes)
+            run_command(["git", "commit", "-q", "-m", "symlink delivery"], symlink_modes)
+            symlink_delivery = canonical_commit_oid(symlink_modes, "HEAD", "symlink delivery")
+            delivered_mode = git_value(
+                symlink_modes, "ls-tree", symlink_delivery, "--", "link",
+            ).split()[0]
+            if delivered_mode != "120000":
+                raise BdrError("core.symlinks=false fixture did not preserve the indexed mode")
+            object_format = git_value(symlink_modes, "rev-parse", "--show-object-format")
+            delivered_blob = git_value(symlink_modes, "rev-parse", f"{symlink_delivery}:link")
+            if delivered_blob == git_blob_oid(b"second-target\r\n", object_format):
+                raise BdrError("core.symlinks=false fixture did not apply clean conversion")
+            if symlink_workspace_delta != commit_delta_sha256(
+                symlink_modes, symlink_base, symlink_delivery,
+            ):
+                raise BdrError("core.symlinks=false changed the verified delivery fingerprint")
+            passed.append("core.symlinks=false worktree and delivery identity")
+
+        submodule_parent = root / "submodule-modes"
+        submodule_parent.mkdir()
+        run_command(["git", "init", "-q"], submodule_parent)
+        run_command(["git", "config", "user.email", "bdr-selftest@example.invalid"], submodule_parent)
+        run_command(["git", "config", "user.name", "BDR Selftest"], submodule_parent)
+        submodule_child = submodule_parent / "child"
+        submodule_child.mkdir()
+        run_command(["git", "init", "-q"], submodule_child)
+        run_command(["git", "config", "user.email", "bdr-selftest@example.invalid"], submodule_child)
+        run_command(["git", "config", "user.name", "BDR Selftest"], submodule_child)
+        (submodule_child / "value.txt").write_text("base\n", encoding="utf-8")
+        run_command(["git", "add", "value.txt"], submodule_child)
+        run_command(["git", "commit", "-q", "-m", "child base"], submodule_child)
+        run_command(["git", "add", "child"], submodule_parent)
+        run_command(["git", "commit", "-q", "-m", "parent base"], submodule_parent)
+        submodule_base = canonical_commit_oid(submodule_parent, "HEAD", "submodule parent base")
+        (submodule_child / "value.txt").write_text("delivered\n", encoding="utf-8")
+        run_command(["git", "add", "value.txt"], submodule_child)
+        run_command(["git", "commit", "-q", "-m", "child delivery"], submodule_child)
+        submodule_workspace_delta = worktree_delta_sha256(submodule_parent, submodule_base)
+        run_command(["git", "add", "child"], submodule_parent)
+        run_command(["git", "commit", "-q", "-m", "parent delivery"], submodule_parent)
+        submodule_delivery = canonical_commit_oid(
+            submodule_parent, "HEAD", "submodule parent delivery",
+        )
+        if submodule_workspace_delta != commit_delta_sha256(
+            submodule_parent, submodule_base, submodule_delivery,
+        ):
+            raise BdrError("clean changed submodule did not retain delivery identity")
+        (submodule_child / "value.txt").write_text("dirty\n", encoding="utf-8")
+        try:
+            worktree_delta_sha256(submodule_parent, submodule_delivery)
+            raise BdrError("dirty changed submodule was accepted for delivery reuse")
+        except BdrError as exc:
+            if "uncommitted content" not in str(exc):
+                raise
+        (submodule_child / "value.txt").write_text("delivered\n", encoding="utf-8")
+        run_command(["git", "update-index", "--assume-unchanged", "value.txt"], submodule_child)
+        (submodule_child / "value.txt").write_text("hidden dirty bytes\n", encoding="utf-8")
+        try:
+            worktree_delta_sha256(submodule_parent, submodule_delivery)
+            raise BdrError("assume-unchanged content in a submodule was accepted")
+        except BdrError as exc:
+            if "assume-unchanged" not in str(exc):
+                raise
+        passed.append("clean and dirty submodule delivery binding")
+
+        uninitialized_submodule = root / "uninitialized-submodule"
+        run_command(
+            [
+                "git", "clone", "-q", "--no-recurse-submodules",
+                str(submodule_parent), str(uninitialized_submodule),
+            ],
+            root,
+        )
+        uninitialized_child = uninitialized_submodule / "child"
+        if not path_entry_exists(uninitialized_child):
+            uninitialized_child.mkdir()
+        ensure_git_index_visible(uninitialized_submodule)
+        passed.append("empty uninitialized submodule visibility")
+
+        shadowed = root / "shadowed-deletion"
+        shadowed.mkdir()
+        run_command(["git", "init", "-q"], shadowed)
+        run_command(["git", "config", "user.email", "bdr-selftest@example.invalid"], shadowed)
+        run_command(["git", "config", "user.name", "BDR Selftest"], shadowed)
+        (shadowed / ".gitignore").write_text("hidden.txt\n", encoding="utf-8")
+        (shadowed / "hidden.txt").write_text("verified bytes\n", encoding="utf-8")
+        run_command(["git", "add", "-f", ".gitignore", "hidden.txt"], shadowed)
+        run_command(["git", "commit", "-q", "-m", "shadow base"], shadowed)
+        shadow_base = canonical_commit_oid(shadowed, "HEAD", "shadow base")
+        run_command(["git", "rm", "--cached", "-q", "hidden.txt"], shadowed)
+        try:
+            worktree_delta_sha256(shadowed, shadow_base)
+            raise BdrError("ignored path shadowing a tracked deletion was accepted")
+        except BdrError as exc:
+            if "shadowed" not in str(exc):
+                raise
+        passed.append("ignored tracked-deletion shadow rejection")
+
+        hidden_index = root / "hidden-index"
+        hidden_index.mkdir()
+        run_command(["git", "init", "-q"], hidden_index)
+        run_command(["git", "config", "user.email", "bdr-selftest@example.invalid"], hidden_index)
+        run_command(["git", "config", "user.name", "BDR Selftest"], hidden_index)
+        (hidden_index / "hidden.txt").write_text("base\n", encoding="utf-8")
+        run_command(["git", "add", "hidden.txt"], hidden_index)
+        run_command(["git", "commit", "-q", "-m", "hidden-index base"], hidden_index)
+        hidden_base = canonical_commit_oid(hidden_index, "HEAD", "hidden-index base")
+        run_command(["git", "update-index", "--assume-unchanged", "hidden.txt"], hidden_index)
+        (hidden_index / "hidden.txt").write_text("assumed dirty\n", encoding="utf-8")
+        try:
+            worktree_delta_sha256(hidden_index, hidden_base)
+            raise BdrError("assume-unchanged root content was accepted")
+        except BdrError as exc:
+            if "assume-unchanged" not in str(exc):
+                raise
+        run_command(["git", "update-index", "--no-assume-unchanged", "hidden.txt"], hidden_index)
+        (hidden_index / "hidden.txt").write_text("base\n", encoding="utf-8")
+        run_command(["git", "update-index", "--skip-worktree", "hidden.txt"], hidden_index)
+        (hidden_index / "hidden.txt").write_text("skipped dirty\n", encoding="utf-8")
+        try:
+            worktree_delta_sha256(hidden_index, hidden_base)
+            raise BdrError("present skip-worktree root content was accepted")
+        except BdrError as exc:
+            if "skip-worktree" not in str(exc):
+                raise
+        passed.append("hidden index-entry rejection")
 
         custom = root / "custom-audit-dir"
         custom.mkdir()
@@ -4489,6 +5735,84 @@ def command_examples(_: argparse.Namespace) -> int:
             "fix_direction": "route an explicit release capability",
         },
         "assign_finding": {"type": "assign_finding", "finding": "F-0001", "slice": "S-0001", "k_verification": "E-0001"},
+        "finish_expose": {
+            "type": "finish_phase", "slice": "S-0001", "phase": "expose", "result": "passed",
+            "gate": {
+                "commands": [{
+                    "command": "focused regression test", "exit_code": 1,
+                    "output_digest": "sha256:expected-assertion-failure",
+                }],
+                "finding_id": "F-0001", "test": "ComponentTest.releaseRequiresAuthority",
+                "baseline_ref": "run.baseline", "failed_at_assertion": True,
+                "assertion_fingerprint": "borrower cannot release owner allocation",
+                "input_space": ["owner", "borrower"],
+            },
+        },
+        "finish_represent": {
+            "type": "finish_phase", "slice": "S-0001", "phase": "represent", "result": "passed",
+            "gate": {
+                "behavior_changed": False, "artifacts": ["ReleaseCapability"],
+            },
+        },
+        "finish_route": {
+            "type": "finish_phase", "slice": "S-0001", "phase": "route", "result": "passed",
+            "gate": {
+                "producers": ["allocation owner"], "consumers": ["close", "retain"],
+                "predictions_frozen": True, "new_abstraction_introduced": False, "introduced": [],
+            },
+        },
+        "finish_collapse": {
+            "type": "finish_phase", "slice": "S-0001", "phase": "collapse", "result": "passed",
+            "gate": {
+                "prediction_verdicts": {"P-0001": "died"},
+                "died": ["membership no longer decides release authority"],
+            },
+        },
+        "finish_saturate": {
+            "type": "finish_phase", "slice": "S-0001", "phase": "saturate", "result": "passed",
+            "evidence_id": "E-SATURATE",
+            "gate": {
+                "commands": [{
+                    "command": "focused owner/borrower boundary tests", "exit_code": 0,
+                    "output_digest": "sha256:focused-success",
+                }],
+                "structural_tests": ["borrower cannot close", "owner can close exactly once"],
+                "operational_proofs": {
+                    "backing allocation remains live for every borrower": "E-OPERATIONAL",
+                },
+                "input_space_covered": True,
+            },
+        },
+        "resolve_finding_with_saturate": {
+            "type": "resolve_finding", "finding": "F-0001",
+            "resolution": {
+                "kind": "fixed", "passing_test": "E-SATURATE",
+                "counterfactual_test": "E-COUNTERFACTUAL",
+            },
+        },
+        "finish_falsify": {
+            "type": "finish_phase", "slice": "S-0001", "phase": "falsify", "result": "passed",
+            "gate": {
+                "saturate_evidence": "E-SATURATE",
+                "finding_verdicts": {"F-0001": "fixed"}, "rescan": {"performed": True},
+            },
+        },
+        "record_delivery_with_saturate": {
+            "type": "record_delivery", "slice": "S-0001", "kind": "commit",
+            "sha": "HEAD", "evidence": "E-SATURATE",
+        },
+        "record_final_fixed_point": {
+            "type": "record_fixed_point",
+            "pass": {
+                "new_merge_blocking_findings": 0,
+                "evidence": "E-FINAL-RESCAN",
+                "commands": [{
+                    "command": "project broad integration/chaos/benchmark suite",
+                    "exit_code": 0,
+                    "output_digest": "sha256:final-suite-success",
+                }],
+            },
+        },
     }
     print(json.dumps(examples, indent=2))
     return 0

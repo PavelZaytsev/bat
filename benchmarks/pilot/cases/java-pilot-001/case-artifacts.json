@@ -1,0 +1,13 @@
+{
+  "schema": "bdr.dev/pilot-case-artifacts/v1",
+  "case_id": "java-pilot-001",
+  "manifest_sha256": "79dea1ec57cb55b4b350167ca641ed56892c966890f2c937aef2428eec150612",
+  "target_bundle": {
+    "path": "target.bundle",
+    "sha256": "c3171814a3eb8d8107f26d6bccc52e4b9b0f23684e9b93440977c5fac945de2b",
+    "head_ref": "refs/heads/main",
+    "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+    "base_sha": "acc4691e5a504d1f8b4fa4d175ec9e18574f7344",
+    "complete_history": true
+  }
+}

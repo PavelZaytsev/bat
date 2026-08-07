@@ -1,0 +1,34 @@
+diff --git a/src/main/java/org/apache/commons/pool2/impl/GenericObjectPool.java b/src/main/java/org/apache/commons/pool2/impl/GenericObjectPool.java
+index 8927e58..084b356 100644
+--- a/src/main/java/org/apache/commons/pool2/impl/GenericObjectPool.java
++++ b/src/main/java/org/apache/commons/pool2/impl/GenericObjectPool.java
+@@ -215,7 +215,8 @@ public class GenericObjectPool<T> extends BaseGenericObjectPool<T>
+ 
+         final int localMaxTotal = getMaxTotal();
+         final int localMaxIdle = getMaxIdle();
+-        if (getNumIdle() < localMaxIdle && (localMaxTotal < 0 || createCount.get() < localMaxTotal)) {
++        final boolean unlimitedMaxIdle = localMaxIdle < 0;
++        if ((unlimitedMaxIdle || getNumIdle() < localMaxIdle) && (localMaxTotal < 0 || createCount.get() < localMaxTotal)) {
+             addIdleObject(create(getMaxWaitDuration()));
+         }
+     }
+diff --git a/src/test/java/org/apache/commons/pool2/impl/TestGenericObjectPool.java b/src/test/java/org/apache/commons/pool2/impl/TestGenericObjectPool.java
+index 9c9ad43..d2ee960 100644
+--- a/src/test/java/org/apache/commons/pool2/impl/TestGenericObjectPool.java
++++ b/src/test/java/org/apache/commons/pool2/impl/TestGenericObjectPool.java
+@@ -2990,6 +2990,15 @@ class TestGenericObjectPool extends TestBaseObjectPool {
+         assertEquals(1, genericObjectPool.getNumIdle());
+     }
+ 
++    @Test
++    void testAddObjectAllowsUnlimitedMaxIdle() throws Exception {
++        genericObjectPool.setMaxIdle(-1);
++        for (int i = 0; i < 3; i++) {
++            genericObjectPool.addObject();
++        }
++        assertEquals(3, genericObjectPool.getNumIdle());
++    }
++
+     @Test
+     void testAddObjectRespectsMaxTotal() throws Exception {
+         genericObjectPool.setMaxTotal(1);

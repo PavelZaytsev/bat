@@ -1,0 +1,6 @@
+run_id: GPT-TERRA-JAVA-PILOT-001
+stage: actor_baseline
+command: docker run --rm --network=none -v /private/tmp/bdr-pilot-pool-case-019fd92e:/workspace -v /private/tmp/bdr-pilot-pool-m2-019fd92e:/root/.m2 -w /workspace maven:3.9.11-eclipse-temurin-17 mvn --show-version --batch-mode --no-transfer-progress test
+exit_code: 1
+result: Apache RAT rejected .bdr/progress.yaml and .bdr/events.jsonl as unapproved files before Java tests ran.
+classification: benchmark_harness_environment_failure

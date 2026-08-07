@@ -1,0 +1,493 @@
+{
+  "schema": "bdr.dev/tracker",
+  "schema_version": 2,
+  "minimum_validator_version": "2.1.0",
+  "revision": 19,
+  "semantic_revision": 15,
+  "source": {
+    "repository": "bdr-pilot-pool-case-r2-019fd92e",
+    "pr": null,
+    "base_sha": "acc4691e5a504d1f8b4fa4d175ec9e18574f7344",
+    "starting_head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+    "branch": "main",
+    "root": "/private/tmp/bdr-pilot-pool-case-r2-019fd92e",
+    "audit_dir": ".bdr",
+    "tracker_path": ".bdr/progress.yaml",
+    "policy_inputs": []
+  },
+  "policy": {
+    "higher_risk": "requires_human_approval",
+    "github_projection": "off",
+    "push": "never",
+    "max_fixed_point_passes": 3,
+    "max_phase_attempts": 4
+  },
+  "run": {
+    "id": "GPT-TERRA-JAVA-PILOT-002",
+    "state": "ready_for_review",
+    "created_at": "2026-08-07T02:17:38+00:00",
+    "updated_at": "2026-08-07T02:46:30+00:00",
+    "baseline": {
+      "usable": true,
+      "commands": [
+        {
+          "command": "docker run --rm --network none -v /private/tmp/bdr-pilot-pool-case-r2-019fd92e:/workspace -v /private/tmp/bdr-pilot-pool-m2-019fd92e:/root/.m2 -w /workspace maven:3.9.11-eclipse-temurin-17 mvn --show-version --batch-mode --no-transfer-progress -Drat.skip=true test",
+          "exit_code": 0,
+          "artifact": "host execution transcript: Maven full suite completed at 2026-08-07T02:25:38Z; 389 tests, 0 failures, 0 errors"
+        }
+      ]
+    },
+    "terminal_reason": null
+  },
+  "active_operation": null,
+  "checkpoints": {
+    "CP-0001": {
+      "label": "S-0001:expose:pre",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "ed0167440b3a1045b044739599c88b4fa7286ee07039dd651f34a1d099fabb54",
+      "dirty": false,
+      "captured_at": "2026-08-07T02:26:33+00:00"
+    },
+    "CP-0002": {
+      "label": "S-0001:expose:post:passed",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "c118a60324d5ff086b3d7fe95a6a7a083dbcf20b5ad29328078960bd96ea90b8",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:29:25+00:00"
+    },
+    "CP-0003": {
+      "label": "S-0001:represent:pre",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "c118a60324d5ff086b3d7fe95a6a7a083dbcf20b5ad29328078960bd96ea90b8",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:29:34+00:00"
+    },
+    "CP-0004": {
+      "label": "S-0001:represent:post:passed",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "2c9ce20dd534ae76f04d13d2363985132aa26277f7e1ec1e18f73ca9b891450f",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:30:22+00:00"
+    },
+    "CP-0005": {
+      "label": "S-0001:route:pre",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "2c9ce20dd534ae76f04d13d2363985132aa26277f7e1ec1e18f73ca9b891450f",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:30:27+00:00"
+    },
+    "CP-0006": {
+      "label": "S-0001:route:post:passed",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "43d3a6219f5cef930d638033b023c1e37d05a27fc38928312d453262472809e5",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:33:23+00:00"
+    },
+    "CP-0007": {
+      "label": "S-0001:collapse:pre",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "43d3a6219f5cef930d638033b023c1e37d05a27fc38928312d453262472809e5",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:33:29+00:00"
+    },
+    "CP-0008": {
+      "label": "S-0001:collapse:post:passed",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "43d3a6219f5cef930d638033b023c1e37d05a27fc38928312d453262472809e5",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:33:43+00:00"
+    },
+    "CP-0009": {
+      "label": "S-0001:saturate:pre",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "43d3a6219f5cef930d638033b023c1e37d05a27fc38928312d453262472809e5",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:33:53+00:00"
+    },
+    "CP-0010": {
+      "label": "S-0001:saturate:post:passed",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "c11fe1938ffb040229a79658e4a6821f1655e5b227d658afe0db609e9379e91d",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:36:40+00:00"
+    },
+    "CP-0011": {
+      "label": "S-0001:falsify:pre",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "c11fe1938ffb040229a79658e4a6821f1655e5b227d658afe0db609e9379e91d",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:36:50+00:00"
+    },
+    "CP-0012": {
+      "label": "S-0001:falsify:post:passed",
+      "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "worktree_sha256": "c11fe1938ffb040229a79658e4a6821f1655e5b227d658afe0db609e9379e91d",
+      "dirty": true,
+      "captured_at": "2026-08-07T02:38:19+00:00"
+    },
+    "CP-0013": {
+      "label": "fixed-point:1",
+      "head_sha": "84486817d2793cf0b5343b5fe0d65bdf70a953f1",
+      "worktree_sha256": "ed0167440b3a1045b044739599c88b4fa7286ee07039dd651f34a1d099fabb54",
+      "dirty": false,
+      "captured_at": "2026-08-07T02:46:23+00:00"
+    }
+  },
+  "evidence": {
+    "E-0001": {
+      "kind": "code_read",
+      "claim": "GenericObjectPool.addObject at lines 216-219 compares getNumIdle() directly with getMaxIdle(); negative maxIdle denotes the existing unlimited-idle configuration used by the affected test setup.",
+      "recorded_at": "2026-08-07T02:26:28+00:00"
+    },
+    "E-0002": {
+      "commands": [
+        {
+          "command": "docker run --rm --network none -v /private/tmp/bdr-pilot-pool-case-r2-019fd92e:/workspace -v /private/tmp/bdr-pilot-pool-m2-019fd92e:/root/.m2 -w /workspace maven:3.9.11-eclipse-temurin-17 mvn --batch-mode --no-transfer-progress -Drat.skip=true -Dtest=TestGenericObjectPool test",
+          "exit_code": 1,
+          "artifact": "host execution transcript: TestGenericObjectPool failed at testAddObjectAllowsUnlimitedMaxIdle with expected 1 but was 0"
+        }
+      ],
+      "foreign_fact_review": {
+        "performed": true,
+        "reviewed": []
+      },
+      "finding_id": "F-0001",
+      "test": "TestGenericObjectPool.testAddObjectAllowsUnlimitedMaxIdle",
+      "baseline_ref": "S-0001 pre-checkpoint CP-0001",
+      "failed_at_assertion": true,
+      "assertion_fingerprint": "expected: <1> but was: <0> at TestGenericObjectPool.java:2997",
+      "input_space": [
+        "maxIdle=-1, maxTotal default, empty pool",
+        "maxIdle=1, empty pool",
+        "maxTotal=1, empty pool"
+      ],
+      "kind": "phase_gate",
+      "phase": "expose",
+      "slice": "S-0001",
+      "recorded_at": "2026-08-07T02:29:25+00:00"
+    },
+    "E-0003": {
+      "commands": [
+        {
+          "command": "docker run --rm --network none -v /private/tmp/bdr-pilot-pool-case-r2-019fd92e:/workspace -v /private/tmp/bdr-pilot-pool-m2-019fd92e:/root/.m2 -w /workspace maven:3.9.11-eclipse-temurin-17 mvn --batch-mode --no-transfer-progress -Drat.skip=true -Dtest=TestGenericObjectPool#testAddObjectRespectsMaxIdle+testAddObjectRespectsMaxTotal+testAddObjectCanAddToMaxIdle test",
+          "exit_code": 0,
+          "artifact": "host execution transcript: 3 finite-capacity addObject tests passed"
+        }
+      ],
+      "foreign_fact_review": {
+        "performed": true,
+        "reviewed": []
+      },
+      "behavior_changed": false,
+      "artifacts": [
+        "GenericObjectPool.addObject local unlimitedMaxIdle representation"
+      ],
+      "kind": "phase_gate",
+      "phase": "represent",
+      "slice": "S-0001",
+      "recorded_at": "2026-08-07T02:30:22+00:00"
+    },
+    "E-0004": {
+      "commands": [
+        {
+          "command": "docker run --rm --network none -v /private/tmp/bdr-pilot-pool-case-r2-019fd92e:/workspace -v /private/tmp/bdr-pilot-pool-m2-019fd92e:/root/.m2 -w /workspace maven:3.9.11-eclipse-temurin-17 mvn --batch-mode --no-transfer-progress -Drat.skip=true -Dtest=TestGenericObjectPool test",
+          "exit_code": 0,
+          "artifact": "host execution transcript: TestGenericObjectPool completed with 105 tests, 0 failures, 0 errors"
+        }
+      ],
+      "foreign_fact_review": {
+        "performed": true,
+        "reviewed": []
+      },
+      "producers": [
+        "GenericObjectPool.getMaxIdle() configuration",
+        "GenericObjectPool.getMaxTotal() configuration",
+        "GenericObjectPool.createCount accounting"
+      ],
+      "consumers": [
+        "GenericObjectPool.addObject admission predicate",
+        "GenericObjectPool.addIdleObject enqueue path"
+      ],
+      "predictions_frozen": true,
+      "new_abstraction_introduced": false,
+      "introduced": [
+        {
+          "machinery": "unlimitedMaxIdle branch in existing addObject admission predicate",
+          "risk": {
+            "comparison": "equivalent"
+          },
+          "rationale": "Restores the documented negative-maxIdle capacity meaning without changing finite limits or maxTotal enforcement.",
+          "blast_radius": "GenericObjectPool.addObject only"
+        }
+      ],
+      "kind": "phase_gate",
+      "phase": "route",
+      "slice": "S-0001",
+      "recorded_at": "2026-08-07T02:33:22+00:00"
+    },
+    "E-0005": {
+      "commands": [
+        {
+          "command": "git diff --check",
+          "exit_code": 0,
+          "artifact": "host execution transcript: no whitespace errors; diff confirms the direct numeric maxIdle comparison was replaced"
+        }
+      ],
+      "foreign_fact_review": {
+        "performed": true,
+        "reviewed": []
+      },
+      "prediction_verdicts": {
+        "P-0001": "died"
+      },
+      "died": [
+        "The target’s getNumIdle() < localMaxIdle-only admission comparison no longer survives in GenericObjectPool.addObject."
+      ],
+      "kind": "phase_gate",
+      "phase": "collapse",
+      "slice": "S-0001",
+      "recorded_at": "2026-08-07T02:33:43+00:00"
+    },
+    "E-0006": {
+      "commands": [
+        {
+          "command": "docker run --rm --network none -v /private/tmp/bdr-pilot-pool-case-r2-019fd92e:/workspace -v /private/tmp/bdr-pilot-pool-m2-019fd92e:/root/.m2 -w /workspace maven:3.9.11-eclipse-temurin-17 mvn --batch-mode --no-transfer-progress -Drat.skip=true -Dtest=TestGenericObjectPool test",
+          "exit_code": 0,
+          "artifact": "host execution transcript: TestGenericObjectPool completed with 105 tests, 0 failures, 0 errors"
+        }
+      ],
+      "foreign_fact_review": {
+        "performed": true,
+        "reviewed": []
+      },
+      "structural_tests": [
+        "testAddObjectAllowsUnlimitedMaxIdle covers repeated admission with maxIdle=-1",
+        "testAddObjectRespectsMaxIdle covers finite idle boundary",
+        "testAddObjectRespectsMaxTotal covers total-capacity precedence"
+      ],
+      "operational_proofs": {
+        "The admission decision remains compatible with concurrent pool accounting and preserves maxTotal enforcement.": "E-0004"
+      },
+      "input_space_covered": true,
+      "kind": "phase_gate",
+      "phase": "saturate",
+      "slice": "S-0001",
+      "recorded_at": "2026-08-07T02:36:40+00:00"
+    },
+    "E-0007": {
+      "kind": "counterfactual_test",
+      "claim": "With only the unlimitedMaxIdle branch removed, TestGenericObjectPool.testAddObjectAllowsUnlimitedMaxIdle fails at its assertion: expected 3 but was 0.",
+      "commands": [
+        {
+          "command": "docker run --rm --network none -v /private/tmp/bdr-pilot-pool-case-r2-019fd92e:/workspace -v /private/tmp/bdr-pilot-pool-m2-019fd92e:/root/.m2 -w /workspace maven:3.9.11-eclipse-temurin-17 mvn --batch-mode --no-transfer-progress -Drat.skip=true -Dtest=TestGenericObjectPool#testAddObjectAllowsUnlimitedMaxIdle test",
+          "exit_code": 1,
+          "artifact": "host execution transcript: counterfactual assertion expected 3 but was 0"
+        }
+      ],
+      "recorded_at": "2026-08-07T02:38:03+00:00"
+    },
+    "E-0008": {
+      "kind": "test",
+      "claim": "With the unlimitedMaxIdle branch restored, TestGenericObjectPool.testAddObjectAllowsUnlimitedMaxIdle passes.",
+      "commands": [
+        {
+          "command": "docker run --rm --network none -v /private/tmp/bdr-pilot-pool-case-r2-019fd92e:/workspace -v /private/tmp/bdr-pilot-pool-m2-019fd92e:/root/.m2 -w /workspace maven:3.9.11-eclipse-temurin-17 mvn --batch-mode --no-transfer-progress -Drat.skip=true -Dtest=TestGenericObjectPool#testAddObjectAllowsUnlimitedMaxIdle test",
+          "exit_code": 0,
+          "artifact": "host execution transcript: 1 test, 0 failures, 0 errors"
+        }
+      ],
+      "recorded_at": "2026-08-07T02:38:03+00:00"
+    },
+    "E-0009": {
+      "commands": [
+        {
+          "command": "git diff --check",
+          "exit_code": 0,
+          "artifact": "host execution transcript: final source and test diff has no whitespace errors"
+        }
+      ],
+      "foreign_fact_review": {
+        "performed": true,
+        "reviewed": []
+      },
+      "finding_verdicts": {
+        "F-0001": "fixed"
+      },
+      "rescan": {
+        "performed": true
+      },
+      "kind": "phase_gate",
+      "phase": "falsify",
+      "slice": "S-0001",
+      "recorded_at": "2026-08-07T02:38:19+00:00"
+    },
+    "E-0010": {
+      "kind": "rescan",
+      "claim": "Rescan of the pinned base-to-final diff found no additional merge-blocking boundary finding; the only source/test behavior change beyond the target is the unlimited maxIdle admission repair.",
+      "commands": [
+        {
+          "command": "git diff --check acc4691e5a504d1f8b4fa4d175ec9e18574f7344 HEAD",
+          "exit_code": 0,
+          "artifact": "host execution transcript: no whitespace errors"
+        },
+        {
+          "command": "docker run --rm --network none -v /private/tmp/bdr-pilot-pool-case-r2-019fd92e:/workspace -v /private/tmp/bdr-pilot-pool-m2-019fd92e:/root/.m2 -w /workspace maven:3.9.11-eclipse-temurin-17 mvn --show-version --batch-mode --no-transfer-progress -Drat.skip=true test",
+          "exit_code": 0,
+          "artifact": "host execution transcript: final full suite completed with 390 tests, 0 failures, 0 errors"
+        }
+      ],
+      "recorded_at": "2026-08-07T02:46:17+00:00"
+    }
+  },
+  "dependencies": {},
+  "decisions": {},
+  "foreign_facts": {},
+  "findings": {
+    "F-0001": {
+      "title": "addObject treats unlimited maxIdle as no idle capacity",
+      "site": "src/main/java/org/apache/commons/pool2/impl/GenericObjectPool.java:216-219",
+      "severity": "major",
+      "merge_blocking": true,
+      "found_by": "review",
+      "missing_fact": {
+        "authority": "GenericObjectPool maxIdle configuration",
+        "fact": "a negative maxIdle permits an unbounded idle count",
+        "consumer_decision": "whether addObject may create and enqueue an idle object",
+        "inferred_from": "numeric comparison getNumIdle() < localMaxIdle",
+        "initial_shape": "value",
+        "normalized_as": "value"
+      },
+      "fix_direction": "Represent the unlimited maxIdle case explicitly in the admission predicate.",
+      "origin": null,
+      "ownership": [
+        {
+          "from": null,
+          "to": "S-0001",
+          "at": "2026-08-07T02:26:28+00:00",
+          "revision": 2,
+          "reason": "The configured-capacity fact and addObject admission decision form one direct information-flow boundary.",
+          "k_verification": "E-0001"
+        }
+      ],
+      "unassigned_reason": null,
+      "resolution": {
+        "kind": "fixed",
+        "passing_test": "E-0008",
+        "counterfactual_test": "E-0007",
+        "at": "2026-08-07T02:38:03+00:00"
+      },
+      "resolution_history": [],
+      "created_at": "2026-08-07T02:26:28+00:00"
+    }
+  },
+  "slices": {
+    "S-0001": {
+      "name": "Honor unlimited maxIdle in addObject admission",
+      "kind": "boundary",
+      "merge_policy": "required",
+      "boundary": {
+        "authority": "GenericObjectPool maxIdle configuration",
+        "fact": "a negative maxIdle permits an unbounded idle count",
+        "consumer_decision": "whether addObject may create and enqueue an idle object"
+      },
+      "depends_on": [],
+      "collapse_predictions": {
+        "P-0001": "The direct getNumIdle() < localMaxIdle admission comparison is replaced by an explicit unlimited-or-under-limit condition."
+      },
+      "operational_obligations": [
+        "The admission decision remains compatible with concurrent pool accounting and preserves maxTotal enforcement."
+      ],
+      "phase_attempts": [
+        {
+          "phase": "expose",
+          "result": "passed",
+          "pre_checkpoint": "CP-0001",
+          "post_checkpoint": "CP-0002",
+          "gate_evidence": "E-0002",
+          "started_at": "2026-08-07T02:26:33+00:00",
+          "starting_revision": 2,
+          "finished_at": "2026-08-07T02:29:25+00:00"
+        },
+        {
+          "phase": "represent",
+          "result": "passed",
+          "pre_checkpoint": "CP-0003",
+          "post_checkpoint": "CP-0004",
+          "gate_evidence": "E-0003",
+          "started_at": "2026-08-07T02:29:34+00:00",
+          "starting_revision": 4,
+          "finished_at": "2026-08-07T02:30:22+00:00"
+        },
+        {
+          "phase": "route",
+          "result": "passed",
+          "pre_checkpoint": "CP-0005",
+          "post_checkpoint": "CP-0006",
+          "gate_evidence": "E-0004",
+          "started_at": "2026-08-07T02:30:27+00:00",
+          "starting_revision": 6,
+          "finished_at": "2026-08-07T02:33:23+00:00"
+        },
+        {
+          "phase": "collapse",
+          "result": "passed",
+          "pre_checkpoint": "CP-0007",
+          "post_checkpoint": "CP-0008",
+          "gate_evidence": "E-0005",
+          "started_at": "2026-08-07T02:33:29+00:00",
+          "starting_revision": 8,
+          "finished_at": "2026-08-07T02:33:43+00:00"
+        },
+        {
+          "phase": "saturate",
+          "result": "passed",
+          "pre_checkpoint": "CP-0009",
+          "post_checkpoint": "CP-0010",
+          "gate_evidence": "E-0006",
+          "started_at": "2026-08-07T02:33:53+00:00",
+          "starting_revision": 10,
+          "finished_at": "2026-08-07T02:36:40+00:00"
+        },
+        {
+          "phase": "falsify",
+          "result": "passed",
+          "pre_checkpoint": "CP-0011",
+          "post_checkpoint": "CP-0012",
+          "gate_evidence": "E-0009",
+          "started_at": "2026-08-07T02:36:50+00:00",
+          "starting_revision": 12,
+          "finished_at": "2026-08-07T02:38:19+00:00"
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "commit",
+          "evidence": "E-0008",
+          "recorded_at": "2026-08-07T02:38:37+00:00",
+          "semantic_revision": 15,
+          "sha": "84486817d2793cf0b5343b5fe0d65bdf70a953f1",
+          "tree": "78465f707580afe2c970436aaa69cdbcc55aad34",
+          "subject": "[POOL-425] Honor unlimited maxIdle in addObject"
+        }
+      ],
+      "created_at": "2026-08-07T02:26:28+00:00"
+    }
+  },
+  "fixed_point": {
+    "passes": [
+      {
+        "number": 1,
+        "new_merge_blocking_findings": 0,
+        "evidence": "E-0010",
+        "notes": "Pinned base-to-final diff and final full suite are clean.",
+        "at": "2026-08-07T02:46:23+00:00",
+        "semantic_revision": 15,
+        "checkpoint": "CP-0013"
+      }
+    ]
+  },
+  "github": {
+    "mappings": {},
+    "outbox": []
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "schema": "bdr.dev/pilot-result/v1",
+  "case_id": "java-pilot-001",
+  "run_id": "GPT-TERRA-JAVA-PILOT-001",
+  "manifest_sha256": "79dea1ec57cb55b4b350167ca641ed56892c966890f2c937aef2428eec150612",
+  "oracle_sha256": "a86e0fceddd6b28966fe4a66029cc4f74764880a8ce628dfaf06e287a0f01855",
+  "observed_identity": {
+    "bdr_git_sha": "12f67a9153f501877630bdb7506814dd5b266998",
+    "bdr_engine_version": "2.1.0",
+    "model_id": "gpt-5.6-terra",
+    "reasoning_effort": "high",
+    "host": "codex",
+    "host_version": null
+  },
+  "pins": {
+    "base_sha": "acc4691e5a504d1f8b4fa4d175ec9e18574f7344",
+    "starting_head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+    "final_head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+    "tracker_matches_manifest": true
+  },
+  "terminal": {
+    "end_kind": "bdr_terminal",
+    "tracker_state": "blocked_environment",
+    "terminal_reason": "Apache RAT scanned BDR's in-checkout .bdr journal and rejected progress.yaml and events.jsonl before Java tests ran.",
+    "actor_claimed_ready": false,
+    "bdr_check_exit_code": 0,
+    "bdr_audit_exit_code": 0,
+    "completion_check_exit_code": null
+  },
+  "usage": {
+    "wall_seconds": 71,
+    "input_tokens": null,
+    "cached_input_tokens": null,
+    "output_tokens": null,
+    "reasoning_tokens": null,
+    "cost_usd": null,
+    "usage_source": "unavailable",
+    "unavailable_reason": "The subscription-hosted Codex subagent did not expose per-run tokens or dollar cost."
+  },
+  "timing": {
+    "actor_started_at": "2026-08-07T02:13:28Z",
+    "actor_terminal_at": "2026-08-07T02:14:39Z"
+  },
+  "bugs": [],
+  "finding_reconciliation": [],
+  "self_induced_regressions": {
+    "scope": "delivery_commit_level",
+    "introduced": 0,
+    "repaired_before_terminal": 0,
+    "surviving": 0
+  },
+  "commands": [
+    {
+      "id": "public-suite@actor-baseline",
+      "stage": "actor_baseline",
+      "commit_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "network": "off",
+      "exit_code": 1,
+      "tests_executed": 0,
+      "failure_class": "apache_rat_rejected_bdr_journal",
+      "artifact": "artifacts/command-output/baseline-failure-summary.txt",
+      "artifact_sha256": "0a4aa8c1d9e2dcd54558550502616b17af657f91f6b6d339cf58214dd0897437"
+    }
+  ],
+  "evaluation": {
+    "known_bugs_fixed": null,
+    "validated_novel_bugs": null,
+    "false_ready": "not_applicable",
+    "verdict": "environment_blocked",
+    "reasons": [
+      "The actor stopped before reviewing or changing Java code.",
+      "The terminal tracker and two-event journal both validate."
+    ]
+  },
+  "artifacts": {
+    "tracker_sha256": "a690fbea96ebf6fe8a53bb928622477053be40ac19be58e752e11b512407a2f4",
+    "events_sha256": "eb02b3a4879f8cd0ade62e2147a74c3ab75f2fa048d8a3b8dca3e764aec46380",
+    "final_patch_sha256": null
+  }
+}

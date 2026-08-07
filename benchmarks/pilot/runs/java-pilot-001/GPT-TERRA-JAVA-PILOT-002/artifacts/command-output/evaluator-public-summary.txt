@@ -1,0 +1,14 @@
+run_id: GPT-TERRA-JAVA-PILOT-002
+stage: evaluator_final_public
+commit_sha: 84486817d2793cf0b5343b5fe0d65bdf70a953f1
+command: mvn --show-version --batch-mode --no-transfer-progress test
+network: off
+exit_code: 0
+maven_total_time: 07:24 min
+tests: 390
+failures: 0
+errors: 0
+skipped: 11
+apache_rat_approved: 152
+apache_rat_unapproved: 0
+finished_at: 2026-08-07T02:55:51Z

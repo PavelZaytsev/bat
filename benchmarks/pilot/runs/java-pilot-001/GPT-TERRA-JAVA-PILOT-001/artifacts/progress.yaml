@@ -1,0 +1,58 @@
+{
+  "schema": "bdr.dev/tracker",
+  "schema_version": 2,
+  "minimum_validator_version": "2.1.0",
+  "revision": 1,
+  "semantic_revision": 1,
+  "source": {
+    "repository": "bdr-pilot-pool-case-019fd92e",
+    "pr": null,
+    "base_sha": "acc4691e5a504d1f8b4fa4d175ec9e18574f7344",
+    "starting_head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+    "branch": "main",
+    "root": "/private/tmp/bdr-pilot-pool-case-019fd92e",
+    "audit_dir": ".bdr",
+    "tracker_path": ".bdr/progress.yaml",
+    "policy_inputs": []
+  },
+  "policy": {
+    "higher_risk": "requires_human_approval",
+    "github_projection": "off",
+    "push": "never",
+    "max_fixed_point_passes": 3,
+    "max_phase_attempts": 4
+  },
+  "run": {
+    "id": "GPT-TERRA-JAVA-PILOT-001",
+    "state": "blocked_environment",
+    "created_at": "2026-08-07T02:13:28+00:00",
+    "updated_at": "2026-08-07T02:14:39+00:00",
+    "baseline": {
+      "usable": false,
+      "commands": [
+        {
+          "command": "docker run --rm --network=none -v /private/tmp/bdr-pilot-pool-case-019fd92e:/workspace -v /private/tmp/bdr-pilot-pool-m2-019fd92e:/root/.m2 -w /workspace maven:3.9.11-eclipse-temurin-17 mvn --show-version --batch-mode --no-transfer-progress test",
+          "exit_code": 1,
+          "output_digest": "sha256:3fd36bd0ecf04d4f9b07d65e72b33990a5c0f96d1f0c402e9f9f9bb555fa3964"
+        }
+      ],
+      "failure": "The required complete Maven test command cannot pass after BDR initialization because Apache RAT reports .bdr/progress.yaml and .bdr/events.jsonl as unapproved files."
+    },
+    "terminal_reason": null
+  },
+  "active_operation": null,
+  "checkpoints": {},
+  "evidence": {},
+  "dependencies": {},
+  "decisions": {},
+  "foreign_facts": {},
+  "findings": {},
+  "slices": {},
+  "fixed_point": {
+    "passes": []
+  },
+  "github": {
+    "mappings": {},
+    "outbox": []
+  }
+}

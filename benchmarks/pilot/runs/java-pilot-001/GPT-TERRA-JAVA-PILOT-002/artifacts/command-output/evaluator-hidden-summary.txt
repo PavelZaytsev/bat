@@ -1,0 +1,12 @@
+run_id: GPT-TERRA-JAVA-PILOT-002
+stage: evaluator_final_hidden
+commit_sha: 84486817d2793cf0b5343b5fe0d65bdf70a953f1
+command: mvn --batch-mode --no-transfer-progress -Drat.skip=true -Dtest=PoolUnlimitedMaxIdleHiddenTest test
+network: off
+exit_code: 0
+wall_seconds: 10.884
+tests: 1
+failures: 0
+errors: 0
+skipped: 0
+finished_at: 2026-08-07T02:47:49Z

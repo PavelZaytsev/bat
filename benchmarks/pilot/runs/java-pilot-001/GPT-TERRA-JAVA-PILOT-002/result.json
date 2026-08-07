@@ -1,0 +1,204 @@
+{
+  "schema": "bdr.dev/pilot-result/v1",
+  "case_id": "java-pilot-001",
+  "run_id": "GPT-TERRA-JAVA-PILOT-002",
+  "manifest_sha256": "79dea1ec57cb55b4b350167ca641ed56892c966890f2c937aef2428eec150612",
+  "oracle_sha256": "a86e0fceddd6b28966fe4a66029cc4f74764880a8ce628dfaf06e287a0f01855",
+  "observed_identity": {
+    "bdr_git_sha": "12f67a9153f501877630bdb7506814dd5b266998",
+    "bdr_engine_version": "2.1.0",
+    "model_id": "gpt-5.6-terra",
+    "reasoning_effort": "high",
+    "host": "codex",
+    "host_version": null
+  },
+  "pins": {
+    "base_sha": "acc4691e5a504d1f8b4fa4d175ec9e18574f7344",
+    "starting_head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+    "final_head_sha": "84486817d2793cf0b5343b5fe0d65bdf70a953f1",
+    "tracker_matches_manifest": true
+  },
+  "terminal": {
+    "end_kind": "bdr_terminal",
+    "tracker_state": "ready_for_review",
+    "terminal_reason": null,
+    "actor_claimed_ready": true,
+    "bdr_check_exit_code": 0,
+    "bdr_audit_exit_code": 0,
+    "completion_check_exit_code": null,
+    "completion_check_unavailable_reason": "Eligibility was not captured immediately before the terminal transition; a post-terminal probe is intentionally ineligible because the run is no longer in verifying state."
+  },
+  "usage": {
+    "wall_seconds": 1732,
+    "evaluation_wall_seconds": 455,
+    "input_tokens": null,
+    "cached_input_tokens": null,
+    "output_tokens": null,
+    "reasoning_tokens": null,
+    "cost_usd": null,
+    "usage_source": "unavailable",
+    "unavailable_reason": "The subscription-hosted Codex subagent did not expose per-run tokens or dollar cost."
+  },
+  "timing": {
+    "actor_started_at": "2026-08-07T02:17:38Z",
+    "actor_terminal_at": "2026-08-07T02:46:30Z",
+    "evaluation_completed_at": "2026-08-07T02:55:51Z"
+  },
+  "blindness_controls": {
+    "actor_network": "off",
+    "target_remote_count": 0,
+    "target_commit_count": 2,
+    "oracle_disclosed_to_actor": false,
+    "future_fix_reachable_from_target_git": false,
+    "subagents": "disabled",
+    "filesystem_oracle_isolation": "path separation plus explicit actor prohibition; not kernel-enforced in this desktop pilot",
+    "strength": "directional_smoke_test"
+  },
+  "protocol_deviations": [
+    {
+      "id": "D-001",
+      "triggered_by_run_id": "GPT-TERRA-JAVA-PILOT-001",
+      "description": "The retry added -Drat.skip=true to actor Maven commands so Apache RAT would not scan BDR's .bdr journal.",
+      "impact": "Only the license scanner was skipped in the actor workspace; Java tests remained mandatory. The independent final evaluator ran the full suite with RAT enabled and passed with zero unapproved files."
+    },
+    {
+      "id": "D-002",
+      "description": "The retry continued in the same model context after the environment-only launch.",
+      "impact": "The first launch reached no audit, finding, or code-edit phase, but a stricter comparative benchmark should use a fresh model context for every attempt."
+    }
+  ],
+  "bugs": [
+    {
+      "id": "K-001",
+      "class": "known",
+      "oracle_id": "K-001",
+      "bdr_finding_ids": [
+        "F-0001"
+      ],
+      "present_at_head": true,
+      "introduced_at_sha": null,
+      "fixed_at_sha": "84486817d2793cf0b5343b5fe0d65bdf70a953f1",
+      "final_status": "fixed",
+      "validation_command_ids": [
+        "K-001-test@head-preflight",
+        "F-0001-counterfactual@actor",
+        "K-001-test@evaluator-final",
+        "public-suite@evaluator-final"
+      ]
+    }
+  ],
+  "finding_reconciliation": [
+    {
+      "bdr_finding_id": "F-0001",
+      "outcome": "confirmed_known_bug",
+      "bug_id": "K-001"
+    }
+  ],
+  "self_induced_regressions": {
+    "scope": "delivery_commit_level",
+    "delivery_commits_evaluated": 1,
+    "introduced": 0,
+    "repaired_before_terminal": 0,
+    "surviving": 0
+  },
+  "commands": [
+    {
+      "id": "K-001-test@head-preflight",
+      "stage": "sealed_oracle_preflight",
+      "commit_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "network": "off",
+      "exit_code": 1,
+      "failure_fingerprint": "expected: <1> but was: <0>",
+      "oracle_asset_sha256": "ad622c91abb50e3b71fa2785cb0c1ff6ab2d1cbeedde03fb859b386c243594a8"
+    },
+    {
+      "id": "public-suite@actor-baseline",
+      "stage": "actor_baseline",
+      "commit_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+      "network": "off",
+      "rat_skipped": true,
+      "exit_code": 0,
+      "tests": 389,
+      "failures": 0,
+      "errors": 0
+    },
+    {
+      "id": "F-0001-counterfactual@actor",
+      "stage": "actor_falsify",
+      "commit_sha": "worktree_counterfactual",
+      "network": "off",
+      "rat_skipped": true,
+      "exit_code": 1,
+      "failure_fingerprint": "expected: <3> but was: <0>"
+    },
+    {
+      "id": "public-suite@actor-final",
+      "stage": "actor_fixed_point",
+      "commit_sha": "84486817d2793cf0b5343b5fe0d65bdf70a953f1",
+      "network": "off",
+      "rat_skipped": true,
+      "exit_code": 0,
+      "tests": 390,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 11
+    },
+    {
+      "id": "K-001-test@evaluator-final",
+      "stage": "evaluator_final_hidden",
+      "commit_sha": "84486817d2793cf0b5343b5fe0d65bdf70a953f1",
+      "network": "off",
+      "rat_skipped": true,
+      "exit_code": 0,
+      "duration_ms": 10884,
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "artifact": "artifacts/command-output/evaluator-hidden-summary.txt",
+      "artifact_sha256": "af84abe75d9cf2b439cc8816ffbf8e6960dc7992d894afc1375596295f7b566e"
+    },
+    {
+      "id": "public-suite@evaluator-final",
+      "stage": "evaluator_final_public",
+      "commit_sha": "84486817d2793cf0b5343b5fe0d65bdf70a953f1",
+      "network": "off",
+      "rat_skipped": false,
+      "exit_code": 0,
+      "duration_ms": 444000,
+      "tests": 390,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 11,
+      "apache_rat_unapproved": 0,
+      "artifact": "artifacts/command-output/evaluator-public-summary.txt",
+      "artifact_sha256": "dd430b24ee7c8a323602e2288e70223d425a1a6535274df3d3709b531719f03b"
+    },
+    {
+      "id": "bdr-check@evaluator-final",
+      "stage": "evaluator_final_tracker",
+      "commit_sha": "84486817d2793cf0b5343b5fe0d65bdf70a953f1",
+      "exit_code": 0,
+      "result": "VALID revision=19 state=ready_for_review",
+      "artifact": "artifacts/command-output/bdr-check-summary.txt",
+      "artifact_sha256": "1d341bca45b623543179c78e129cfa1baf4bbacfea4ded68ec4ff0988f8e35ec"
+    }
+  ],
+  "evaluation": {
+    "known_bugs_fixed": 1,
+    "validated_novel_bugs": 0,
+    "false_ready": "no",
+    "verdict": "pass",
+    "reasons": [
+      "The sole BDR finding semantically matches the sealed K-001 defect.",
+      "The sealed hidden regression test passes at the final commit.",
+      "The independent full public suite passes with 390 tests, zero failures, zero errors, and 11 existing skips.",
+      "BDR check and audit validate the revision-19 ready_for_review tracker and 20-event journal."
+    ]
+  },
+  "artifacts": {
+    "tracker_sha256": "deddbc2100cc14393e324008effb22f308e6e2671f3094a55ee9e98f4ac5feec",
+    "events_sha256": "2bf4764d46ab514628d9573c42feac7516657a4fc160ab5fd9a6802ddf9c409b",
+    "final_patch_sha256": "5ecb80e3f6a3dfce48ef562029e5f2dfe97abcf75cb71aecce4e53062a7f43dd",
+    "repository_bundle_sha256": "2be0530fa86d10996e5be68101e17e366b2d116070fe4bd7d94f3d87a7daad9b"
+  }
+}

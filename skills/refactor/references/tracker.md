@@ -59,7 +59,10 @@ a durable actor name.
   revision 0 and the journal. It refuses a dirty non-BDR worktree or existing state/journal. If no
   base is supplied it uses `HEAD^`. A supplied/resolved base must be an ancestor and the pinned
   head must equal checkout `HEAD`. Ref names and abbreviated hashes are resolved once; state stores
-  canonical full commit object IDs, and validation rejects older floating/abbreviated pins.
+  canonical full commit object IDs, and validation rejects older floating/abbreviated pins. New
+  trackers record the creating engine as `minimum_validator_version`. The 2.2 validator continues
+  to accept command-backed 2.1 trackers; using a 2.2 lean gate form in an existing tracker raises
+  that floor before the new form is committed to the journal.
 - `bdr check [--json]` validates state, references, phase replay, readiness claims, repository
   binding, local Git lineage, and journal hashes. A ready state also has to match its final
   fixed-point workspace fingerprint. It validates evidence shape; it does not execute tests or
@@ -163,15 +166,19 @@ the later children refer to objects created earlier in the same atomic mutation.
   moves it to `blocked_environment`. When replacing a baseline from an intervention/failure state,
   existing `kind:"resume"` evidence is mandatory. Readiness requires `usable:true` and valid commands.
 - Record fixed-point pass:
-  `{ "type":"record_fixed_point", "pass":{"new_merge_blocking_findings":0, "evidence":"E-rescan", "number":N?, "notes":"optional scope or context"?} }`.
-  Evidence must exist with `kind:"rescan"`, every required slice must already have a current
-  delivery, and merge-blocking findings must be resolved. The engine records the current semantic
-  revision and a workspace checkpoint.
+  `{ "type":"record_fixed_point", "pass":{"new_merge_blocking_findings":0, "evidence":"E-rescan", "commands":[FINAL_SUITE_COMMAND,...], "number":N?, "notes":"optional scope or context"?} }`.
+  Evidence must exist with `kind:"rescan"`; every command must succeed and represent the final
+  broad verification selected for this repository. Every required slice must already have a
+  current delivery, and merge-blocking findings must be resolved. The engine records the current
+  semantic revision and a workspace checkpoint.
   Reaching the configured pass bound with a nonzero count sets `non_convergent`.
 - Record slice delivery after FALSIFY:
   `{ "type":"record_delivery", "slice":"S-0001", "kind":"commit", "sha":"SHA"?, "evidence":"E-verification" }`, or
   `{ "type":"record_delivery", "slice":"S-0001", "kind":"no_code_change", "reason":"falsified/superseded", "evidence":"E-verification" }`.
-  Evidence must have `kind:"test"` or `kind:"verification"`, and the code worktree must be clean.
+  Evidence must have `kind:"test"` or `kind:"verification"`, or name the SATURATE gate linked
+  through the same slice's unchanged passed FALSIFY attempt. SATURATE evidence is valid only for a
+  commit whose aggregate delta from the verified base exactly matches the FALSIFY post-checkpoint;
+  `no_code_change` needs standalone test/verification evidence. The code worktree must be clean.
   Commit delivery advances the ordered frontier from the pinned target: every post-target commit
   must be attributed exactly once, and the original PR head is never a delivery. Any later semantic
   mutation makes all prior delivery attestations stale; after the work settles, re-record each
@@ -265,9 +272,10 @@ Supported `RESOLUTION` forms:
   the stopped record.
 
 Referenced evidence is type-checked where authority matters: ownership transfer requires
-`kind:"code_read"`; fixed/split passing evidence requires `test` or `verification`;
-counterfactual evidence requires `counterfactual_test`; and higher-risk approval or decision
-resolution requires `human_approval`. The agent may not create its own human approval evidence.
+`kind:"code_read"`; fixed/split passing evidence requires `test`, `verification`, or the current
+owner slice's SATURATE gate while its unchanged FALSIFY attempt is active or passed; counterfactual evidence requires
+`counterfactual_test`; and higher-risk approval or decision resolution requires `human_approval`.
+The agent may not create its own human approval evidence.
 
 ## Phase transitions and gate evidence
 
@@ -291,8 +299,8 @@ Results are `passed`, `failed`, or `blocked`. Finish stores the gate as evidence
 post-checkpoint, appends the attempt, and clears `active_operation`. Only `passed` advances. A
 failed/blocked attempt leaves the same phase next. Detailed phase fields apply to passed attempts;
 a blocked gate must additionally contain
-`"blocked":{"dependency":"D-...","owner":"person/team"}`. Record commands, observations,
-foreign facts, and the failure/blocker on every outcome.
+`"blocked":{"dependency":"D-...","owner":"person/team"}`. Record commands that were actually
+run, observations, relevant foreign facts, and the failure/blocker on every outcome.
 
 To invalidate a completed suffix, first finish any active attempt, restore or deliberately retain
 code with evidence, then run:
@@ -303,23 +311,46 @@ The target must be at or before current progress. Rewind changes logical phase h
 does not restore files or Git commits. Invalidated suffix gates remain immutable historical
 evidence, but they are no longer compared with the slice's current predictions, obligations, or
 introduced-risk claims. Gates in the still-live prefix continue to be checked against current
-state.
+state. Rewinding to FALSIFY or earlier automatically moves any SATURATE-backed fixed/split
+resolution into `resolution_history` with its original verification slice, reopens that finding,
+and makes its delivery stale. A later reassignment does not rewrite that historical owner.
 
-Every passed gate requires:
+Command records have this shape; use `artifact` instead of `output_digest` when appropriate:
 
 ```json
 {
   "commands": [
     {"command": "descriptive command", "exit_code": 0, "output_digest": "sha256:..."}
-  ],
-  "foreign_fact_review": {"performed": true, "reviewed": ["FF-..."]}
+  ]
 }
 ```
 
-`reviewed` must exactly equal the foreign facts whose `depended_on_by` includes this slice; use
-`[]` when there are none. Use `artifact` instead of `output_digest` when appropriate. A passed
-EXPOSE gate must contain a deliberately nonzero test command; every other passed gate requires
-successful commands. Add the following phase fields:
+The six phases remain mandatory, but their command rules differ:
+
+- EXPOSE commands are mandatory and must include the deliberately failing assertion command.
+- REPRESENT, ROUTE, and COLLAPSE may omit `commands`. If supplied, `commands` must be a nonempty,
+  well-formed list and every command must succeed; `commands:[]` is not omission.
+- SATURATE commands are mandatory and every command must succeed.
+- New 2.2 FALSIFY gates must name reusable verification with
+  `"saturate_evidence":"E-saturate"`. A command-backed FALSIFY without that field remains valid
+  only as historical 2.1 evidence. If the workspace changed, rewind to SATURATE and rerun the
+  focused green selection instead of substituting another successful command.
+
+`foreign_fact_review` is optional except at FALSIFY when one or more foreign facts have this slice
+in `depended_on_by`. Omission means the key is absent; an explicit `null` is invalid. When supplied
+at any phase it must contain `performed:true`, and `reviewed`
+must exactly equal all foreign facts currently relied on by the slice. A FALSIFY gate with no
+relevant foreign facts may omit the review instead of recording an empty list.
+
+FALSIFY `saturate_evidence` must name this same slice's current live passed SATURATE gate, and that
+gate must contain successful commands. Reuse is fresh only when SATURATE's post-checkpoint,
+FALSIFY's pre-checkpoint, and FALSIFY's post-checkpoint have identical `head_sha`,
+`worktree_sha256`, `content_delta_sha256`, and `dirty` values. A rewind, evidence from another
+slice, a stale SATURATE attempt, or workspace drift before or during FALSIFY rejects reuse. A
+SATURATE-backed delivery commit must reproduce that content delta exactly. Restore the
+SATURATE-verified workspace or rewind and rerun SATURATE; do not substitute a stale reference.
+
+Add the following phase fields:
 
 - **EXPOSE:** `finding_id`, `test`, and `baseline_ref` as nonempty strings. The gate's `slice`
   must match the attempted slice, and `finding_id` must name a finding owned by that slice when
@@ -338,6 +369,9 @@ successful commands. Add the following phase fields:
   do not use the latter to excuse an ineffective representation.
 - **SATURATE:** nonempty `structural_tests`; `operational_proofs` with exactly every slice
   `operational_obligations` key and existing evidence IDs as values; `input_space_covered:true`.
+  Its live successful gate evidence may also serve as a fixed/split finding's `passing_test` during
+  the linked FALSIFY attempt and as that slice's delivery evidence after FALSIFY passes; the
+  separate `counterfactual_test` requirement is unchanged.
 - **FALSIFY:** `finding_verdicts` keyed exactly by every finding ever assigned to the slice, with
   values `fixed`, `split`, or `superseded`; a move is
   `{"verdict":"moved","ownership_revision":N}` and cites the latest departure from this slice.
@@ -347,14 +381,22 @@ successful commands. Add the following phase fields:
   the standalone `finish_phase`. Every fixed/split finding separately requires passing and
   counterfactual evidence.
 
+The tracker schema remains V2. A fully command-backed 2.1 phase history with explicit
+`foreign_fact_review` records remains valid under 2.2. Finishing an existing tracker with a
+commandless REPRESENT/ROUTE/COLLAPSE gate, a FALSIFY `saturate_evidence` reference, or an omitted
+`foreign_fact_review` raises `minimum_validator_version` to 2.2.0. Reusing a SATURATE gate for a
+fixed/split resolution or delivery, or recording command-backed final-suite evidence, raises the
+same floor. Older validators must refuse that tracker rather than reinterpret the lean evidence.
+
 ## Fixed point and readiness
 
 After all required slices have passed FALSIFY and their findings are resolved:
 
 1. Commit each code-changing slice and record its delivery; use evidence-backed `no_code_change`
    only when the slice genuinely changed no code.
-2. Add rescan evidence.
-3. Record a fixed-point pass. Add and process any new merge-blocking findings, then rescan again.
+2. Add rescan evidence and run the final broad suite once.
+3. Record a fixed-point pass with the successful final-suite commands. Add and process any new
+   merge-blocking findings, then rescan and rerun the final suite after that semantic/code work.
 4. Require the latest pass to report `new_merge_blocking_findings:0` at or before the configured
    bound and at the current semantic revision.
 5. If projection mode is `sync` or `outbox`, run `project_github`, process `bdr github-outbox`, and
@@ -368,7 +410,7 @@ slice complete and currently delivered, at least one required slice and finding,
 attribution of every post-target commit, each required finding fixed/split/superseded or genuinely moved, no
 required unclassified finding, no merge-blocking unassigned/optional-only finding, no open required
 decision, no assumed foreign fact, and a clean current fixed-point pass whose workspace fingerprint
-still matches. `outbox` mode cannot become ready. `sync` requires every required slice to have a
+still matches and whose final-suite commands succeeded. `outbox` mode cannot become ready. `sync` requires every required slice to have a
 mapping and the outbox to be empty. `off` is allowed only when issue projection was explicitly
 disabled. `ready_for_review` is the only positive readiness state.
 
@@ -377,6 +419,10 @@ and run-state bookkeeping does not. A clean pass predating semantic work is stal
 count was zero. Finish all runnable phases before final delivery re-attestation: `status --next`
 prioritizes runnable slice work, then asks for each stale delivery in frontier order. Tracked and
 nonignored-untracked code changes after the pass are caught by its Git/worktree fingerprint.
+SATURATE-to-FALSIFY reuse deliberately uses checkpoint workspace equality rather than
+`semantic_revision`: beginning FALSIFY and resolving its findings are semantic bookkeeping even
+when the tested source and tests are unchanged. This exception does not keep deliveries or
+fixed-point passes fresh across later semantic mutations.
 
 ## Migration
 
@@ -417,8 +463,8 @@ recovery decision.
 
 Account for these implemented limits instead of assuming the validator proves more:
 
-- Checkpoints are fingerprints (`HEAD`, worktree digest, dirty flag), not snapshots or recoverable
-  Git refs. Neither rewind nor recovery restores code.
+- Checkpoints are fingerprints (`HEAD`, worktree digest, dirty flag, and a changed-content delta at
+  SATURATE/FALSIFY), not snapshots or recoverable Git refs. Neither rewind nor recovery restores code.
 - The local hash chain is not a digital signature. It detects accidental/direct drift after an
   anchored event, but a hostile checkout can fabricate an entire state plus unkeyed journal. On a
   fresh clone, revalidate code/tests and anchor audit hashes in trusted Git/review history.
@@ -446,6 +492,20 @@ Account for these implemented limits instead of assuming the validator proves mo
   tracker, journal, and engine lock files. Git-ignored untracked/generated/configuration inputs are
   not hashed. Run verification in an isolated environment and explicitly account for ignored inputs
   that can affect behavior; do not treat their absence from the fingerprint as proof they were stable.
+- SATURATE-to-delivery reuse fingerprints regular files through Git's path-aware clean conversion,
+  so built-in line-ending/encoding rules and configured clean filters match the blobs a commit would
+  store. Effective tree modes also come from Git, preserving `core.fileMode=false` and
+  `core.symlinks=false` semantics instead of trusting host filesystem bits. Path-aware hashing can
+  execute a configured clean-filter process and therefore belongs inside the same least-privileged
+  boundary as other target-sensitive Git/build operations. If a required filter is unavailable or
+  fails, record separate `test` or `verification` evidence for delivery instead of weakening the
+  binding.
+- A dirty changed submodule cannot use SATURATE-to-delivery reuse because its parent commit can bind
+  only the submodule commit ID, not uncommitted nested content. Commit and verify that nested change,
+  or use separate delivery evidence.
+- SATURATE/FALSIFY and final fixed-point checkpoints reject `assume-unchanged` entries and present
+  `skip-worktree` entries, recursively across initialized submodules. Those flags can otherwise hide
+  bytes used by tests from Git's delivery comparison. Absent sparse-checkout entries remain valid.
 - State records an absolute repository binding and is a working-copy sidecar, not a clone-portable
   artifact. Git history, issue projection, and exported audit hashes are the durable cross-clone trail.
 - Atomic replace, process locking, Git pathspec behavior, and launchers have been exercised on the

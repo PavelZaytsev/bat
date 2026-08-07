@@ -1,0 +1,62 @@
+{
+  "schema": "bdr.dev/pilot-oracle/v1",
+  "case_id": "java-pilot-001",
+  "target": {
+    "base_sha": "acc4691e5a504d1f8b4fa4d175ec9e18574f7344",
+    "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673"
+  },
+  "known_bugs": [
+    {
+      "id": "K-001",
+      "summary": "The target change treats the negative maxIdle sentinel as an ordinary numeric bound, so addObject() becomes a no-op when idle capacity is unlimited.",
+      "test_asset": {
+        "path": "K-001.patch",
+        "sha256": "ad622c91abb50e3b71fa2785cb0c1ff6ab2d1cbeedde03fb859b386c243594a8"
+      },
+      "command": {
+        "id": "K-001-test",
+        "argv": [
+          "mvn",
+          "--batch-mode",
+          "--no-transfer-progress",
+          "-Dtest=PoolUnlimitedMaxIdleHiddenTest",
+          "test"
+        ],
+        "cwd": ".",
+        "timeout_seconds": 180,
+        "network": "off"
+      },
+      "expected_at_base": {
+        "exit_code": 0
+      },
+      "expected_at_head": {
+        "exit_code": 1,
+        "failure_fingerprint": "expected: <1> but was: <0>"
+      },
+      "upstream_issue": "POOL-427",
+      "issue_linked_fix_sha": "e2c3d1f7eefb972c554138867b69e7b43295ae97",
+      "durable_fix_sha": "8f46cde7835d29eaeae3b2c77488d9ccf5101f3c",
+      "expected_at_durable_fix": {
+        "exit_code": 0
+      }
+    }
+  ],
+  "preservation": [
+    {
+      "id": "P-001",
+      "summary": "The complete public test suite available at the target head remains green.",
+      "expected_at_head": {
+        "exit_code": 0,
+        "tests": 389,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 11
+      }
+    }
+  ],
+  "curation_notes": [
+    "The issue-linked fix commit also added synchronization for a separate concurrency concern.",
+    "Maintainers immediately removed that synchronization because factory callbacks must not execute while the pool lock is held.",
+    "The reference patch is not a gold implementation; only the K-001 behavior and preservation requirements are authoritative."
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "schema": "bdr.dev/pilot-manifest/v1",
+  "case_id": "java-pilot-001",
+  "status": "prepared",
+  "target": {
+    "repository": "benchmark/apache-commons-pool",
+    "base_sha": "acc4691e5a504d1f8b4fa4d175ec9e18574f7344",
+    "head_sha": "c6f0d3f711d6bcd6a928fb5e6bbb27520a949673",
+    "upstream": {
+      "url": "https://github.com/apache/commons-pool",
+      "license": "Apache-2.0",
+      "base_sha": "acc2b95a4ea5e18adf9a7f174f852e02fabee2fb",
+      "head_sha": "c5d63adfca0d1063cce6a3a53f4be585cf48c4d1"
+    }
+  },
+  "environment": {
+    "container_image": "maven:3.9.11-eclipse-temurin-17",
+    "container_digest": "sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14fa8d150138f27f116d7105a639b82",
+    "java": "17.0.17 Eclipse Adoptium",
+    "maven": "3.9.11",
+    "platform": "linux/arm64",
+    "actor_network": "off",
+    "github_mode": "off"
+  },
+  "invocation": {
+    "prompt": "Run BDR on this change and take it to a valid terminal state. GitHub projection is disabled. Use one writer, do not spawn subagents, do not use the network, and do not read outside the target checkout and trusted BDR installation.",
+    "bdr": {
+      "git_sha": "12f67a9153f501877630bdb7506814dd5b266998",
+      "skill_tree_sha": "128d72dfa5ecb4ee733ad57a123658a204dbc792",
+      "engine_version": "2.1.0"
+    },
+    "proposed_model": {
+      "provider": "openai",
+      "model_id": "gpt-5.6-terra",
+      "reasoning_effort": "high",
+      "host": "codex",
+      "subagents": "disabled",
+      "usage_accounting": "Record host-reported usage; otherwise use null values with an unavailable reason."
+    }
+  },
+  "limits": {
+    "wall_seconds": 3600,
+    "max_fixed_point_passes": 3,
+    "max_phase_attempts": 4,
+    "api_cost_usd": null,
+    "api_cost_reason": "The proposed first run uses a subscription-hosted Codex deployment, not an API key."
+  },
+  "commands": {
+    "baseline": [
+      {
+        "id": "public-suite",
+        "argv": [
+          "mvn",
+          "--show-version",
+          "--batch-mode",
+          "--no-transfer-progress",
+          "test"
+        ],
+        "cwd": ".",
+        "timeout_seconds": 900,
+        "network": "off"
+      }
+    ],
+    "focused": [
+      {
+        "id": "generic-object-pool-suite",
+        "argv": [
+          "mvn",
+          "--batch-mode",
+          "--no-transfer-progress",
+          "-Dtest=TestGenericObjectPool",
+          "test"
+        ],
+        "cwd": ".",
+        "timeout_seconds": 300,
+        "network": "off"
+      }
+    ],
+    "final": [
+      {
+        "id": "public-suite-final",
+        "argv": [
+          "mvn",
+          "--show-version",
+          "--batch-mode",
+          "--no-transfer-progress",
+          "test"
+        ],
+        "cwd": ".",
+        "timeout_seconds": 900,
+        "network": "off"
+      }
+    ]
+  },
+  "preflight": {
+    "public_suite": {
+      "exit_code": 0,
+      "tests": 389,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 11,
+      "wall_seconds": 456
+    },
+    "bdr_preflight_ok": true,
+    "target_remote_count": 0,
+    "target_commit_count": 2
+  },
+  "private_oracle": {
+    "path": "../../private/oracles/java-pilot-001/oracle.json",
+    "actor_readable": false
+  }
+}

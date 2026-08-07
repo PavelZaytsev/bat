@@ -1,0 +1,59 @@
+{
+  "schema": "bdr.dev/pilot-result/v1",
+  "case_id": null,
+  "run_id": null,
+  "manifest_sha256": null,
+  "oracle_sha256": null,
+  "observed_identity": {
+    "bdr_git_sha": null,
+    "bdr_engine_version": null,
+    "model_id": null,
+    "reasoning_effort": null,
+    "host": null,
+    "host_version": null
+  },
+  "pins": {
+    "base_sha": null,
+    "starting_head_sha": null,
+    "final_head_sha": null,
+    "tracker_matches_manifest": null
+  },
+  "terminal": {
+    "end_kind": null,
+    "tracker_state": null,
+    "terminal_reason": null,
+    "actor_claimed_ready": null,
+    "bdr_check_exit_code": null,
+    "completion_check_exit_code": null
+  },
+  "usage": {
+    "wall_seconds": null,
+    "input_tokens": null,
+    "cached_input_tokens": null,
+    "output_tokens": null,
+    "reasoning_tokens": null,
+    "cost_usd": null,
+    "usage_source": null,
+    "unavailable_reason": null
+  },
+  "bugs": [],
+  "finding_reconciliation": [],
+  "self_induced_regressions": {
+    "introduced": 0,
+    "repaired_before_terminal": 0,
+    "surviving": 0
+  },
+  "commands": [],
+  "evaluation": {
+    "known_bugs_fixed": null,
+    "validated_novel_bugs": null,
+    "false_ready": null,
+    "verdict": null,
+    "reasons": []
+  },
+  "artifacts": {
+    "tracker_sha256": null,
+    "events_sha256": null,
+    "final_patch_sha256": null
+  }
+}
