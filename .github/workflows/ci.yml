@@ -119,6 +119,42 @@ jobs:
       - name: Run agentic loop tests
         run: scala-cli test --server=false loop
 
+  isolation:
+    name: Live OCI containment
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Cache Scala dependencies
+        uses: coursier/cache-action@v8
+
+      - name: Set up Scala CLI
+        uses: VirtusLab/scala-cli-setup@v1
+        with:
+          scala-cli-version: "1.16.0"
+          jvm: "temurin:21"
+
+      - name: Resolve an immutable adversarial fixture image
+        run: |
+          docker pull alpine:3.20
+          image="$(docker image inspect --format '{{index .RepoDigests 0}}' alpine:3.20)"
+          test -n "$image"
+          test "${image#*@sha256:}" != "$image"
+          echo "BAT_LIVE_OCI_IMAGE=$image" >> "$GITHUB_ENV"
+          echo "BAT_LIVE_OCI_RUNTIME=$(command -v docker)" >> "$GITHUB_ENV"
+          echo "BAT_LIVE_OCI_UID=$(id -u)" >> "$GITHUB_ENV"
+          echo "BAT_LIVE_OCI_GID=$(id -g)" >> "$GITHUB_ENV"
+          echo "BAT_LIVE_OCI_CANARY=synthetic-ci-canary-not-a-secret" >> "$GITHUB_ENV"
+
+      - name: Run daemon-backed isolation and cleanup canaries
+        run: >-
+          scala-cli test --server=false loop
+          --test-only bat.worker.oci.LiveOciConformanceSpec
+
   required:
     name: Required
     if: always()
@@ -126,6 +162,7 @@ jobs:
       - contract
       - engine
       - loop
+      - isolation
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -134,7 +171,9 @@ jobs:
           CONTRACT_RESULT: ${{ needs.contract.result }}
           ENGINE_RESULT: ${{ needs.engine.result }}
           LOOP_RESULT: ${{ needs.loop.result }}
+          ISOLATION_RESULT: ${{ needs.isolation.result }}
         run: >-
           test "$CONTRACT_RESULT" = success &&
           test "$ENGINE_RESULT" = success &&
-          test "$LOOP_RESULT" = success
+          test "$LOOP_RESULT" = success &&
+          test "$ISOLATION_RESULT" = success

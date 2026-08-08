@@ -211,8 +211,9 @@ object ControllerTestKit:
       val executions: Ref[Chunk[Json.Obj]],
       override val authority: ToolAuthority
   ) extends Tool:
-    def execute(arguments: Json.Obj): IO[ToolError, Json] =
-      executions.update(_ :+ arguments) *> handler(arguments)
+    def execute(invocation: ToolInvocation): IO[ToolError, Json] =
+      executions.update(_ :+ invocation.arguments) *>
+        handler(invocation.arguments)
 
   object RecordingTool:
     def make(

@@ -63,6 +63,50 @@ GitHub synchronization is optional. Without credentials or network access, BAT r
 projection in an outbox and ends `verification_pending` rather than inventing remote issue IDs or
 silently losing updates.
 
+## Isolated Java worker runtime
+
+The Scala controller contains the isolated Java PR worker described in
+[`docs/adr/0002-isolated-java-worker.md`](docs/adr/0002-isolated-java-worker.md). It is currently an
+integration module, not a public `bat` launcher and not yet wired into the Claude, ChatGPT, or Codex
+skill entrypoints.
+
+An application embedding the worker must provide:
+
+- JDK 21 for the controller and an OCI runtime through an absolute executable path;
+- a reviewed OCI image selected by immutable `name@sha256:...` identity, containing `/bin/sh`,
+  `/bin/tar`, `/usr/bin/git`, a JDK, and the Maven/Gradle executables configured
+  as absolute container paths;
+- a non-root numeric UID/GID that owns the mounted run directories and is valid for both the image
+  and the rootless or otherwise isolated runtime endpoint;
+- three absolute, pairwise-disjoint local roots for private persistent control state, stable run
+  workspaces, and disposable scratch data;
+- an authenticated PR authority plus a clean, standalone, complete local Git source whose exact
+  base and head refs are available; and
+- a verified BDR lifecycle adapter that initializes/resumes `.bdr/progress.yaml` at those exact
+  source pins.
+
+Configure explicit limits for source bytes/paths, expanded checkout bytes/paths, tree-metadata
+output, build tmpfs, process output, PIDs, memory, CPU, and wall time. Put the workspace root on a
+quota-backed filesystem: application-level preflight rejects known oversize inputs, while the
+filesystem quota is the hard stop for runtime metadata overhead and host or daemon failure. The
+trusted host runner is the sole wall-clock timeout authority; target commands run directly inside
+the container without an image-supplied timeout supervisor. BAT records a timeout only when that
+host deadline guard wins, while natural target exits—including 124, 137, and 143—remain ordinary
+exit outcomes. The runtime endpoint must not expose unrelated containers to the worker account. Run
+a startup janitor that removes stale containers carrying BAT's operation label; this covers a
+machine or controller loss that prevents normal post-run and resume cleanup.
+
+Do not place the control root inside a target workspace or mount it into target containers. Preserve
+it across controller restarts so operation receipts and BDR state can be resumed; protect it as
+sensitive integrity state even though it contains no model credential by design.
+
+Worker builds are deliberately offline and stage a read-only source tree into bounded ephemeral
+storage with empty Maven/Gradle cache directories. The target must therefore carry everything needed
+by the selected command in checked-in inputs, or the build will fail as an environment block. Do not
+solve that failure by mounting a developer home, SSH agent, API key, Docker configuration, or ambient
+package cache. A controlled dependency materialization mechanism, worker-image distribution,
+scheduling, run cleanup, and trusted pushing are separate deployment concerns.
+
 ## Claude Code
 
 For development, load the repository directly for one session:

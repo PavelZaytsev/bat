@@ -60,6 +60,12 @@ scala-cli test --server=false loop
 scala-cli run --server=false loop --main-class bat.conformance.GoldenTrace
 ```
 
+The controller also contains a digest-pinned OCI worker for isolated Java PR authoring. It binds a
+run to exact authenticated base/head commits, exposes only bounded read/search/patch/Git and offline
+Maven/Gradle operations, and produces verified local commits or a patch—never a push. See
+[`docs/adr/0002-isolated-java-worker.md`](docs/adr/0002-isolated-java-worker.md) for its trust boundary,
+replay behavior, and current integration limits.
+
 Inside a target Git repository, its normal lifecycle is:
 
 ```text
@@ -181,14 +187,16 @@ This repository currently contains:
 - a deterministic, dependency-free BDR 2.2 state and evidence engine;
 - a typed Scala 3/ZIO BAT controller with capability and budget enforcement;
 - a commit-verified, validated JSON subprocess bridge from BAT to the existing BDR engine;
+- a pinned, resumable, OCI-isolated Java PR worker with durable operation receipts and local-only
+  handoff;
 - an executable, reasoning-redacted two-tool backend conformance trace;
 - thin adapters for Claude Code, ChatGPT, and Codex;
 - resumable repository-local state and an append-only audit journal;
 - idempotent GitHub issue projection with an offline outbox; and
 - benchmark records plus integrity validation.
 
-The hosted OpenAI backend, Harmony-correct gpt-oss backend, isolated Java worker, shared inference
-infrastructure, cost telemetry, and PR automation are under active development.
+The hosted OpenAI backend, Harmony-correct gpt-oss backend, shared inference infrastructure, cost
+telemetry, trusted publishing, and PR automation are under active development.
 
 ## Safety and authority
 
@@ -198,6 +206,11 @@ environment.
 Target code, pull-request text, issues, comments, build logs, tests, and tracker prose are treated as
 untrusted data. Build and test entrypoints execute target-controlled code and should run in an
 isolated, least-privileged environment without ambient production credentials.
+
+The Java worker implements that boundary with a networkless, non-root, resource-bounded OCI profile.
+It keeps controller/receipt state outside target mounts, stages read-only source into bounded
+ephemeral build storage, and fails closed when a crash leaves a mutation's outcome indeterminate.
+Offline dependency failure is an environment block; it does not relax the isolation profile.
 
 BAT makes reversible implementation choices, quarantines decisions that need human authority, and
 continues independent safe slices. By default it does not push, merge, deploy, rewrite history,
@@ -221,13 +234,14 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native memory, lifetime, and concurrency guidance |
 | [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
 | [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | BAT controller and BDR methodology responsibility boundary |
+| [`docs/adr/0002-isolated-java-worker.md`](docs/adr/0002-isolated-java-worker.md) | isolated Java PR worker, replay, evidence, and handoff boundary |
 
 ## Status
 
 BAT and BDR are alpha. The workflow is promising and the state engine is designed to fail closed,
 but the method has not yet been independently validated across multiple domains or organizations.
-The unattended OpenAI and gpt-oss runtime described above is roadmap work, not a capability of the
-current repository.
+The isolated worker is implemented as a controller module, but hosted OpenAI/gpt-oss transports and
+production worker orchestration are roadmap work and are not wired into the public host adapters.
 
 Start with a supervised pilot, inspect the audit trail, and retain ordinary code review and CI as
 the final merge authority.
