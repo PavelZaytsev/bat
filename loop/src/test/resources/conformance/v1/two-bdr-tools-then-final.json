@@ -1,0 +1,146 @@
+{
+  "schema": "bat.dev/conformance-trace",
+  "version": 1,
+  "events": [
+    {
+      "type": "run_start",
+      "mode": "full_writer",
+      "pins": {
+        "backend": "fake",
+        "model_id": "fake-bat-model",
+        "model_revision": "rev-2026-08-07",
+        "reasoning_effort": "high",
+        "prompt_version": "bat-loop-v1",
+        "bdr_commit": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "bdr": {
+        "revision": 41,
+        "run_state": "verifying",
+        "state_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "next_action": {
+          "action": "completion_check_then_mark_ready"
+        }
+      },
+      "capabilities": {
+        "required": [
+          "reasoning_continuity",
+          "streaming",
+          "strict_tools",
+          "usage_reporting"
+        ],
+        "enabled": [
+          "reasoning_continuity",
+          "streaming",
+          "strict_tools",
+          "usage_reporting"
+        ]
+      },
+      "budgets": {
+        "max_iterations": 3,
+        "max_tool_calls": 2,
+        "max_wall_millis": 60000,
+        "max_total_tokens": 260
+      }
+    },
+    {
+      "type": "developer_input",
+      "characters": 11
+    },
+    {
+      "type": "user_input",
+      "characters": 15
+    },
+    {
+      "type": "iteration",
+      "number": 1
+    },
+    {
+      "type": "reasoning_context",
+      "mode": "opaque_replay",
+      "opaque": true,
+      "payload": "<redacted>"
+    },
+    {
+      "type": "function_call",
+      "call_id": "call-audit-0001",
+      "name": "bdr_audit_summary",
+      "arguments": "<redacted>"
+    },
+    {
+      "type": "usage",
+      "total_tokens": 100,
+      "input_tokens": 60,
+      "cached_input_tokens": 20,
+      "output_tokens": 40,
+      "reasoning_tokens": 25
+    },
+    {
+      "type": "function_output",
+      "call_id": "call-audit-0001",
+      "is_error": false,
+      "output": "<redacted>"
+    },
+    {
+      "type": "iteration",
+      "number": 2
+    },
+    {
+      "type": "reasoning_context",
+      "mode": "opaque_replay",
+      "opaque": true,
+      "payload": "<redacted>"
+    },
+    {
+      "type": "function_call",
+      "call_id": "call-ready-0002",
+      "name": "bdr_apply",
+      "arguments": "<redacted>"
+    },
+    {
+      "type": "usage",
+      "total_tokens": 100,
+      "input_tokens": 70,
+      "cached_input_tokens": 30,
+      "output_tokens": 30,
+      "reasoning_tokens": 20
+    },
+    {
+      "type": "function_output",
+      "call_id": "call-ready-0002",
+      "is_error": false,
+      "output": "<redacted>"
+    },
+    {
+      "type": "iteration",
+      "number": 3
+    },
+    {
+      "type": "final_output",
+      "characters": 17
+    },
+    {
+      "type": "usage",
+      "total_tokens": 60,
+      "input_tokens": 40,
+      "cached_input_tokens": 10,
+      "output_tokens": 20,
+      "reasoning_tokens": 10
+    },
+    {
+      "type": "run_complete",
+      "outcome": "ready_for_review",
+      "iterations": 3,
+      "tool_calls": 2,
+      "total_tokens": 260,
+      "bdr": {
+        "revision": 42,
+        "run_state": "ready_for_review",
+        "state_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "next_action": {
+          "action": "handoff",
+          "reason": "the verified run is ready for review"
+        }
+      }
+    }
+  ]
+}

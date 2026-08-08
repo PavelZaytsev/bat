@@ -11,7 +11,7 @@ readable sandbox.
 
 The recorded runs intentionally retain BDR engine names, `.bdr/` state paths, schemas, and evidence
 identifiers. Those identify the methodology and its audit protocol; they are not obsolete BAT
-product branding.
+branding.
 
 ## First case
 

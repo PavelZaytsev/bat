@@ -8,7 +8,7 @@ Closes #
 
 ## Change surface
 
-- [ ] BAT runtime, controller, or product behavior
+- [ ] BAT loop, runtime, or controller behavior
 - [ ] BDR state engine, methodology, or evidence contract
 - [ ] OpenAI adapter or hosted-model integration
 - [ ] gpt-oss or local-cluster integration
@@ -26,6 +26,7 @@ Non-goals:
 | Check | Command or evidence | Result |
 |---|---|---|
 | Focused verification | | |
+| Scala loop | `scala-cli test --server=false loop` | |
 | Engine self-test | `python scripts/bdr.py selftest` | |
 | Broader or platform verification | | |
 
@@ -40,7 +41,7 @@ Non-goals:
 ## Checklist
 
 - [ ] This pull request addresses one focused issue and links it above.
-- [ ] BAT and BDR are named consistently: BAT is the product; BDR is the methodology.
+- [ ] BAT and BDR are named consistently: BAT is the agentic loop; BDR is the methodology.
 - [ ] Acceptance criteria from the issue are satisfied or explicitly deferred.
 - [ ] New behavior has focused verification; changed engine behavior has adversarial coverage.
 - [ ] Documentation and examples match the implemented contract.

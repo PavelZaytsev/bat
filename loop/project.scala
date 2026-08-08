@@ -1,0 +1,8 @@
+//> using scala "3.8.4"
+//> using jvm "temurin:21"
+//> using options "-deprecation" "-feature" "-unchecked" "-Wvalue-discard" "-Wnonunit-statement"
+//> using dep "dev.zio::zio:2.1.26"
+//> using dep "dev.zio::zio-json:0.10.0"
+//> using test.dep "dev.zio::zio-test:2.1.26"
+//> using test.dep "dev.zio::zio-test-sbt:2.1.26"
+//> using testFramework "zio.test.sbt.ZTestFramework"

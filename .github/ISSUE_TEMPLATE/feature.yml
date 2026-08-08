@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        BAT is the product; BDR is the methodology. Describe the missing capability and its
+        BAT is the agentic loop; BDR is the methodology. Describe the missing capability and its
         observable outcome before choosing an implementation.
 
   - type: dropdown

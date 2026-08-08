@@ -1,7 +1,7 @@
 # Autonomy contract
 
 This is a provider-, model-, and host-neutral BDR contract. It applies to BAT and to any other
-conforming BDR executor; product packaging does not broaden the authority granted by an
+conforming BDR executor; BAT packaging does not broaden the authority granted by an
 invocation.
 
 ## What unattended means
