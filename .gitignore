@@ -1,8 +1,12 @@
 .DS_Store
 __pycache__/
 *.py[cod]
+.scala-build/
+.bsp/
+.metals/
 .bdr/
 build/
 dist/
+target/
 *.zip
 benchmarks/pilot/work/

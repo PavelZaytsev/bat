@@ -3,7 +3,7 @@
 Boundary-Driven Refactoring is a provider-, model-, and host-neutral methodology. This document
 defines its observable workflow and evidence contract, not a particular agent runtime. BAT
 (BugAnnihilatorThreethousand) is one implementation; independent tools may implement BDR while
-retaining their own product identity and execution architecture.
+retaining their own identity and execution architecture.
 
 ## Trust and evidence
 

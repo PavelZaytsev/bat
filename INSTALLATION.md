@@ -1,6 +1,6 @@
 # Install BAT privately
 
-BAT (**BugAnnihilatorThreethousand**) is a product that implements BDR (**Boundary-Driven
+BAT (**BugAnnihilatorThreethousand**) is an agentic loop that implements BDR (**Boundary-Driven
 Refactoring**). BAT packages one portable BDR skill and three thin host adapters:
 
 | layer | file | responsibility |
@@ -10,16 +10,20 @@ Refactoring**). BAT packages one portable BDR skill and three thin host adapters
 | ChatGPT adapter | `skills/refactor/agents/openai.yaml` | `@refactor` presentation and invocation metadata |
 | Codex adapter | `.codex-plugin/plugin.json` | BAT plugin identity and `$refactor` skill discovery |
 
+The host invocations documented below currently execute the portable skill and established BDR
+engine. `loop/` is the provider-neutral Scala controller and conformance module; it is not wired
+into these host adapters until the hosted OpenAI and gpt-oss transports are implemented.
+
 Keep these BAT files in one private, versioned source repository. Within one BAT deployment, do not
 copy and independently edit the method into each target or application repository; that creates
-multiple protocol authorities. Independent products may implement and version BDR under their own
-authority without adopting BAT's packaging or product identity.
+multiple protocol authorities. Independent tools may implement and version BDR under their own
+authority without adopting BAT's packaging or identity.
 
 ## Upgrading from a pre-0.5 `bdr` package
 
-BAT 0.5.0 intentionally makes an alpha-breaking product namespace change. The plugin/package ID is
+BAT 0.5.0 intentionally makes an alpha-breaking package namespace change. The plugin/package ID is
 now `bat`, the local marketplace ID is `bat-team`, and the Claude Code namespaced command is
-`/bat:refactor`. The old `bdr`, `bdr-team`, and `/bdr:refactor` product entrypoints are not aliases.
+`/bat:refactor`. The old `bdr`, `bdr-team`, and `/bdr:refactor` package entrypoints are not aliases.
 
 Remove the old package from the host's plugin manager, replace any copied marketplace descriptor
 with the 0.5.0 descriptor, install `bat`, and restart the host before starting a new session. Do not
@@ -181,7 +185,7 @@ attention. Any host may still stop or pause for:
 - missing dependencies or unavailable build infrastructure;
 - stale base/head commits, merge conflicts, or a dirty user worktree;
 - nondeterministic, destructive, or unbounded tests; or
-- a decision that changes product semantics, a public contract, security/privacy posture, or risk
+- a decision that changes intended behavior, a public contract, security/privacy posture, or risk
   beyond the original defect.
 
 When those conditions occur, a conforming run records an explicit terminal state and a decision

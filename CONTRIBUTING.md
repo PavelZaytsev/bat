@@ -1,9 +1,8 @@
 # Contributing to BAT
 
-BAT (**BugAnnihilatorThreethousand**) is the product. BDR (**Boundary-Driven Refactoring**) is the
-methodology BAT executes. Use those names consistently in issues, pull requests, documentation,
-and experiments. The canonical product and plugin identifier is `bat`, including Claude's
-`/bat:refactor` entrypoint. The `bdr` CLI and engine, `.bdr/` state paths, `BDR_ACTOR`,
+BAT is the agentic loop; BDR is the methodology. Use those names consistently in issues, pull
+requests, documentation, and experiments. The canonical BAT plugin identifier is `bat`, including
+Claude's `/bat:refactor` entrypoint. The `bdr` CLI and engine, `.bdr/` state paths, `BDR_ACTOR`,
 `bdr.dev/*` schemas, and BDR evidence identifiers remain part of the methodology's compatibility
 contract.
 
@@ -16,7 +15,7 @@ appropriate bug, feature, or experiment form so decisions and results remain sea
 Use one focused branch and one pull request per issue. Suggested branch names are:
 
 - `codex/<issue>-<short-name>` for Codex-created work;
-- `feat/<issue>-<short-name>` for a product or methodology capability;
+- `feat/<issue>-<short-name>` for a BAT or BDR capability;
 - `fix/<issue>-<short-name>` for a defect; and
 - `docs/<issue>-<short-name>` for documentation-only work.
 
@@ -40,8 +39,9 @@ reproduction artifacts. A private repository is not a reason to weaken this rule
 
 ## Run the local gate
 
-The BDR state engine and repository gates are dependency-free and support Python 3.10 and newer.
-Before opening or updating a pull request, run:
+The BDR state engine and its repository gates are dependency-free and support Python 3.10 and
+newer. The BAT controller gate additionally requires JDK 21 and Scala CLI. Before opening or
+updating a pull request, run:
 
 ```bash
 python3 -m py_compile \
@@ -54,11 +54,14 @@ python3 scripts/bdr.py selftest
 python3 scripts/check_plugin_manifests.py
 python3 scripts/check_benchmark_artifacts.py
 bin/bdr --version
+scala-cli fmt --check loop
+scala-cli test --server=false loop
 ```
 
 On Windows, use `bin\bdr.cmd --version` for the launcher check. GitHub Actions repeats the engine
 suite on the minimum and current supported Python versions on Linux and on current Python on
-Windows. CI is read-only and does not call OpenAI, gpt-oss, Anthropic, or any other model.
+Windows. CI also runs the focused provider-neutral Scala/ZIO suite on Linux. CI is read-only and
+does not call OpenAI, gpt-oss, Anthropic, or any other model.
 
 ## Record experiments as experiments
 

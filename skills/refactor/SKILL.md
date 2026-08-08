@@ -5,12 +5,12 @@ description: Run BAT's implementation of Boundary-Driven Refactoring (BDR) on a 
 
 # Refactor with BAT and BDR
 
-BAT (BugAnnihilatorThreethousand) is the product that ships this skill. Boundary-Driven
+BAT (BugAnnihilatorThreethousand) is the agentic loop that ships this skill. Boundary-Driven
 Refactoring (BDR) is the provider-neutral methodology it implements. The workflow and evidence
-contract below are BDR concepts; another product may implement the same method without becoming
+contract below are BDR concepts; another BDR executor may implement the same method without becoming
 BAT or depending on BAT's model, host, or packaging choices.
 
-Run toward a terminal state without discretionary questions while the host continues execution and grants the required permissions. Either leave a verified, reviewable refactor or a precise decision packet. Host approval prompts, authentication challenges, cancellation, and execution limits can still interrupt the run; never promise literal zero interruption. Never convert uncertainty into guessed product semantics.
+Run toward a terminal state without discretionary questions while the host continues execution and grants the required permissions. Either leave a verified, reviewable refactor or a precise decision packet. Host approval prompts, authentication challenges, cancellation, and execution limits can still interrupt the run; never promise literal zero interruption. Never convert uncertainty into guessed intended behavior.
 
 ## Start or resume
 
@@ -58,7 +58,7 @@ Generate projection operations through `project_github`, inspect them with `bdr 
 
 ## Stop conditions
 
-Do not ask discretionary questions mid-run. Required host permission prompts are not discretionary questions: request only permission for an already-authorized action, and never route around a denial. Quarantine the affected slice, continue only slices that do not depend on it or overlap its files/invariants, and collect a decision packet when product semantics, a public or foreign-owned contract, security/privacy, destructive external effects, an unmeasurable material foreign fact, or a riskier-than-defect tradeoff requires human authority.
+Do not ask discretionary questions mid-run. Required host permission prompts are not discretionary questions: request only permission for an already-authorized action, and never route around a denial. Quarantine the affected slice, continue only slices that do not depend on it or overlap its files/invariants, and collect a decision packet when intended behavior, a public or foreign-owned contract, security/privacy, destructive external effects, an unmeasurable material foreign fact, or a riskier-than-defect tradeoff requires human authority.
 
 Stop mutation and external writes for the entire run on stale target input, an unsafe or nondeterministic test oracle, ambiguous tracker recovery, destructive test behavior, repository-policy conflict, unsafe execution of target-controlled code, or bounded non-convergence. Preserve evidence and enter the matching terminal state; do not automatically rebase, waive, or repair around the condition.
 

@@ -13,7 +13,7 @@
 Point BAT at a pull request. It does not merely ask a model to “find bugs.” It makes the code stop
 guessing.
 
-BAT is an agentic refactoring product that implements **Boundary-Driven Refactoring (BDR)**: an
+BAT is an agentic refactoring loop that implements **Boundary-Driven Refactoring (BDR)**: an
 evidence-backed method for finding facts that code is inferring, representing those facts explicitly
 at their authority boundary, routing them to the decisions that need them, and deleting the obsolete
 inference.
@@ -35,7 +35,7 @@ skill's bare name when it does not collide, so `/refactor` works directly on cli
 behavior.
 [`adapters/claude-bare/refactor/`](adapters/claude-bare/refactor/) is a tiny standalone
 personal/managed compatibility skill that delegates `/refactor` on clients that do not expose it.
-BAT uses `bat` as its canonical product and plugin ID. Pre-BAT plugin installations named `bdr`
+BAT uses `bat` as its canonical plugin ID. Pre-BAT plugin installations named `bdr`
 must be uninstalled and reinstalled as BAT; `/bdr:refactor` is not a supported alias.
 
 The `bdr` command, `.bdr/` workspace state, and BDR evidence identifiers retain the methodology's
@@ -50,6 +50,14 @@ test it locally:
 ```bash
 bin/bdr rules
 bin/bdr selftest
+```
+
+The provider-neutral BAT controller is a separate Scala 3/ZIO module. Contributors can run its
+focused conformance suite and executable two-tool trace with:
+
+```bash
+scala-cli test --server=false loop
+scala-cli run --server=false loop --main-class bat.conformance.GoldenTrace
 ```
 
 Inside a target Git repository, its normal lifecycle is:
@@ -150,11 +158,11 @@ Expected red tests in EXPOSE and FALSIFY are evidence. They are not failed verif
 The repository tracker is current state. Git, `.bdr/events.jsonl`, and digest-bound evidence records
 are history. GitHub is a projection, not a second editable source of truth.
 
-## BAT is the product; BDR is the method
+## BAT is the agentic loop; BDR is the methodology
 
 | name | meaning |
 |---|---|
-| **BAT — BugAnnihilatorThreethousand** | This product: the agent runtime, host adapters, orchestration, tooling, telemetry, and user experience. |
+| **BAT — BugAnnihilatorThreethousand** | The agentic loop and its runtime, host adapters, orchestration, tooling, telemetry, and user experience. |
 | **BDR — Boundary-Driven Refactoring** | The reusable methodology, protocol, state model, evidence contract, and six-phase loop BAT executes. |
 
 Other tools may implement BDR without becoming BAT. BAT may add model backends, cluster execution,
@@ -163,7 +171,7 @@ identity.
 
 The methodology compatibility surfaces therefore remain the `bdr` CLI and `bin/bdr` launchers,
 `.bdr/`, `BDR_ACTOR`, `bdr.dev/*` schemas, and BDR run, slice, finding, evidence, dependency,
-decision, and foreign-fact identifiers. The product and plugin ID is `bat`.
+decision, and foreign-fact identifiers. BAT's plugin ID is `bat`.
 
 ## What exists today
 
@@ -171,13 +179,16 @@ This repository currently contains:
 
 - the portable BDR refactoring skill;
 - a deterministic, dependency-free BDR 2.2 state and evidence engine;
+- a typed Scala 3/ZIO BAT controller with capability and budget enforcement;
+- a commit-verified, validated JSON subprocess bridge from BAT to the existing BDR engine;
+- an executable, reasoning-redacted two-tool backend conformance trace;
 - thin adapters for Claude Code, ChatGPT, and Codex;
 - resumable repository-local state and an append-only audit journal;
 - idempotent GitHub issue projection with an offline outbox; and
 - benchmark records plus integrity validation.
 
-BAT's dedicated unattended controller, hosted OpenAI backend, Harmony-correct gpt-oss backend,
-shared inference infrastructure, cost telemetry, and PR automation are under active development.
+The hosted OpenAI backend, Harmony-correct gpt-oss backend, isolated Java worker, shared inference
+infrastructure, cost telemetry, and PR automation are under active development.
 
 ## Safety and authority
 
@@ -192,8 +203,11 @@ BAT makes reversible implementation choices, quarantines decisions that need hum
 continues independent safe slices. By default it does not push, merge, deploy, rewrite history,
 weaken tests, or accept a higher-risk design on the user's behalf.
 
+The provider-neutral controller separates authority by run mode: audit runs can see and invoke only
+explicitly read-only tools, while full-writer completion requires a fresh terminal BDR checkpoint.
+
 Workspace trust, permission prompts, organization policy, missing credentials, rate limits,
-unavailable build tools, stale PR input, unsafe tests, and genuinely ambiguous product semantics can
+unavailable build tools, stale PR input, unsafe tests, and genuinely ambiguous intended behavior can
 still stop a run. Ordinary review and CI remain the merge authority.
 
 ## Read the method
@@ -206,6 +220,7 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`skills/refactor/references/autonomy.md`](skills/refactor/references/autonomy.md) | authority, safety, and interruption policy |
 | [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native memory, lifetime, and concurrency guidance |
 | [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
+| [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | BAT controller and BDR methodology responsibility boundary |
 
 ## Status
 

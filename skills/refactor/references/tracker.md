@@ -15,10 +15,10 @@
 
 ## Compatibility namespace
 
-BAT is the product; BDR is the methodology and state protocol. Machine-facing names that encode
-that protocol remain BDR names: the `bdr` CLI and engine, `.bdr/` state directory, `BDR_ACTOR`
+BAT is the agentic loop; BDR is the methodology. Machine-facing names that encode the BDR state
+protocol remain BDR names: the `bdr` CLI and engine, `.bdr/` state directory, `BDR_ACTOR`
 environment variable, `bdr.dev/*` schemas, and BDR run, slice, finding, evidence, dependency,
-decision, and foreign-fact identifiers. A BAT product or plugin rename does not migrate those
+decision, and foreign-fact identifiers. Renaming BAT or its plugin does not migrate those
 interfaces. Any future protocol migration must be explicit, versioned, and backward-compatible
 with recorded state and audit artifacts.
 
