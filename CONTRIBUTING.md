@@ -63,6 +63,13 @@ suite on the minimum and current supported Python versions on Linux and on curre
 Windows. CI also runs the focused provider-neutral Scala/ZIO suite on Linux. CI is read-only and
 does not call OpenAI, gpt-oss, Anthropic, or any other model.
 
+The required `Live OCI containment` job resolves its synthetic Alpine fixture to an immutable image
+digest, then adversarially checks the Java worker's environment, filesystem, read-only source and
+root, bounded build staging, network boundary, and daemon cleanup after host-runner deadline expiry
+or output floods. It uses a clearly synthetic canary—never add a real credential to an isolation
+test. The ordinary local Scala suite covers deterministic OCI command construction and skips the
+live fixture when its explicit `BAT_LIVE_OCI_*` test variables are absent.
+
 ## Record experiments as experiments
 
 Model and cluster trials are evidence, not anecdotes. Pin the BAT commit, case, prompt/protocol,

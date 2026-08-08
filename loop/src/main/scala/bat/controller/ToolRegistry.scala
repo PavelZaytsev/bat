@@ -24,10 +24,12 @@ enum ToolAuthority:
   case ReadOnly
   case Writer
 
+final case class ToolInvocation(callId: CallId, arguments: Json.Obj)
+
 trait Tool:
   def definition: ToolDefinition
   def authority: ToolAuthority = ToolAuthority.Writer
-  def execute(arguments: Json.Obj): IO[ToolError, Json]
+  def execute(invocation: ToolInvocation): IO[ToolError, Json]
 
 final class ToolRegistry private (
     ordered: Chunk[Tool],
@@ -54,24 +56,28 @@ final class ToolRegistry private (
       call: FunctionCall,
       mode: RunMode
   ): IO[BatError, FunctionOutput] =
-    ZIO.fromEither(resolve(call, mode)).flatMap { tool =>
-      safelyExecute(tool, call.arguments).flatMap {
-        case Left(error) =>
-          val safeOutput = Json.Obj(Chunk("error" -> Json.Str(error.code)))
-          ZIO.fromEither(
-            FunctionOutput.make(call.callId, safeOutput, isError = true)
-          )
-        case Right(output) =>
-          ZIO.fromEither(FunctionOutput.make(call.callId, output))
+    ZIO.fromEither(validate(call, mode)) *>
+      ZIO.fromEither(resolve(call, mode)).flatMap { tool =>
+        safelyExecute(
+          tool,
+          ToolInvocation(call.callId, call.arguments)
+        ).flatMap {
+          case Left(error) =>
+            val safeOutput = Json.Obj(Chunk("error" -> Json.Str(error.code)))
+            ZIO.fromEither(
+              FunctionOutput.make(call.callId, safeOutput, isError = true)
+            )
+          case Right(output) =>
+            ZIO.fromEither(FunctionOutput.make(call.callId, output))
+        }
       }
-    }
 
   private def safelyExecute(
       tool: Tool,
-      arguments: Json.Obj
+      invocation: ToolInvocation
   ): IO[BatError, Either[ToolError, Json]] =
     ZIO
-      .suspendSucceed(tool.execute(arguments))
+      .suspendSucceed(tool.execute(invocation))
       .foldCauseZIO(
         cause =>
           if cause.isInterrupted then ZIO.interrupt

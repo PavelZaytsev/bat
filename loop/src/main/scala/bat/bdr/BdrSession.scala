@@ -7,7 +7,9 @@ import java.nio.ByteBuffer
 import java.nio.charset.{CodingErrorAction, StandardCharsets}
 import java.nio.file.{Files, LinkOption, Path, StandardOpenOption}
 import java.security.MessageDigest
+import java.util.concurrent.{ConcurrentHashMap, CountDownLatch}
 
+import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 
 import zio.*
@@ -710,8 +712,14 @@ private[bdr] object JdkProcessRunner extends ProcessRunner:
           process <- ZIO.acquireRelease(start(command, cwd))(process =>
             stop(process, Iterable.empty)
           )
-          tracked <- Ref.make(Map.empty[Long, ProcessHandle])
-          tracker <- trackDescendants(process, tracked).forkDaemon
+          tracked = new ConcurrentHashMap[Long, ProcessHandle]()
+          trackerReady = new CountDownLatch(1)
+          tracker <- trackDescendants(
+            process,
+            tracked,
+            trackerReady
+          ).forkScoped
+          _ <- awaitTracker(trackerReady)
           stdout <- drain(process.getInputStream, "stdout").forkDaemon
           stderr <- drain(process.getErrorStream, "stderr").forkDaemon
           writer <- write(process.getOutputStream, input).forkDaemon
@@ -752,16 +760,16 @@ private[bdr] object JdkProcessRunner extends ProcessRunner:
 
   private def cleanup(
       process: Process,
-      tracked: Ref[Map[Long, ProcessHandle]],
-      tracker: Fiber[Nothing, Nothing],
+      tracked: ConcurrentHashMap[Long, ProcessHandle],
+      tracker: Fiber[Nothing, Unit],
       writer: Fiber[BatError, Unit],
       stdout: Fiber[BatError, Array[Byte]],
       stderr: Fiber[BatError, Array[Byte]]
   ): UIO[Unit] =
     for
-      descendants <- tracked.get
-      _ <- stop(process, descendants.values)
       _ <- tracker.interrupt
+      descendants <- ZIO.succeed(tracked.values().asScala.toList)
+      _ <- stop(process, descendants)
       _ <- writer.interrupt
       _ <- stdout.interrupt
       _ <- stderr.interrupt
@@ -769,47 +777,90 @@ private[bdr] object JdkProcessRunner extends ProcessRunner:
 
   private def trackDescendants(
       process: Process,
-      tracked: Ref[Map[Long, ProcessHandle]]
-  ): UIO[Nothing] =
-    (ZIO
-      .attemptBlockingInterrupt {
-        process.descendants().iterator().asScala.toList
-      }
-      .orElseSucceed(Nil)
-      .flatMap(handles =>
-        tracked.update(previous =>
-          previous ++ handles.map(handle => handle.pid() -> handle)
-        )
-      ) *> ZIO.sleep(10.millis)).forever
+      tracked: ConcurrentHashMap[Long, ProcessHandle],
+      ready: CountDownLatch
+  ): UIO[Unit] =
+    ZIO.attemptBlockingInterrupt {
+      try
+        while !Thread.currentThread().isInterrupted do
+          descendantsOf(process).foreach(handle =>
+            val _ = tracked.put(handle.pid(), handle)
+          )
+          ready.countDown()
+          Thread.sleep(2L)
+      catch case _: InterruptedException => Thread.currentThread().interrupt()
+      finally ready.countDown()
+    }.ignore
+
+  private def awaitTracker(ready: CountDownLatch): UIO[Unit] =
+    ZIO.attemptBlockingInterrupt(ready.await()).orDie
 
   private def stop(
       process: Process,
       previouslyObserved: Iterable[ProcessHandle]
   ): UIO[Unit] =
-    ZIO.attemptBlockingInterrupt {
+    ZIO.attemptBlocking {
       closeQuietly(process.getOutputStream)
-      val current =
-        try process.descendants().iterator().asScala.toList
-        catch case _: Exception => Nil
-      val descendants =
-        (previouslyObserved ++ current).toList
-          .groupBy(_.pid())
-          .values
-          .map(_.head)
-      descendants.foreach(handle =>
-        if handle.isAlive then
-          val _ = handle.destroy()
-      )
+      val descendants = mutable.LinkedHashMap.empty[Long, ProcessHandle]
+      def observe(): Unit =
+        (previouslyObserved ++ descendantsOf(process)).foreach(handle =>
+          val _ = descendants.update(handle.pid(), handle)
+        )
+      observe()
+      val gracefulDeadline = java.lang.System.nanoTime() + 100.millis.toNanos
+      while java.lang.System.nanoTime() < gracefulDeadline do
+        observe()
+        descendants.valuesIterator.foreach(handle =>
+          if handle.isAlive then
+            val _ = handle.destroy()
+        )
+        Thread.sleep(5L)
+      val forcedDeadline = java.lang.System.nanoTime() + 2.seconds.toNanos
+      var quietScans = 0
+      while java.lang.System.nanoTime() < forcedDeadline && quietScans < 3 do
+        observe()
+        descendants.valuesIterator.foreach(handle =>
+          if handle.isAlive then
+            val _ = handle.destroyForcibly()
+        )
+        if descendants.valuesIterator.exists(_.isAlive) then quietScans = 0
+        else quietScans += 1
+        Thread.sleep(5L)
+      observe()
+      awaitProcessStopped(process, 100.millis)
       if process.isAlive then process.destroy()
-      descendants.foreach(handle =>
+      awaitProcessStopped(process, 100.millis)
+      if process.isAlive then
+        val _ = process.destroyForcibly()
+      awaitProcessStopped(process, 500.millis)
+      descendants.valuesIterator.foreach(handle =>
         if handle.isAlive then
           val _ = handle.destroyForcibly()
       )
-      if process.isAlive then
-        val _ = process.destroyForcibly()
+      awaitStopped(descendants.values, 200.millis)
       closeQuietly(process.getInputStream)
       closeQuietly(process.getErrorStream)
     }.ignore
+
+  private def descendantsOf(process: Process): List[ProcessHandle] =
+    try
+      val stream = process.descendants()
+      try stream.iterator().asScala.toList
+      finally stream.close()
+    catch case _: Exception => Nil
+
+  private def awaitStopped(
+      handles: Iterable[ProcessHandle],
+      timeout: Duration
+  ): Unit =
+    val deadline = java.lang.System.nanoTime() + timeout.toNanos
+    while handles.exists(_.isAlive) && java.lang.System.nanoTime() < deadline do
+      Thread.sleep(5L)
+
+  private def awaitProcessStopped(process: Process, timeout: Duration): Unit =
+    val deadline = java.lang.System.nanoTime() + timeout.toNanos
+    while process.isAlive && java.lang.System.nanoTime() < deadline do
+      Thread.sleep(5L)
 
   private def write(
       stream: OutputStream,

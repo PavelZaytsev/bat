@@ -265,7 +265,7 @@ object GoldenScenario:
       )
     )
 
-    def execute(arguments: Json.Obj): IO[ToolError, Json] =
+    def execute(invocation: ToolInvocation): IO[ToolError, Json] =
       bdr.auditSummary.mapError(_ => unsafe(ToolError.make("bdr_audit_failed")))
 
   private final class ApplyTool(bdr: BdrSession) extends Tool:
@@ -284,7 +284,8 @@ object GoldenScenario:
       )
     )
 
-    def execute(arguments: Json.Obj): IO[ToolError, Json] =
+    def execute(invocation: ToolInvocation): IO[ToolError, Json] =
+      val arguments = invocation.arguments
       arguments.fields.collectFirst { case ("operation", value: Json.Obj) =>
         value
       } match
