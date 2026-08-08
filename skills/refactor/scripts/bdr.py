@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch the canonical BDR engine from a complete plugin installation."""
+"""Launch the canonical BDR engine from a complete BAT plugin installation."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ def main() -> int:
     engine = Path(__file__).resolve().parents[3] / "scripts" / "bdr.py"
     if not engine.is_file():
         print(
-            "bdr: canonical engine is missing; install the complete BDR plugin, not the skill directory alone",
+            "bdr: canonical engine is missing; install the complete BAT plugin, not the skill directory alone",
             file=sys.stderr,
         )
         return 2

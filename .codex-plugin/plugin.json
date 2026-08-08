@@ -1,20 +1,20 @@
 {
-  "name": "bdr",
-  "version": "0.4.0",
-  "description": "Boundary-driven refactoring for pull requests, with evidence-backed phase gates and a resumable audit trail.",
+  "name": "bat",
+  "version": "0.5.0",
+  "description": "BAT implements Boundary-Driven Refactoring for pull requests, with evidence-backed phase gates and a resumable audit trail.",
   "author": {
-    "name": "BDR Contributors"
+    "name": "BAT Contributors"
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "Boundary-Driven Refactoring",
-    "shortDescription": "Refactor PRs with a verified audit trail",
-    "longDescription": "Run Boundary-Driven Refactoring on a pull request, fix verified defects, and leave resumable repository and GitHub evidence.",
-    "developerName": "BDR Contributors",
+    "displayName": "BAT — BugAnnihilatorThreethousand",
+    "shortDescription": "Annihilate PR bugs with a verified audit trail",
+    "longDescription": "Run BAT's Boundary-Driven Refactoring implementation on a pull request, fix verified defects, and leave resumable repository and GitHub evidence.",
+    "developerName": "BAT Contributors",
     "category": "Productivity",
     "capabilities": ["Interactive", "Write"],
     "defaultPrompt": [
-      "Refactor this pull request with BDR and leave a verified audit trail."
+      "Run BAT on this pull request with BDR and leave a verified audit trail."
     ]
   }
 }

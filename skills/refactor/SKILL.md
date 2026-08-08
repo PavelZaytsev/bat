@@ -1,9 +1,14 @@
 ---
 name: refactor
-description: Refactor a pull request or large change with Boundary-Driven Refactoring (BDR). Use when asked to refactor a PR, structurally fix multiple defects, make implicit facts explicit, or run an unattended evidence-backed refactor that must leave a resumable audit trail. Do not use for a single obvious local edit unless the user explicitly requests BDR.
+description: Run BAT's implementation of Boundary-Driven Refactoring (BDR) on a pull request or large change. Use when asked to refactor a PR, structurally fix multiple defects, make implicit facts explicit, or run an unattended evidence-backed refactor that must leave a resumable audit trail. Do not use for a single obvious local edit unless the user explicitly requests BDR.
 ---
 
-# Refactor with BDR
+# Refactor with BAT and BDR
+
+BAT (BugAnnihilatorThreethousand) is the product that ships this skill. Boundary-Driven
+Refactoring (BDR) is the provider-neutral methodology it implements. The workflow and evidence
+contract below are BDR concepts; another product may implement the same method without becoming
+BAT or depending on BAT's model, host, or packaging choices.
 
 Run toward a terminal state without discretionary questions while the host continues execution and grants the required permissions. Either leave a verified, reviewable refactor or a precise decision packet. Host approval prompts, authentication challenges, cancellation, and execution limits can still interrupt the run; never promise literal zero interruption. Never convert uncertainty into guessed product semantics.
 

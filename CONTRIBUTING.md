@@ -2,8 +2,10 @@
 
 BAT (**BugAnnihilatorThreethousand**) is the product. BDR (**Boundary-Driven Refactoring**) is the
 methodology BAT executes. Use those names consistently in issues, pull requests, documentation,
-and experiments. Existing `.bdr/` state paths and BDR evidence identifiers are part of the
-methodology's compatibility contract.
+and experiments. The canonical product and plugin identifier is `bat`, including Claude's
+`/bat:refactor` entrypoint. The `bdr` CLI and engine, `.bdr/` state paths, `BDR_ACTOR`,
+`bdr.dev/*` schemas, and BDR evidence identifiers remain part of the methodology's compatibility
+contract.
 
 ## Work through an issue and a branch
 

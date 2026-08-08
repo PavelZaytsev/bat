@@ -1,7 +1,7 @@
 interface:
-  display_name: "Boundary-Driven Refactor"
-  short_description: "Refactor PRs with a verified audit trail"
-  default_prompt: "Use $refactor (or @refactor in ChatGPT) to refactor this PR with BDR and leave a verified audit trail."
+  display_name: "BAT Boundary-Driven Refactor"
+  short_description: "Annihilate PR bugs with a verified audit trail"
+  default_prompt: "Use BAT's $refactor (or @refactor in ChatGPT) to run BDR on this PR and leave a verified audit trail."
 
 policy:
   allow_implicit_invocation: false
