@@ -1,6 +1,10 @@
 package bat.trace
 
 import bat.protocol.*
+
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+
 import zio.Chunk
 import zio.json.*
 import zio.json.ast.Json
@@ -37,6 +41,21 @@ final case class SafeBudgets(
 sealed trait SafeTraceEvent extends Serializable
 
 object SafeTraceEvent:
+  opaque type SafeCallId = String
+
+  object SafeCallId:
+    private val Digest = "^sha256:[0-9a-f]{64}$".r
+
+    private[trace] def fromDigest(value: String): SafeCallId = value
+
+    given JsonCodec[SafeCallId] =
+      JsonCodec.string.transformOrFail(
+        value =>
+          if Digest.matches(value) then Right(value)
+          else Left("safe call_id must contain only a SHA-256 digest"),
+        identity
+      )
+
   /** A durable proof that a reasoning context is opaque. There is deliberately
     * no public constructor for any other value, and the codec rejects `false`.
     */
@@ -104,24 +123,24 @@ object SafeTraceEvent:
 
   @jsonHint("function_call")
   final case class FunctionCall private[trace] (
-      @jsonField("call_id") callId: String,
+      @jsonField("call_id_digest") callId: SafeCallId,
       name: String,
       arguments: RedactedTracePayload
   ) extends SafeTraceEvent
 
   object FunctionCall:
-    def redacted(callId: String, name: String): FunctionCall =
+    def redacted(callId: SafeCallId, name: String): FunctionCall =
       FunctionCall(callId, name, RedactedTracePayload.Redacted)
 
   @jsonHint("function_output")
   final case class FunctionOutput private[trace] (
-      @jsonField("call_id") callId: String,
+      @jsonField("call_id_digest") callId: SafeCallId,
       @jsonField("is_error") isError: Boolean,
       output: RedactedTracePayload
   ) extends SafeTraceEvent
 
   object FunctionOutput:
-    def redacted(callId: String, isError: Boolean): FunctionOutput =
+    def redacted(callId: SafeCallId, isError: Boolean): FunctionOutput =
       FunctionOutput(callId, isError, RedactedTracePayload.Redacted)
 
   @jsonHint("final_output")
@@ -169,7 +188,7 @@ final case class SafeTraceDocument(
 
 object SafeTraceDocument:
   def make(events: Chunk[SafeTraceEvent]): SafeTraceDocument =
-    SafeTraceDocument("bat.dev/conformance-trace", 1, events)
+    SafeTraceDocument("bat.dev/conformance-trace", 2, events)
 
 object SafeTrace:
   def runStart(
@@ -217,10 +236,16 @@ object SafeTrace:
     SafeTraceEvent.ReasoningContext.redacted(context.mode.wire)
 
   def functionCall(call: bat.protocol.FunctionCall): SafeTraceEvent =
-    SafeTraceEvent.FunctionCall.redacted(call.callId.value, call.name)
+    SafeTraceEvent.FunctionCall.redacted(
+      SafeTraceEvent.SafeCallId.fromDigest(callIdDigest(call.callId)),
+      call.name
+    )
 
   def functionOutput(output: bat.protocol.FunctionOutput): SafeTraceEvent =
-    SafeTraceEvent.FunctionOutput.redacted(output.callId.value, output.isError)
+    SafeTraceEvent.FunctionOutput.redacted(
+      SafeTraceEvent.SafeCallId.fromDigest(callIdDigest(output.callId)),
+      output.isError
+    )
 
   def finalOutput(output: bat.protocol.FinalOutput): SafeTraceEvent =
     SafeTraceEvent.FinalOutput(output.text.length)
@@ -259,3 +284,13 @@ object SafeTrace:
         bdr.nextAction
       )
     )
+
+  /** Provider call IDs are correlation material, not durable evidence. They can
+    * contain provider-controlled text, so traces retain only a stable digest
+    * that still links a call to its output inside one document.
+    */
+  private def callIdDigest(callId: CallId): String =
+    val digest = MessageDigest
+      .getInstance("SHA-256")
+      .digest(callId.value.getBytes(StandardCharsets.UTF_8))
+    s"sha256:${digest.iterator.map(byte => f"${byte & 0xff}%02x").mkString}"

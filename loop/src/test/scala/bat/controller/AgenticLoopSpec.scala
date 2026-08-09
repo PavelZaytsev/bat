@@ -182,7 +182,7 @@ object AgenticLoopSpec extends ZIOSpecDefault:
         yield assertTrue(
           exit.left.toOption.contains(
             BatError.ProtocolViolation(
-              "backend requested a tool unavailable in audit mode: bdr_apply"
+              "backend requested a tool unavailable in audit mode"
             )
           ),
           requests.size == 1,
@@ -264,7 +264,7 @@ object AgenticLoopSpec extends ZIOSpecDefault:
         yield assertTrue(
           exit.left.toOption.contains(
             BatError.ProtocolViolation(
-              "call_id conflict-1 was reused with different content"
+              "backend reused a call_id with different content"
             )
           ),
           executions == Chunk(firstArguments)
@@ -316,7 +316,7 @@ object AgenticLoopSpec extends ZIOSpecDefault:
         yield assertTrue(
           exit.left.toOption.contains(
             BatError.ProtocolViolation(
-              "call_id batch-1 was reused with different content"
+              "backend reused a call_id with different content"
             )
           ),
           executions == Chunk(firstArguments),

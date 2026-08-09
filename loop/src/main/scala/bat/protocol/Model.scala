@@ -296,13 +296,17 @@ object TurnBudget:
       Left(BatError.BudgetExceeded(BudgetKind.TotalTokens))
     else Right(TurnBudget(remainingWallTime, remainingTotalTokens))
 
-final case class DeveloperInput private (text: String)
+final case class DeveloperInput private (text: String):
+  override def toString: String =
+    s"DeveloperInput(characters=${text.length}, payload=<redacted>)"
 
 object DeveloperInput:
   def make(text: String): Either[BatError, DeveloperInput] =
     Validation.nonBlank(text, "developer input").map(DeveloperInput(_))
 
-final case class UserInput private (text: String)
+final case class UserInput private (text: String):
+  override def toString: String =
+    s"UserInput(characters=${text.length}, payload=<redacted>)"
 
 object UserInput:
   def make(text: String): Either[BatError, UserInput] =
@@ -322,7 +326,9 @@ final case class FunctionCall private (
     callId: CallId,
     name: String,
     arguments: Json.Obj
-)
+):
+  override def toString: String =
+    "FunctionCall(call_id=<redacted>, name=<redacted>, arguments=<redacted>)"
 
 object FunctionCall:
   def make(
@@ -339,7 +345,9 @@ final case class FunctionOutput private (
     callId: CallId,
     output: Json,
     isError: Boolean
-)
+):
+  override def toString: String =
+    s"FunctionOutput(call_id=<redacted>, isError=$isError, output=<redacted>)"
 
 object FunctionOutput:
   def make(
@@ -351,7 +359,9 @@ object FunctionOutput:
       FunctionOutput(callId, output, isError)
     }
 
-final case class FinalOutput private (text: String)
+final case class FinalOutput private (text: String):
+  override def toString: String =
+    s"FinalOutput(characters=${text.length}, payload=<redacted>)"
 
 object FinalOutput:
   def make(text: String): Either[BatError, FinalOutput] =
@@ -492,7 +502,9 @@ final case class ModelRequest[C <: OpaqueReasoningContext] private (
     bdrState: BdrStateView,
     iteration: Int,
     continuation: Option[C]
-)
+):
+  override def toString: String =
+    s"ModelRequest(identity=${pins.identity}, iteration=$iteration, inputs=${inputs.size}, tools=${tools.size}, continuation=${continuation.nonEmpty}, payload=<redacted>)"
 
 object ModelRequest:
   def make[C <: OpaqueReasoningContext](
@@ -537,6 +549,9 @@ object ModelRequest:
 
 sealed trait ModelTurn[+C <: OpaqueReasoningContext] extends Serializable:
   def usage: Usage
+
+  final override def toString: String =
+    "ModelTurn(payload=<redacted>)"
 
 object ModelTurn:
   final case class ToolCalls[C <: OpaqueReasoningContext] private[protocol] (

@@ -335,7 +335,7 @@ object AgenticLoop:
                 case Some(_) =>
                   Left(
                     BatError.ProtocolViolation(
-                      s"call_id ${call.callId.value} was reused with different content"
+                      "backend reused a call_id with different content"
                     )
                   )
             yield prepared :+ PreparedCall(call, digest, cached)

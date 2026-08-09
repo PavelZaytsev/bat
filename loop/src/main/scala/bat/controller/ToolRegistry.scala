@@ -24,7 +24,9 @@ enum ToolAuthority:
   case ReadOnly
   case Writer
 
-final case class ToolInvocation(callId: CallId, arguments: Json.Obj)
+final case class ToolInvocation(callId: CallId, arguments: Json.Obj):
+  override def toString: String =
+    "ToolInvocation(call_id=<redacted>, arguments=<redacted>)"
 
 trait Tool:
   def definition: ToolDefinition
@@ -109,13 +111,13 @@ final class ToolRegistry private (
       case None =>
         Left(
           BatError.ProtocolViolation(
-            s"backend requested unknown tool: ${call.name}"
+            "backend requested an unknown tool"
           )
         )
       case Some(tool) if !permitted(tool, mode) =>
         Left(
           BatError.ProtocolViolation(
-            s"backend requested a tool unavailable in ${mode.wire} mode: ${call.name}"
+            s"backend requested a tool unavailable in ${mode.wire} mode"
           )
         )
       case Some(tool) => Right(tool)
@@ -327,7 +329,7 @@ private object StrictToolSchema:
         else
           Left(
             BatError.ProtocolViolation(
-              s"tool argument $path has unexpected keys: ${extra.toList.sorted.mkString(", ")}"
+              s"tool argument $path contains ${extra.size} unexpected key(s)"
             )
           )
       _ <- value.fields.foldLeft[Either[BatError, Unit]](Right(())) {

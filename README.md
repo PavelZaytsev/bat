@@ -60,6 +60,12 @@ scala-cli test --server=false loop
 scala-cli run --server=false loop --main-class bat.conformance.GoldenTrace
 ```
 
+Reasoning providers plug into a functional backend boundary while retaining their native wire
+dialects and opaque replay state. Transport mechanics are shared; provider DTOs and continuation
+rules are not. See
+[`docs/adr/0003-reasoning-backends.md`](docs/adr/0003-reasoning-backends.md) for the architecture and
+fail-closed dialect policy.
+
 To run the complete six-phase Java portability canary with the real controller and BDR engine—but
 zero provider, target-dependency, GPU, or paid-inference calls once BAT's Scala dependencies are
 provisioned:
@@ -201,15 +207,17 @@ This repository currently contains:
 - a commit-verified, validated JSON subprocess bridge from BAT to the existing BDR engine;
 - a pinned, resumable, OCI-isolated Java PR worker with durable operation receipts and local-only
   handoff;
-- an executable, reasoning-redacted two-tool backend conformance trace;
+- an executable, reasoning-redacted two-tool conformance harness that accepts an injected backend;
 - an executable, dependency-free Java canary that drives all six BDR phases with a sealed evaluator;
-- thin adapters for Claude Code, ChatGPT, and Codex;
+- thin host-installation adapters for Claude Code, ChatGPT, and Codex;
 - resumable repository-local state and an append-only audit journal;
 - idempotent GitHub issue projection with an offline outbox; and
 - benchmark records plus integrity validation.
 
-The hosted OpenAI backend, Harmony-correct gpt-oss backend, shared inference infrastructure, cost
-telemetry, trusted publishing, and PR automation are under active development.
+The hardware-independent GPT-OSS Responses adapter and shared scoped ZIO HTTP/SSE transport are
+implemented and conformance-tested against deterministic in-process fake endpoints in ordinary CI.
+No live GPT-OSS or exo-cluster validation is claimed yet. Claude Messages, Kimi Chat, cost
+telemetry, trusted publishing, and PR automation remain future work.
 
 ## Safety and authority
 
@@ -249,13 +257,16 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`docs/quickstart.md`](docs/quickstart.md) | executable six-phase Java canary and provider portability contract |
 | [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | BAT controller and BDR methodology responsibility boundary |
 | [`docs/adr/0002-isolated-java-worker.md`](docs/adr/0002-isolated-java-worker.md) | isolated Java PR worker, replay, evidence, and handoff boundary |
+| [`docs/adr/0003-reasoning-backends.md`](docs/adr/0003-reasoning-backends.md) | provider-native reasoning dialects, opaque replay, and shared transport boundary |
 
 ## Status
 
 BAT and BDR are alpha. The workflow is promising and the state engine is designed to fail closed,
 but the method has not yet been independently validated across multiple domains or organizations.
-The isolated worker is implemented as a controller module, but hosted OpenAI/gpt-oss transports and
-production worker orchestration are roadmap work and are not wired into the public host adapters.
+The isolated worker, provider-neutral backend harness, and hardware-independent GPT-OSS Responses
+adapter are implemented as controller modules. The adapter is fake-endpoint tested but not yet
+live- or exo-validated. Provider transports and production worker orchestration are not wired into
+the public host adapters.
 
 Start with a supervised pilot, inspect the audit trail, and retain ordinary code review and CI as
 the final merge authority.
