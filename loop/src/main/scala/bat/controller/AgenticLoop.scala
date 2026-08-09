@@ -2,6 +2,7 @@ package bat.controller
 
 import bat.bdr.{BdrSession, ValidatedBdrState}
 import bat.protocol.*
+import bat.telemetry.*
 import bat.trace.{SafeTrace, SafeTraceDocument, SafeTraceEvent}
 
 import zio.*
@@ -49,6 +50,77 @@ object AgenticLoop:
       tools: ToolRegistry,
       bdr: BdrSession
   ): IO[BatError, LoopResult] =
+    run(spec, backend, tools, bdr, Telemetry.noop)
+
+  /** Run with a payload-free telemetry sink. Existing callers use the no-op
+    * overload above, while applications can pass one shared sink to the
+    * controller and provider backend.
+    */
+  def run(
+      spec: RunSpec,
+      backend: Backend,
+      tools: ToolRegistry,
+      bdr: BdrSession,
+      telemetry: Telemetry
+  ): IO[BatError, LoopResult] =
+    for
+      telemetryStarted <- Clock.nanoTime
+      _ <- telemetry.emit(
+        TelemetryEvent.RunStarted(
+          spec.mode,
+          TelemetryRunPins.capture(spec.pins),
+          spec.budgets
+        )
+      )
+      exit <- runValidated(spec, backend, tools, bdr, telemetry).exit
+      telemetryFinished <- Clock.nanoTime
+      elapsed = elapsedMillis(telemetryStarted, telemetryFinished)
+      result <- exit match
+        case Exit.Success(value) =>
+          telemetry
+            .emit(
+              TelemetryEvent.RunCompleted(
+                value.outcome,
+                value.iterations,
+                value.toolCalls,
+                value.totalTokens,
+                elapsed,
+                BdrAttribution.from(value.iterations, value.bdrState.view)
+              )
+            )
+            .as(value)
+        case Exit.Failure(cause) =>
+          cause.failureOption match
+            case Some(error) =>
+              telemetry
+                .emit(
+                  TelemetryEvent.RunFailed(
+                    TelemetryCode.capture(error.code),
+                    elapsed
+                  )
+                ) *>
+                ZIO.fail(error)
+            case None =>
+              val code =
+                if cause.isInterrupted then "controller_interrupted"
+                else "controller_defect"
+              telemetry
+                .emit(
+                  TelemetryEvent.RunFailed(
+                    TelemetryCode.capture(code),
+                    elapsed
+                  )
+                ) *>
+                ZIO.refailCause(cause)
+    yield result
+
+  private def runValidated(
+      spec: RunSpec,
+      backend: Backend,
+      tools: ToolRegistry,
+      bdr: BdrSession,
+      telemetry: Telemetry
+  ): IO[BatError, LoopResult] =
     for
       _ <- ZIO
         .fail(
@@ -80,6 +152,7 @@ object AgenticLoop:
         backend,
         tools,
         bdr,
+        telemetry,
         negotiated,
         startedNanos
       ).timeoutFail(BatError.BudgetExceeded(BudgetKind.WallTime))(
@@ -92,11 +165,17 @@ object AgenticLoop:
       backend: Backend,
       tools: ToolRegistry,
       bdr: BdrSession,
+      telemetry: Telemetry,
       negotiated: NegotiatedCapabilities,
       startedNanos: Long
   ): IO[BatError, LoopResult] =
     for
       initialBdr <- bdr.checkpoint
+      _ <- telemetry.emit(
+        TelemetryEvent.BdrCheckpoint(
+          BdrAttribution.from(0, initialBdr.view)
+        )
+      )
       initial = LoopState[backend.Context](
         bdr = initialBdr,
         pendingInputs = Chunk(InputEvent.User(spec.user)),
@@ -122,6 +201,7 @@ object AgenticLoop:
         backend,
         tools,
         bdr,
+        telemetry,
         negotiated,
         startedNanos,
         initial
@@ -133,6 +213,7 @@ object AgenticLoop:
       backend: Backend,
       tools: ToolRegistry,
       bdr: BdrSession,
+      telemetry: Telemetry,
       negotiated: NegotiatedCapabilities,
       startedNanos: Long,
       state: LoopState[backend.Context]
@@ -157,7 +238,17 @@ object AgenticLoop:
         )
       )
       traceWithIteration = state.trace :+ SafeTrace.iteration(iteration)
-      turn <- backend.complete(request, turnBudget)
+      turnStarted <- Clock.nanoTime
+      turnExit <- backend.complete(request, turnBudget).exit
+      turnFinished <- Clock.nanoTime
+      _ <- telemetry.emit(
+        modelTurnTelemetry(
+          BdrAttribution.from(iteration, state.bdr.view),
+          elapsedMillis(turnStarted, turnFinished),
+          turnExit
+        )
+      )
+      turn <- restoreExit(turnExit)
       result <- turn match
         case ModelTurn.ToolCalls(context, calls, usage) =>
           handleToolTurn(
@@ -165,6 +256,7 @@ object AgenticLoop:
             backend,
             tools,
             bdr,
+            telemetry,
             negotiated,
             startedNanos,
             state.copy(iterations = iteration, trace = traceWithIteration),
@@ -176,6 +268,7 @@ object AgenticLoop:
           handleCompleted(
             spec,
             bdr,
+            telemetry,
             state.copy(iterations = iteration, trace = traceWithIteration),
             output,
             usage
@@ -191,6 +284,7 @@ object AgenticLoop:
       backend: Backend,
       tools: ToolRegistry,
       bdr: BdrSession,
+      telemetry: Telemetry,
       negotiated: NegotiatedCapabilities,
       startedNanos: Long,
       state: LoopState[backend.Context],
@@ -211,9 +305,22 @@ object AgenticLoop:
         )
       )
       freshCount = prepared.count(_.cached.isEmpty)
-      execution <- executePrepared(prepared, tools, spec.mode, state.ledger)
+      execution <- executePrepared(
+        prepared,
+        tools,
+        spec.mode,
+        bdr,
+        telemetry,
+        state.iterations,
+        state.ledger
+      )
       (outputs, ledger) = execution
       latestBdr <- bdr.current
+      _ <- telemetry.emit(
+        TelemetryEvent.BdrCheckpoint(
+          BdrAttribution.from(state.iterations, latestBdr.view)
+        )
+      )
       nextTrace =
         state.trace ++
           Chunk(SafeTrace.reasoning(context)) ++
@@ -235,6 +342,7 @@ object AgenticLoop:
         backend,
         tools,
         bdr,
+        telemetry,
         negotiated,
         startedNanos,
         nextState
@@ -244,6 +352,7 @@ object AgenticLoop:
   private def handleCompleted[C <: OpaqueReasoningContext](
       spec: RunSpec,
       bdr: BdrSession,
+      telemetry: Telemetry,
       state: LoopState[C],
       output: FinalOutput,
       usage: Usage
@@ -251,6 +360,11 @@ object AgenticLoop:
     for
       totalTokens <- accountUsage(state.totalTokens, usage, spec.budgets)
       checkpoint <- bdr.checkpoint
+      _ <- telemetry.emit(
+        TelemetryEvent.BdrCheckpoint(
+          BdrAttribution.from(state.iterations, checkpoint.view)
+        )
+      )
       outcome <- ZIO.fromEither(completionOutcome(spec.mode, checkpoint))
       completedTrace =
         state.trace ++ Chunk(
@@ -351,18 +465,157 @@ object AgenticLoop:
       prepared: Chunk[PreparedCall],
       tools: ToolRegistry,
       mode: RunMode,
+      bdr: BdrSession,
+      telemetry: Telemetry,
+      iteration: Int,
       initialLedger: Map[CallId, ExecutedCall]
   ): IO[BatError, (Chunk[FunctionOutput], Map[CallId, ExecutedCall])] =
     ZIO.foldLeft(prepared)((Chunk.empty[FunctionOutput], initialLedger)) {
       case ((outputs, ledger), item) =>
         item.cached match
-          case Some(output) => ZIO.succeed((outputs :+ output, ledger))
-          case None         =>
-            tools.execute(item.call, mode).map { output =>
-              val recorded = ExecutedCall(item.call.name, item.digest, output)
-              (outputs :+ output, ledger.updated(item.call.callId, recorded))
-            }
+          case Some(output) =>
+            for
+              current <- bdr.current
+              attribution = BdrAttribution.from(iteration, current.view)
+              _ <- telemetry.emit(
+                TelemetryEvent.ToolExecution(
+                  TelemetryToolName.capture(item.call.name),
+                  attribution,
+                  Measurement.Observed(attribution),
+                  ToolExecutionOutcome.Replayed,
+                  Measurement.Unavailable(MissingReason.NotApplicable),
+                  Measurement.Unavailable(MissingReason.NotApplicable)
+                )
+              )
+            yield (outputs :+ output, ledger)
+          case None =>
+            for
+              beforeState <- bdr.current
+              before = BdrAttribution.from(iteration, beforeState.view)
+              started <- Clock.nanoTime
+              execution <- tools.execute(item.call, mode).exit
+              finished <- Clock.nanoTime
+              afterExit <- bdr.current.exit
+              after = afterExit match
+                case Exit.Success(state) =>
+                  Measurement.Observed(
+                    BdrAttribution.from(iteration, state.view)
+                  )
+                case Exit.Failure(_) =>
+                  Measurement.Unavailable(
+                    MissingReason.FailedBeforeMeasurement
+                  )
+              _ <- telemetry.emit(
+                toolTelemetry(
+                  TelemetryToolName.capture(item.call.name),
+                  before,
+                  after,
+                  elapsedMillis(started, finished),
+                  execution
+                )
+              )
+              output <- restoreExit(execution)
+              _ <- restoreExit(afterExit)
+              recorded = ExecutedCall(item.call.name, item.digest, output)
+            yield (
+              outputs :+ output,
+              ledger.updated(item.call.callId, recorded)
+            )
     }
+
+  private def modelTurnTelemetry[C <: OpaqueReasoningContext](
+      attribution: BdrAttribution,
+      durationMillis: Long,
+      exit: Exit[BatError, ModelTurn[C]]
+  ): TelemetryEvent.ModelTurn =
+    exit match
+      case Exit.Success(turn) =>
+        val (kind, errorCode) = turn match
+          case _: ModelTurn.ToolCalls[?] =>
+            ModelTurnKind.ToolCalls -> Measurement.Unavailable(
+              MissingReason.NotApplicable
+            )
+          case _: ModelTurn.Completed =>
+            ModelTurnKind.Completed -> Measurement.Unavailable(
+              MissingReason.NotApplicable
+            )
+          case failed: ModelTurn.Failed =>
+            ModelTurnKind.ProviderFailed -> Measurement.Observed(
+              TelemetryCode.capture(failed.error.code)
+            )
+        TelemetryEvent.ModelTurn(
+          attribution,
+          kind,
+          TokenMeasurements.from(turn.usage),
+          ModelTimingMeasurements.logicalTurn(durationMillis),
+          errorCode
+        )
+      case Exit.Failure(cause) =>
+        val code = TelemetryCode.capture(
+          cause.failureOption
+            .map(_.code)
+            .getOrElse("backend_effect_failed")
+        )
+        TelemetryEvent.ModelTurn(
+          attribution,
+          ModelTurnKind.BackendFailed,
+          TokenMeasurements.unavailable(
+            MissingReason.FailedBeforeMeasurement
+          ),
+          ModelTimingMeasurements.logicalTurn(durationMillis),
+          Measurement.Observed(code)
+        )
+
+  private def toolTelemetry(
+      name: TelemetryToolName,
+      before: BdrAttribution,
+      after: Measurement[BdrAttribution],
+      durationMillis: Long,
+      exit: Exit[BatError, FunctionOutput]
+  ): TelemetryEvent.ToolExecution =
+    exit match
+      case Exit.Success(output) =>
+        val (outcome, errorCode) =
+          if output.isError then
+            ToolExecutionOutcome.ToolError -> Measurement.Observed(
+              TelemetryCode.capture("tool_reported_error")
+            )
+          else
+            ToolExecutionOutcome.Succeeded -> Measurement.Unavailable(
+              MissingReason.NotApplicable
+            )
+        TelemetryEvent.ToolExecution(
+          name,
+          before,
+          after,
+          outcome,
+          Measurement.Observed(durationMillis),
+          errorCode
+        )
+      case Exit.Failure(cause) =>
+        val code = TelemetryCode.capture(
+          cause.failureOption
+            .map(_.code)
+            .getOrElse("tool_execution_failed")
+        )
+        TelemetryEvent.ToolExecution(
+          name,
+          before,
+          after,
+          ToolExecutionOutcome.Failed,
+          Measurement.Observed(durationMillis),
+          Measurement.Observed(code)
+        )
+
+  private def elapsedMillis(startedNanos: Long, finishedNanos: Long): Long =
+    Duration
+      .fromNanos(Math.max(0L, finishedNanos - startedNanos))
+      .toMillis
+
+  private def restoreExit[E, A](exit: Exit[E, A]): IO[E, A] =
+    exit match
+      case Exit.Success(value) => ZIO.succeed(value)
+      case Exit.Failure(cause) => ZIO.refailCause(cause)
 
   private val TerminalStates = Set(
     "verification_pending",
