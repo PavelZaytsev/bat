@@ -1,0 +1,84 @@
+{
+  "schema": "bat.dev/java-six-phase-fixture/v1",
+  "fixture_id": "java-six-phase-ingress-001",
+  "java_release": 17,
+  "subject": {
+    "base_tree": "subject/base",
+    "target_patch": "subject/head.patch",
+    "actor_visible_roots": [
+      "README.md",
+      "src/main/java",
+      "src/test/java"
+    ],
+    "actor_excluded_fixture_roots": [
+      "oracle",
+      "reference"
+    ],
+    "materialization": "Copy only subject/base contents, commit base, apply subject/head.patch, and commit head in a separate repository. Never copy the fixture root."
+  },
+  "entrypoints": {
+    "public": "dev.bat.examples.ingress.IngressGatewayPublicTest",
+    "hidden": "dev.bat.examples.ingress.IngressGatewayHiddenTest"
+  },
+  "source_roots": {
+    "production": "src/main/java",
+    "public_tests": "src/test/java",
+    "hidden_tests": "oracle/src/test/java"
+  },
+  "boundary": {
+    "site": "src/main/java/dev/bat/examples/ingress/MessageRouter.java",
+    "authority": "IngressGateway.acceptInternal and IngressGateway.acceptExternal",
+    "fact": "whether the message entered through authenticated internal ingress or untrusted external ingress",
+    "consumer_decision": "whether ContentScanner must authorize the body before acceptance",
+    "target_inference": "sender text ends with @corp.test",
+    "initial_shape": "value",
+    "normalized_as": "capability",
+    "repair_direction": "represent ingress trust explicitly, route it from both gateway producers, then delete the sender-suffix inference"
+  },
+  "decision_space": [
+    {
+      "ingress": "internal",
+      "sender_shape": "corporate",
+      "scanner_required": false,
+      "visibility": "public"
+    },
+    {
+      "ingress": "internal",
+      "sender_shape": "noncorporate",
+      "scanner_required": false,
+      "visibility": "hidden"
+    },
+    {
+      "ingress": "external",
+      "sender_shape": "corporate",
+      "scanner_required": true,
+      "visibility": "hidden"
+    },
+    {
+      "ingress": "external",
+      "sender_shape": "noncorporate",
+      "scanner_required": true,
+      "visibility": "public"
+    }
+  ],
+  "expected": {
+    "base": {
+      "public_exit_code": 0,
+      "hidden_exit_code": 0
+    },
+    "head": {
+      "public_exit_code": 0,
+      "hidden_exit_code": 1,
+      "failure_fingerprint": "external corporate-looking sender: expected REJECTED but was ACCEPTED"
+    },
+    "reference_repair": {
+      "public_exit_code": 0,
+      "hidden_exit_code": 0
+    }
+  },
+  "reference": {
+    "repair_patch": "reference/repair.patch",
+    "authoritative": false,
+    "scoring": "Behavior, preservation, and valid BDR evidence are authoritative; an actor need not reproduce this patch."
+  }
+}

@@ -1,0 +1,27 @@
+diff --git a/src/main/java/dev/bat/examples/ingress/IngressGateway.java b/src/main/java/dev/bat/examples/ingress/IngressGateway.java
+--- a/src/main/java/dev/bat/examples/ingress/IngressGateway.java
++++ b/src/main/java/dev/bat/examples/ingress/IngressGateway.java
+@@ -9,10 +9,12 @@ public final class IngressGateway {
+     }
+ 
+     public Decision acceptInternal(String sender, String body) {
+-        return router.route(new Message(sender, body));
++        return router.route(
++                new Message(sender, body, Ingress.AUTHENTICATED_INTERNAL));
+     }
+ 
+     public Decision acceptExternal(String sender, String body) {
+-        return router.route(new Message(sender, body));
++        return router.route(
++                new Message(sender, body, Ingress.UNTRUSTED_EXTERNAL));
+     }
+ }
+diff --git a/src/main/java/dev/bat/examples/ingress/Message.java b/src/main/java/dev/bat/examples/ingress/Message.java
+--- a/src/main/java/dev/bat/examples/ingress/Message.java
++++ b/src/main/java/dev/bat/examples/ingress/Message.java
+@@ -1,4 +1,4 @@
+ package dev.bat.examples.ingress;
+ 
+-record Message(String sender, String body) {
++record Message(String sender, String body, Ingress ingress) {
+ }

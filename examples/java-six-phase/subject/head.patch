@@ -1,0 +1,29 @@
+diff --git a/src/main/java/dev/bat/examples/ingress/IngressGateway.java b/src/main/java/dev/bat/examples/ingress/IngressGateway.java
+--- a/src/main/java/dev/bat/examples/ingress/IngressGateway.java
++++ b/src/main/java/dev/bat/examples/ingress/IngressGateway.java
+@@ -9,10 +9,10 @@ public final class IngressGateway {
+     }
+ 
+     public Decision acceptInternal(String sender, String body) {
+-        return router.route(new Message(sender, body), false);
++        return router.route(new Message(sender, body));
+     }
+ 
+     public Decision acceptExternal(String sender, String body) {
+-        return router.route(new Message(sender, body), true);
++        return router.route(new Message(sender, body));
+     }
+ }
+diff --git a/src/main/java/dev/bat/examples/ingress/MessageRouter.java b/src/main/java/dev/bat/examples/ingress/MessageRouter.java
+--- a/src/main/java/dev/bat/examples/ingress/MessageRouter.java
++++ b/src/main/java/dev/bat/examples/ingress/MessageRouter.java
+@@ -8,7 +8,8 @@ final class MessageRouter {
+         this.scanner = scanner;
+     }
+ 
+-    Decision route(Message message, boolean scanRequired) {
++    Decision route(Message message) {
++        boolean scanRequired = !message.sender().endsWith("@corp.test");
+         if (!scanRequired) {
+             return Decision.ACCEPTED;
+         }

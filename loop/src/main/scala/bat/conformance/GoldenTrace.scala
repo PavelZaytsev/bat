@@ -1,6 +1,6 @@
 package bat.conformance
 
-import bat.bdr.{BdrSession, ValidatedBdrState}
+import bat.bdr.{BdrSession, BdrTools, ValidatedBdrState}
 import bat.controller.*
 import bat.protocol.*
 
@@ -73,9 +73,7 @@ object GoldenScenario:
       bdr <- FakeBdr.make(initial, terminal)
       backend <- ScriptedBackend.make(identity, capabilities)
       registry <- ZIO.fromEither(
-        ToolRegistry.make(
-          Chunk(new AuditTool(bdr), new ApplyTool(bdr))
-        )
+        ToolRegistry.make(BdrTools.all(bdr))
       )
       spec = RunSpec.make(
         RunMode.FullWriter,
@@ -146,11 +144,14 @@ object GoldenScenario:
               "type" -> Json.Str("set_run_state"),
               "state" -> Json.Str("ready_for_review")
             )
+            operationJson <- from(
+              StrictJson.canonical(operation, "golden BDR operation")
+            )
             call <- from(
               FunctionCall.make(
                 callId,
                 "bdr_apply",
-                obj("operation" -> operation)
+                obj("operation_json" -> Json.Str(operationJson))
               )
             )
             usage <- from(
@@ -242,6 +243,14 @@ object GoldenScenario:
           Json.Arr(Chunk(obj("revision" -> Json.Num(state.revision.value))))
         )
 
+    def completionCheck: IO[BatError, Json.Obj] =
+      ZIO.succeed(
+        obj(
+          "eligible" -> Json.Bool(true),
+          "revision" -> Json.Num(41)
+        )
+      )
+
   private object FakeBdr:
     def make(
         initial: ValidatedBdrState,
@@ -253,47 +262,6 @@ object GoldenScenario:
         audits <- Ref.make(0)
         applies <- Ref.make(0)
       yield new FakeBdr(ref, terminal, checkpoints, audits, applies)
-
-  private final class AuditTool(bdr: BdrSession) extends Tool:
-    override val authority: ToolAuthority = ToolAuthority.ReadOnly
-
-    val definition: ToolDefinition = unsafe(
-      ToolDefinition.make(
-        "bdr_audit_summary",
-        "Read the validated BDR audit summary.",
-        objectSchema()
-      )
-    )
-
-    def execute(invocation: ToolInvocation): IO[ToolError, Json] =
-      bdr.auditSummary.mapError(_ => unsafe(ToolError.make("bdr_audit_failed")))
-
-  private final class ApplyTool(bdr: BdrSession) extends Tool:
-    override val authority: ToolAuthority = ToolAuthority.Writer
-
-    val definition: ToolDefinition = unsafe(
-      ToolDefinition.make(
-        "bdr_apply",
-        "Apply one revision-checked BDR operation.",
-        objectSchema(
-          "operation" -> objectSchema(
-            "type" -> stringSchema,
-            "state" -> stringSchema
-          )
-        )
-      )
-    )
-
-    def execute(invocation: ToolInvocation): IO[ToolError, Json] =
-      val arguments = invocation.arguments
-      arguments.fields.collectFirst { case ("operation", value: Json.Obj) =>
-        value
-      } match
-        case Some(operation) =>
-          bdr
-            .apply(operation)
-            .mapError(_ => unsafe(ToolError.make("bdr_apply_failed")))
-        case None => ZIO.fail(unsafe(ToolError.make("invalid_operation")))
 
   private def state(
       revision: Long,
@@ -317,18 +285,6 @@ object GoldenScenario:
       view
     )
 
-  private def objectSchema(fields: (String, Json.Obj)*): Json.Obj =
-    obj(
-      "type" -> Json.Str("object"),
-      "properties" -> Json.Obj(Chunk.fromIterable(fields)),
-      "required" -> Json.Arr(
-        Chunk.fromIterable(fields.map(field => Json.Str(field._1)))
-      ),
-      "additionalProperties" -> Json.Bool(false)
-    )
-
-  private val stringSchema: Json.Obj = obj("type" -> Json.Str("string"))
-
   private def obj(fields: (String, Json)*): Json.Obj =
     Json.Obj(Chunk.fromIterable(fields))
 
@@ -341,9 +297,3 @@ object GoldenScenario:
 
   private def from[A](value: Either[BatError, A]): IO[BatError, A] =
     ZIO.fromEither(value)
-
-  private def unsafe[A](value: Either[BatError, A]): A =
-    value.fold(
-      error => throw new IllegalArgumentException(error.safeMessage),
-      identity
-    )

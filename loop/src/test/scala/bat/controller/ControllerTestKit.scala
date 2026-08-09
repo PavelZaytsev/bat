@@ -177,6 +177,16 @@ object ControllerTestKit:
     def auditSummary: IO[BatError, Json] =
       auditCalls.update(_ + 1).as(auditResult)
 
+    def completionCheck: IO[BatError, Json.Obj] =
+      state.get.map(current =>
+        Json.Obj(
+          Chunk(
+            "eligible" -> Json.Bool(false),
+            "revision" -> Json.Num(current.revision.value)
+          )
+        )
+      )
+
   object FakeBdr:
     def make(
         initial: ValidatedBdrState,

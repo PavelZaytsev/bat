@@ -614,6 +614,13 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
         ZIO.fail(BatError.BdrFailure("unexpected_apply", "unexpected apply"))
       def auditSummary: IO[BatError, Json] =
         ZIO.succeed(Json.Arr(Chunk.empty))
+      def completionCheck: IO[BatError, Json.Obj] =
+        ZIO.succeed(
+          obj(
+            "eligible" -> Json.Bool(runState == "ready_for_review"),
+            "revision" -> Json.Num(revision.value)
+          )
+        )
 
   private final case class RefAuthority(current: Ref[PullRequestPins])
       extends PullRequestAuthority:

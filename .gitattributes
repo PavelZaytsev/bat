@@ -2,3 +2,6 @@
 # trailing blank lines, are validated by scripts/check_benchmark_artifacts.py.
 benchmarks/pilot/runs/**/artifacts/command-output/*.txt -whitespace
 benchmarks/pilot/runs/**/artifacts/final.patch -whitespace
+
+# Stored unified diffs require a one-character prefix on blank context lines.
+examples/java-six-phase/**/*.patch -whitespace
