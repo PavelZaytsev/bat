@@ -764,6 +764,12 @@ final class JavaWorkerSession private (
             delegate.auditSummary
         )
 
+      def completionCheck =
+        serialized(
+          healthyWorkspaceUnlocked.mapError(bdrFailure) *>
+            delegate.completionCheck
+        )
+
   private def serialized[E, A](effect: IO[E, A]): IO[E, A] =
     actionMutex.withPermit(effect)
 

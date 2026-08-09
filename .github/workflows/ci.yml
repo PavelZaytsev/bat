@@ -119,6 +119,11 @@ jobs:
       - name: Run agentic loop tests
         run: scala-cli test --server=false loop
 
+      - name: Run the offline six-phase Java canary
+        run: >-
+          scala-cli --power run --offline --server=false loop
+          --main-class bat.quickstart.ToyQuickstart
+
   isolation:
     name: Live OCI containment
     runs-on: ubuntu-latest

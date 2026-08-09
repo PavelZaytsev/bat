@@ -1,0 +1,11 @@
+diff --git a/src/main/java/dev/bat/examples/ingress/Ingress.java b/src/main/java/dev/bat/examples/ingress/Ingress.java
+new file mode 100644
+--- /dev/null
++++ b/src/main/java/dev/bat/examples/ingress/Ingress.java
+@@ -0,0 +1,6 @@
++package dev.bat.examples.ingress;
++
++enum Ingress {
++    AUTHENTICATED_INTERNAL,
++    UNTRUSTED_EXTERNAL
++}

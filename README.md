@@ -60,6 +60,18 @@ scala-cli test --server=false loop
 scala-cli run --server=false loop --main-class bat.conformance.GoldenTrace
 ```
 
+To run the complete six-phase Java portability canary with the real controller and BDR engine—but
+zero provider, target-dependency, GPU, or paid-inference calls once BAT's Scala dependencies are
+provisioned:
+
+```bash
+scala-cli run --server=false loop --main-class bat.quickstart.ToyQuickstart
+```
+
+See [`docs/quickstart.md`](docs/quickstart.md) for the buggy two-commit subject, five-invocation
+verification cadence, sealed evaluator, artifacts, and the exact boundary between portability
+evidence and model-quality evidence.
+
 The controller also contains a digest-pinned OCI worker for isolated Java PR authoring. It binds a
 run to exact authenticated base/head commits, exposes only bounded read/search/patch/Git and offline
 Maven/Gradle operations, and produces verified local commits or a patch—never a push. See
@@ -190,6 +202,7 @@ This repository currently contains:
 - a pinned, resumable, OCI-isolated Java PR worker with durable operation receipts and local-only
   handoff;
 - an executable, reasoning-redacted two-tool backend conformance trace;
+- an executable, dependency-free Java canary that drives all six BDR phases with a sealed evaluator;
 - thin adapters for Claude Code, ChatGPT, and Codex;
 - resumable repository-local state and an append-only audit journal;
 - idempotent GitHub issue projection with an offline outbox; and
@@ -233,6 +246,7 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`skills/refactor/references/autonomy.md`](skills/refactor/references/autonomy.md) | authority, safety, and interruption policy |
 | [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native memory, lifetime, and concurrency guidance |
 | [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
+| [`docs/quickstart.md`](docs/quickstart.md) | executable six-phase Java canary and provider portability contract |
 | [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | BAT controller and BDR methodology responsibility boundary |
 | [`docs/adr/0002-isolated-java-worker.md`](docs/adr/0002-isolated-java-worker.md) | isolated Java PR worker, replay, evidence, and handoff boundary |
 

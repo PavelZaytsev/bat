@@ -1,0 +1,89 @@
+diff --git a/src/main/java/dev/bat/examples/ingress/Ingress.java b/src/main/java/dev/bat/examples/ingress/Ingress.java
+new file mode 100644
+--- /dev/null
++++ b/src/main/java/dev/bat/examples/ingress/Ingress.java
+@@ -0,0 +1,6 @@
++package dev.bat.examples.ingress;
++
++enum Ingress {
++    AUTHENTICATED_INTERNAL,
++    UNTRUSTED_EXTERNAL
++}
+diff --git a/src/main/java/dev/bat/examples/ingress/IngressGateway.java b/src/main/java/dev/bat/examples/ingress/IngressGateway.java
+--- a/src/main/java/dev/bat/examples/ingress/IngressGateway.java
++++ b/src/main/java/dev/bat/examples/ingress/IngressGateway.java
+@@ -9,10 +9,12 @@ public final class IngressGateway {
+     }
+ 
+     public Decision acceptInternal(String sender, String body) {
+-        return router.route(new Message(sender, body));
++        return router.route(
++                new Message(sender, body, Ingress.AUTHENTICATED_INTERNAL));
+     }
+ 
+     public Decision acceptExternal(String sender, String body) {
+-        return router.route(new Message(sender, body));
++        return router.route(
++                new Message(sender, body, Ingress.UNTRUSTED_EXTERNAL));
+     }
+ }
+diff --git a/src/main/java/dev/bat/examples/ingress/Message.java b/src/main/java/dev/bat/examples/ingress/Message.java
+--- a/src/main/java/dev/bat/examples/ingress/Message.java
++++ b/src/main/java/dev/bat/examples/ingress/Message.java
+@@ -1,4 +1,4 @@
+ package dev.bat.examples.ingress;
+ 
+-record Message(String sender, String body) {
++record Message(String sender, String body, Ingress ingress) {
+ }
+diff --git a/src/main/java/dev/bat/examples/ingress/MessageRouter.java b/src/main/java/dev/bat/examples/ingress/MessageRouter.java
+--- a/src/main/java/dev/bat/examples/ingress/MessageRouter.java
++++ b/src/main/java/dev/bat/examples/ingress/MessageRouter.java
+@@ -9,7 +9,7 @@ final class MessageRouter {
+     }
+ 
+     Decision route(Message message) {
+-        boolean scanRequired = !message.sender().endsWith("@corp.test");
++        boolean scanRequired = message.ingress() == Ingress.UNTRUSTED_EXTERNAL;
+         if (!scanRequired) {
+             return Decision.ACCEPTED;
+         }
+diff --git a/src/test/java/dev/bat/examples/ingress/IngressGatewayPublicTest.java b/src/test/java/dev/bat/examples/ingress/IngressGatewayPublicTest.java
+--- a/src/test/java/dev/bat/examples/ingress/IngressGatewayPublicTest.java
++++ b/src/test/java/dev/bat/examples/ingress/IngressGatewayPublicTest.java
+@@ -4,6 +4,8 @@ public final class IngressGatewayPublicTest {
+     public static void main(String[] args) {
+         internalCorporateSenderBypassesScanner();
+         externalInternetSenderIsScanned();
++        externalCorporateLookingSenderIsStillScanned();
++        internalServiceAliasStillBypassesScanner();
+         System.out.println("PASS IngressGatewayPublicTest");
+     }
+ 
+@@ -26,6 +28,26 @@ public final class IngressGatewayPublicTest {
+         assertEquals(1, scanner.calls(), "external internet sender scan count");
+     }
+ 
++    private static void externalCorporateLookingSenderIsStillScanned() {
++        RecordingScanner scanner = new RecordingScanner(false);
++        IngressGateway gateway = new IngressGateway(scanner);
++
++        Decision actual = gateway.acceptExternal("mallory@corp.test", "spoofed update");
++
++        assertEquals(Decision.REJECTED, actual, "external corporate-looking sender");
++        assertEquals(1, scanner.calls(), "external corporate-looking sender scan count");
++    }
++
++    private static void internalServiceAliasStillBypassesScanner() {
++        RecordingScanner scanner = new RecordingScanner(false);
++        IngressGateway gateway = new IngressGateway(scanner);
++
++        Decision actual = gateway.acceptInternal("batch-job", "scheduled update");
++
++        assertEquals(Decision.ACCEPTED, actual, "internal service alias");
++        assertEquals(0, scanner.calls(), "internal service alias scan count");
++    }
++
+     private static void assertEquals(Object expected, Object actual, String label) {
+         if (!expected.equals(actual)) {
+             throw new AssertionError(label + ": expected " + expected + " but was " + actual);

@@ -1,0 +1,28 @@
+diff --git a/src/test/java/dev/bat/examples/ingress/IngressGatewayPublicTest.java b/src/test/java/dev/bat/examples/ingress/IngressGatewayPublicTest.java
+--- a/src/test/java/dev/bat/examples/ingress/IngressGatewayPublicTest.java
++++ b/src/test/java/dev/bat/examples/ingress/IngressGatewayPublicTest.java
+@@ -5,6 +5,7 @@ public final class IngressGatewayPublicTest {
+         internalCorporateSenderBypassesScanner();
+         externalInternetSenderIsScanned();
+         externalCorporateLookingSenderIsStillScanned();
++        internalServiceAliasStillBypassesScanner();
+         System.out.println("PASS IngressGatewayPublicTest");
+     }
+ 
+@@ -37,6 +38,16 @@ public final class IngressGatewayPublicTest {
+         assertEquals(1, scanner.calls(), "external corporate-looking sender scan count");
+     }
+ 
++    private static void internalServiceAliasStillBypassesScanner() {
++        RecordingScanner scanner = new RecordingScanner(false);
++        IngressGateway gateway = new IngressGateway(scanner);
++
++        Decision actual = gateway.acceptInternal("batch-job", "scheduled update");
++
++        assertEquals(Decision.ACCEPTED, actual, "internal service alias");
++        assertEquals(0, scanner.calls(), "internal service alias scan count");
++    }
++
+     private static void assertEquals(Object expected, Object actual, String label) {
+         if (!expected.equals(actual)) {
+             throw new AssertionError(label + ": expected " + expected + " but was " + actual);

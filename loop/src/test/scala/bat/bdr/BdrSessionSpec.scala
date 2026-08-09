@@ -22,6 +22,34 @@ object BdrSessionSpec extends ZIOSpecDefault:
   private val StatePath = Path.of(".bdr", "progress.yaml")
   private val RunState = "refactoring"
 
+  private final case class TrackerIdentity(
+      repository: String,
+      baseSha: String,
+      headSha: String,
+      runId: String,
+      maxFixedPointPasses: Int,
+      maxPhaseAttempts: Int,
+      githubProjection: String = "off",
+      revision: Long = 0L
+  )
+
+  private object TrackerIdentity:
+    def from(initialization: BdrInitialization): TrackerIdentity =
+      TrackerIdentity(
+        initialization.repository,
+        initialization.baseSha,
+        initialization.headSha,
+        initialization.runId,
+        initialization.maxFixedPointPasses,
+        initialization.maxPhaseAttempts
+      )
+
+  private final case class CompletionMutation(
+      revision: Long,
+      runState: String,
+      tracker: String
+  )
+
   def spec =
     suite("BdrSession")(
       test("validates every security-relevant configuration input") {
@@ -122,6 +150,200 @@ object BdrSessionSpec extends ZIOSpecDefault:
             valid.isRight
           )
         )
+      },
+      test("validates immutable initialization pins and limits") {
+        val valid = BdrInitialization.make(
+          baseSha = "0" * 40,
+          headSha = "1" * 40,
+          repository = "bat/example-java-six-phase",
+          runId = "BAT-TOY-001"
+        )
+        val invalid = Chunk(
+          BdrInitialization.make(
+            "base",
+            "1" * 40,
+            "bat/example",
+            "BAT-TOY"
+          ),
+          BdrInitialization.make(
+            "0" * 40,
+            "head",
+            "bat/example",
+            "BAT-TOY"
+          ),
+          BdrInitialization.make(
+            "0" * 40,
+            "0" * 40,
+            "bat/example",
+            "BAT-TOY"
+          ),
+          BdrInitialization.make(
+            "0" * 40,
+            "1" * 40,
+            "bad repository name",
+            "BAT-TOY"
+          ),
+          BdrInitialization.make(
+            "0" * 40,
+            "1" * 40,
+            "bat/example",
+            "bad run id"
+          ),
+          BdrInitialization.make(
+            "0" * 40,
+            "1" * 40,
+            "bat/example",
+            "BAT-TOY",
+            maxFixedPointPasses = 0
+          ),
+          BdrInitialization.make(
+            "0" * 40,
+            "1" * 40,
+            "bat/example",
+            "BAT-TOY",
+            maxPhaseAttempts = 101
+          )
+        )
+
+        assertTrue(
+          valid.isRight,
+          invalid.map(_.left.toOption.map(_.code)) == Chunk(
+            Some("invalid_base_sha"),
+            Some("invalid_head_sha"),
+            Some("invalid_commit_range"),
+            Some("invalid_repository_identity"),
+            Some("invalid_run_id"),
+            Some("invalid_fixed_point_limit"),
+            Some("invalid_phase_attempt_limit")
+          )
+        )
+      },
+      test("initializes a pinned tracker before opening the live session") {
+        ZIO.scoped {
+          for
+            repository <- temporaryDirectory("bat-bdr-initialize-")
+            initialization <- ZIO.fromEither(
+              BdrInitialization.make(
+                "0" * 40,
+                "1" * 40,
+                "bat/example-java-six-phase",
+                "BAT-TOY-001"
+              )
+            )
+            runner <- RecordingRunner.make { invocation =>
+              verb(invocation) match
+                case "init" =>
+                  writeTrackerText(
+                    repository,
+                    initializedTrackerJson(
+                      TrackerIdentity.from(initialization)
+                    )
+                  ).orDie *>
+                    ZIO.succeed(
+                      success(
+                        """{"initialized":".bdr/progress.yaml","revision":0,"run_id":"BAT-TOY-001"}"""
+                      )
+                    )
+                case "check" =>
+                  ZIO.succeed(success(checkJson(0L, "refactoring")))
+                case "status" =>
+                  ZIO.succeed(success(statusJson(0L, "refactoring")))
+                case other => unexpected(other)
+            }
+            config <- makeConfig(repository)
+            session <- BdrSession.initialize(
+              config,
+              initialization,
+              runner,
+              AcceptingEngineVerifier
+            )
+            state <- session.current
+            calls <- runner.calls
+          yield assertTrue(
+            state.revision.value == 0L,
+            calls.map(invocation => verb(invocation)) == Chunk(
+              "init",
+              "check",
+              "status"
+            ),
+            calls.head.command == initializeCommand(initialization),
+            calls.head.input.isEmpty
+          )
+        }
+      },
+      test("rejects a tracker that changes BAT-owned initialization identity") {
+        val attempt =
+          for
+            initialization <- ZIO.fromEither(
+              BdrInitialization.make(
+                "0" * 40,
+                "1" * 40,
+                "bat/example-java-six-phase",
+                "BAT-TOY-001",
+                maxFixedPointPasses = 4,
+                maxPhaseAttempts = 5
+              )
+            )
+            expected = TrackerIdentity.from(initialization)
+            mismatches = Chunk(
+              expected.copy(repository = "bat/wrong"),
+              expected.copy(baseSha = "2" * 40),
+              expected.copy(headSha = "3" * 40),
+              expected.copy(runId = "BAT-WRONG"),
+              expected.copy(maxFixedPointPasses = 3),
+              expected.copy(maxPhaseAttempts = 3),
+              expected.copy(githubProjection = "outbox"),
+              expected.copy(revision = 1L)
+            )
+            results <- ZIO.foreach(mismatches) { persisted =>
+              ZIO.scoped {
+                for
+                  repository <- temporaryDirectory("bat-bdr-init-binding-")
+                  runner <- RecordingRunner.make { invocation =>
+                    verb(invocation) match
+                      case "init" =>
+                        writeTrackerText(
+                          repository,
+                          initializedTrackerJson(persisted)
+                        ).orDie *>
+                          ZIO.succeed(
+                            success(
+                              """{"initialized":".bdr/progress.yaml","revision":0,"run_id":"BAT-TOY-001"}"""
+                            )
+                          )
+                      case "check" =>
+                        ZIO.succeed(
+                          success(
+                            checkJson(persisted.revision, "refactoring")
+                          )
+                        )
+                      case "status" =>
+                        ZIO.succeed(
+                          success(
+                            statusJson(persisted.revision, "refactoring")
+                          )
+                        )
+                      case other => unexpected(other)
+                  }
+                  config <- makeConfig(repository)
+                  result <- BdrSession
+                    .initialize(
+                      config,
+                      initialization,
+                      runner,
+                      AcceptingEngineVerifier
+                    )
+                    .either
+                yield result
+              }
+            }
+          yield assertTrue(
+            results.forall(result =>
+              errorCode(result).contains("initialization_identity_mismatch")
+            )
+          )
+
+        attempt
       },
       test("accepts a checkpoint only when check, status, and tracker agree") {
         ZIO.scoped {
@@ -553,6 +775,122 @@ object BdrSessionSpec extends ZIOSpecDefault:
             )
           )
         }
+      },
+      test("accepts an ineligible completion result without mutating state") {
+        ZIO.scoped {
+          for
+            repository <- temporaryRepository(8L, "verifying")
+            runner <- RecordingRunner.make { invocation =>
+              verb(invocation) match
+                case "check" =>
+                  ZIO.succeed(success(checkJson(8L, "verifying")))
+                case "status" =>
+                  ZIO.succeed(success(statusJson(8L, "verifying")))
+                case "completion-check" =>
+                  ZIO.succeed(
+                    ProcessResult(
+                      1,
+                      """{"eligible":false,"current_state":"verifying","revision":8,"blockers":[{"rule":"V008","message":"delivery missing"}],"next":null}"""
+                        .getBytes(StandardCharsets.UTF_8),
+                      Array.emptyByteArray
+                    )
+                  )
+                case other => unexpected(other)
+            }
+            config <- makeConfig(repository)
+            session <- resume(config, runner)
+            before <- session.current
+            result <- session.completionCheck
+            after <- session.current
+            calls <- runner.calls
+          yield assertTrue(
+            field(result, "eligible").contains(Json.Bool(false)),
+            after == before,
+            calls.map(invocation => verb(invocation)) == Chunk(
+              "check",
+              "status",
+              "completion-check",
+              "check",
+              "status"
+            ),
+            calls(2).command == completionCommand,
+            calls(2).input.isEmpty
+          )
+        }
+      },
+      test(
+        "invalidates completion when revision, run state, or tracker identity drifts"
+      ) {
+        val mutations = Chunk(
+          CompletionMutation(
+            revision = 9L,
+            runState = "verifying",
+            tracker = trackerJson(9L, "verifying")
+          ),
+          CompletionMutation(
+            revision = 8L,
+            runState = "paused",
+            tracker = trackerJson(8L, "paused")
+          ),
+          CompletionMutation(
+            revision = 8L,
+            runState = "verifying",
+            tracker =
+              """{"revision":8,"run":{"state":"verifying"},"checkpoints":{"CP-0001":{"identity":"changed"}}}"""
+          )
+        )
+
+        ZIO
+          .foreach(mutations) { mutation =>
+            ZIO.scoped {
+              for
+                repository <- temporaryRepository(8L, "verifying")
+                observedRevision <- Ref.make(8L)
+                observedRunState <- Ref.make("verifying")
+                runner <- RecordingRunner.make { invocation =>
+                  verb(invocation) match
+                    case "check" =>
+                      observedRevision.get
+                        .zip(observedRunState.get)
+                        .map { case (revision, runState) =>
+                          success(checkJson(revision, runState))
+                        }
+                    case "status" =>
+                      observedRevision.get
+                        .zip(observedRunState.get)
+                        .map { case (revision, runState) =>
+                          success(statusJson(revision, runState))
+                        }
+                    case "completion-check" =>
+                      writeTrackerText(repository, mutation.tracker).orDie *>
+                        observedRevision.set(mutation.revision) *>
+                        observedRunState.set(mutation.runState) *>
+                        ZIO.succeed(
+                          ProcessResult(
+                            1,
+                            """{"eligible":false,"current_state":"verifying","revision":8,"blockers":[{"rule":"V008","message":"delivery missing"}],"next":null}"""
+                              .getBytes(StandardCharsets.UTF_8),
+                            Array.emptyByteArray
+                          )
+                        )
+                    case other => unexpected(other)
+                }
+                config <- makeConfig(repository)
+                session <- resume(config, runner)
+                result <- session.completionCheck.either
+                invalidCurrent <- session.current.either
+                callsBeforeRetry <- runner.calls
+                blockedRetry <- session.completionCheck.either
+                callsAfterRetry <- runner.calls
+              yield assertTrue(
+                errorCode(result).contains("bdr_session_invalidated"),
+                errorCode(invalidCurrent).contains("bdr_session_invalidated"),
+                errorCode(blockedRetry).contains("bdr_session_invalidated"),
+                callsAfterRetry == callsBeforeRetry
+              )
+            }
+          }
+          .map(results => results.reduce(_ && _))
       }
     )
 
@@ -610,6 +948,9 @@ object BdrSessionSpec extends ZIOSpecDefault:
   private def trackerJson(revision: Long, runState: String): String =
     s"""{"revision":$revision,"run":{"state":"$runState"}}"""
 
+  private def initializedTrackerJson(identity: TrackerIdentity): String =
+    s"""{"revision":${identity.revision},"source":{"repository":"${identity.repository}","base_sha":"${identity.baseSha}","starting_head_sha":"${identity.headSha}"},"policy":{"github_projection":"${identity.githubProjection}","max_fixed_point_passes":${identity.maxFixedPointPasses},"max_phase_attempts":${identity.maxPhaseAttempts}},"run":{"id":"${identity.runId}","state":"refactoring"}}"""
+
   private def success(json: String): ProcessResult =
     ProcessResult(
       exitCode = 0,
@@ -652,6 +993,38 @@ object BdrSessionSpec extends ZIOSpecDefault:
       "--state",
       StatePath.toString,
       "--summary"
+    )
+
+  private def initializeCommand(
+      initialization: BdrInitialization
+  ): Chunk[String] =
+    EngineArgv ++ Chunk(
+      "init",
+      "--state",
+      StatePath.toString,
+      "--base-sha",
+      initialization.baseSha,
+      "--head-sha",
+      initialization.headSha,
+      "--repository",
+      initialization.repository,
+      "--run-id",
+      initialization.runId,
+      "--github-mode",
+      "off",
+      "--max-fixed-point-passes",
+      initialization.maxFixedPointPasses.toString,
+      "--max-phase-attempts",
+      initialization.maxPhaseAttempts.toString,
+      "--actor",
+      Actor
+    )
+
+  private def completionCommand: Chunk[String] =
+    EngineArgv ++ Chunk(
+      "completion-check",
+      "--state",
+      StatePath.toString
     )
 
   private def field(obj: Json.Obj, name: String): Option[Json] =
@@ -701,12 +1074,18 @@ object BdrSessionSpec extends ZIOSpecDefault:
       revision: Long,
       runState: String
   ): Task[Unit] =
+    writeTrackerText(repository, trackerJson(revision, runState))
+
+  private def writeTrackerText(
+      repository: Path,
+      text: String
+  ): Task[Unit] =
     ZIO.attemptBlocking {
       val tracker = repository.resolve(StatePath)
       val _ = Files.createDirectories(tracker.getParent)
       val _ = Files.writeString(
         tracker,
-        trackerJson(revision, runState),
+        text,
         StandardCharsets.UTF_8,
         StandardOpenOption.CREATE,
         StandardOpenOption.TRUNCATE_EXISTING,

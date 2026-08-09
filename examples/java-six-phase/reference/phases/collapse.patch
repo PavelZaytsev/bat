@@ -1,0 +1,12 @@
+diff --git a/src/main/java/dev/bat/examples/ingress/MessageRouter.java b/src/main/java/dev/bat/examples/ingress/MessageRouter.java
+--- a/src/main/java/dev/bat/examples/ingress/MessageRouter.java
++++ b/src/main/java/dev/bat/examples/ingress/MessageRouter.java
+@@ -9,7 +9,7 @@ final class MessageRouter {
+     }
+ 
+     Decision route(Message message) {
+-        boolean scanRequired = !message.sender().endsWith("@corp.test");
++        boolean scanRequired = message.ingress() == Ingress.UNTRUSTED_EXTERNAL;
+         if (!scanRequired) {
+             return Decision.ACCEPTED;
+         }
