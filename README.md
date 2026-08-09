@@ -66,6 +66,11 @@ rules are not. See
 [`docs/adr/0003-reasoning-backends.md`](docs/adr/0003-reasoning-backends.md) for the architecture and
 fail-closed dialect policy.
 
+Observed controller runs can emit a versioned, payload-free telemetry record that attributes model
+turns, provider attempts, retries, tools, tokens, and elapsed time to validated BDR checkpoints.
+Unknown measurements remain `null` with a reason. See
+[`docs/adr/0004-run-telemetry.md`](docs/adr/0004-run-telemetry.md).
+
 To run the complete six-phase Java portability canary with the real controller and BDR engine—but
 zero provider, target-dependency, GPU, or paid-inference calls once BAT's Scala dependencies are
 provisioned:
@@ -258,6 +263,7 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | BAT controller and BDR methodology responsibility boundary |
 | [`docs/adr/0002-isolated-java-worker.md`](docs/adr/0002-isolated-java-worker.md) | isolated Java PR worker, replay, evidence, and handoff boundary |
 | [`docs/adr/0003-reasoning-backends.md`](docs/adr/0003-reasoning-backends.md) | provider-native reasoning dialects, opaque replay, and shared transport boundary |
+| [`docs/adr/0004-run-telemetry.md`](docs/adr/0004-run-telemetry.md) | payload-free run, phase, retry, token, and timing telemetry contract |
 
 ## Status
 
@@ -266,7 +272,8 @@ but the method has not yet been independently validated across multiple domains 
 The isolated worker, provider-neutral backend harness, and hardware-independent GPT-OSS Responses
 adapter are implemented as controller modules. The adapter is fake-endpoint tested but not yet
 live- or exo-validated. Provider transports and production worker orchestration are not wired into
-the public host adapters.
+the public host adapters. The telemetry foundation is in-process and hardware-independent; durable
+experiment storage and live deployment fingerprints belong to the future runner.
 
 Start with a supervised pilot, inspect the audit trail, and retain ordinary code review and CI as
 the final merge authority.

@@ -9,6 +9,7 @@ import bat.bdr.{BdrSession, ValidatedBdrState}
 import bat.conformance.GoldenScenario
 import bat.controller.*
 import bat.protocol.*
+import bat.telemetry.*
 import bat.transport.*
 
 import zio.*
@@ -49,6 +50,7 @@ object GptOssBackendSpec extends ZIOSpecDefault:
       ) {
         for
           credential <- ZIO.fromEither(Secret.from(CredentialCanary))
+          telemetry <- InMemoryTelemetry.make
           driver <- ProbeDriver.make { (attempt, _) =>
             attempt match
               case 1 => ZIO.succeed(okResponse(firstToolStream))
@@ -56,9 +58,14 @@ object GptOssBackendSpec extends ZIOSpecDefault:
               case 3 => ZIO.succeed(okResponse(finalStream))
               case _ => ZIO.fail(new IllegalStateException("extra request"))
           }
-          backend <- makeBackend(driver, credential = Some(credential))
+          backend <- makeBackend(
+            driver,
+            credential = Some(credential),
+            telemetry = telemetry
+          )
           run <- GoldenScenario.executeWith(backend)
           requests <- driver.requests
+          telemetryRecords <- telemetry.records
           bodies <- ZIO.foreach(requests)(request =>
             ZIO.fromEither(
               StrictJson.parseObject(request.body, "captured request")
@@ -88,6 +95,10 @@ object GptOssBackendSpec extends ZIOSpecDefault:
                 value
             }
           val trace = run.loopResult.traceDocument.toJson
+          val providerAttempts = telemetryRecords.collect {
+            case TelemetryRecord(_, event: TelemetryEvent.ProviderAttempt) =>
+              event
+          }
           val renderedConfig = unsafe(
             GptOssConfig.make(
               identity,
@@ -107,6 +118,23 @@ object GptOssBackendSpec extends ZIOSpecDefault:
             run.auditCalls == 1,
             run.applyCalls == 1,
             requests.size == 3,
+            providerAttempts.size == 3,
+            providerAttempts.map(_.attribution.iteration) == Chunk(1, 2, 3),
+            providerAttempts.forall(attempt =>
+              attempt.attempt == 1 &&
+                attempt.outcome == ProviderAttemptOutcome.Completed &&
+                observedNonNegative(attempt.timing.totalMillis) &&
+                observedNonNegative(attempt.timing.responseHeadersMillis) &&
+                observedNonNegative(attempt.timing.firstEventMillis) &&
+                observedNonNegative(attempt.timing.streamMillis) &&
+                attempt.errorCode == Measurement.Unavailable(
+                  MissingReason.NotApplicable
+                )
+            ),
+            !telemetryRecords.toString.contains(
+              GoldenScenario.ReasoningCanaryOne
+            ),
+            !telemetryRecords.toString.contains(CredentialCanary),
             requests.forall(request =>
               request.method == "POST" &&
                 request.url ==
@@ -162,6 +190,7 @@ object GptOssBackendSpec extends ZIOSpecDefault:
       },
       test("retries only 429 responses and caps attempts") {
         for
+          transientTelemetry <- InMemoryTelemetry.make
           transient <- ProbeDriver.make { (attempt, _) =>
             if attempt == 1 then
               ZIO.succeed(statusResponse(Status.TooManyRequests))
@@ -170,88 +199,169 @@ object GptOssBackendSpec extends ZIOSpecDefault:
           transientBackend <- makeBackend(
             transient,
             maxAttempts = 3,
-            retryDelay = Duration.Zero
+            retryDelay = Duration.Zero,
+            telemetry = transientTelemetry
           )
           recovered <- transientBackend
             .complete(directRequest, directBudget)
             .either
           transientCalls <- transient.count
           transientRequests <- transient.requests
+          transientRecords <- transientTelemetry.records
+          exhaustedTelemetry <- InMemoryTelemetry.make
           exhausted <- ProbeDriver.make((_, _) =>
             ZIO.succeed(statusResponse(Status.TooManyRequests))
           )
           exhaustedBackend <- makeBackend(
             exhausted,
             maxAttempts = 3,
-            retryDelay = Duration.Zero
+            retryDelay = Duration.Zero,
+            telemetry = exhaustedTelemetry
           )
           failure <- exhaustedBackend
             .complete(directRequest, directBudget)
             .either
           exhaustedCalls <- exhausted.count
-        yield assertTrue(
-          recovered.exists {
-            case ModelTurn.ToolCalls(_, calls, eventUsage) =>
-              calls.map(_.callId.value) == Chunk("call-audit-0001") &&
-              eventUsage.totalTokens == 100L
-            case _ => false
-          },
-          transientCalls == 2,
-          transientRequests.size == 2,
-          transientRequests.head.body == transientRequests.last.body,
-          transientRequests.head.authorization ==
-            transientRequests.last.authorization,
-          exhaustedCalls == 3,
-          failure.left.exists {
-            case error: BatError.BackendFailure =>
-              error.code == "gpt_oss_rate_limited" && error.retryable
-            case _ => false
-          }
-        )
+          exhaustedRecords <- exhaustedTelemetry.records
+        yield
+          val transientAttempts = providerAttempts(transientRecords)
+          val transientRetries = retryEvents(transientRecords)
+          val exhaustedAttempts = providerAttempts(exhaustedRecords)
+          val exhaustedRetries = retryEvents(exhaustedRecords)
+          assertTrue(
+            recovered.exists {
+              case ModelTurn.ToolCalls(_, calls, eventUsage) =>
+                calls.map(_.callId.value) == Chunk("call-audit-0001") &&
+                eventUsage.totalTokens == 100L
+              case _ => false
+            },
+            transientCalls == 2,
+            transientRequests.size == 2,
+            transientRequests.head.body == transientRequests.last.body,
+            transientRequests.head.authorization ==
+              transientRequests.last.authorization,
+            transientAttempts.size == 2,
+            transientAttempts.map(_.attempt) == Chunk(1, 2),
+            providerEventOrder(transientRecords) == Chunk(
+              "attempt:1",
+              "retry:1",
+              "attempt:2"
+            ),
+            transientAttempts.head.outcome == ProviderAttemptOutcome.Rejected,
+            observedCode(
+              transientAttempts.head.errorCode,
+              "gpt_oss_rate_limited"
+            ),
+            transientAttempts.last.outcome == ProviderAttemptOutcome.Completed,
+            transientAttempts.last.errorCode == Measurement.Unavailable(
+              MissingReason.NotApplicable
+            ),
+            transientAttempts.forall(attempt =>
+              attempt.attribution.iteration == 1 &&
+                attempt.attribution.revision == 41L &&
+                observedNonNegative(attempt.timing.totalMillis) &&
+                observedNonNegative(attempt.timing.responseHeadersMillis)
+            ),
+            transientRetries.size == 1,
+            transientRetries.head.failedAttempt == 1,
+            transientRetries.head.nextAttempt == 2,
+            transientRetries.head.reasonCode.value == "gpt_oss_rate_limited",
+            transientRetries.head.delayMillis == 0L,
+            exhaustedCalls == 3,
+            exhaustedAttempts.size == 3,
+            exhaustedAttempts.forall(
+              _.outcome == ProviderAttemptOutcome.Rejected
+            ),
+            providerEventOrder(exhaustedRecords) == Chunk(
+              "attempt:1",
+              "retry:1",
+              "attempt:2",
+              "retry:2",
+              "attempt:3"
+            ),
+            exhaustedRetries.map(retry =>
+              retry.failedAttempt -> retry.nextAttempt
+            ) == Chunk(1 -> 2, 2 -> 3),
+            failure.left.exists {
+              case error: BatError.BackendFailure =>
+                error.code == "gpt_oss_rate_limited" && error.retryable
+              case _ => false
+            },
+            !transientRecords.toString.contains(
+              GoldenScenario.ReasoningCanaryOne
+            )
+          )
       },
       test("does not retry 5xx or a failed partial response body") {
         for
+          unavailableTelemetry <- InMemoryTelemetry.make
           unavailable <- ProbeDriver.make((_, _) =>
             ZIO.succeed(statusResponse(Status.ServiceUnavailable))
           )
           unavailableBackend <- makeBackend(
             unavailable,
             maxAttempts = 3,
-            retryDelay = Duration.Zero
+            retryDelay = Duration.Zero,
+            telemetry = unavailableTelemetry
           )
           unavailableResult <- unavailableBackend
             .complete(directRequest, directBudget)
             .either
           unavailableCalls <- unavailable.count
+          unavailableRecords <- unavailableTelemetry.records
+          partialTelemetry <- InMemoryTelemetry.make
           partial <- ProbeDriver.make((_, _) =>
             ZIO.succeed(partialFailureResponse)
           )
           partialBackend <- makeBackend(
             partial,
             maxAttempts = 3,
-            retryDelay = Duration.Zero
+            retryDelay = Duration.Zero,
+            telemetry = partialTelemetry
           )
           partialResult <- partialBackend
             .complete(directRequest, directBudget)
             .either
           partialCalls <- partial.count
-        yield assertTrue(
-          unavailableCalls == 1,
-          unavailableResult.left.exists {
-            case error: BatError.BackendFailure =>
-              error.code == "gpt_oss_endpoint_unavailable" &&
-              !error.retryable
-            case _ => false
-          },
-          partialCalls == 1,
-          partialResult.left.exists {
-            case error: BatError.BackendFailure =>
-              error.code == "gpt_oss_body_failed" && !error.retryable &&
-              !error.safeMessage.contains(ProviderBodyCanary)
-            case _ => false
-          },
-          !partialResult.toString.contains(ProviderBodyCanary)
-        )
+          partialRecords <- partialTelemetry.records
+        yield
+          val unavailableAttempts = providerAttempts(unavailableRecords)
+          val partialAttempts = providerAttempts(partialRecords)
+          assertTrue(
+            unavailableCalls == 1,
+            unavailableResult.left.exists {
+              case error: BatError.BackendFailure =>
+                error.code == "gpt_oss_endpoint_unavailable" &&
+                !error.retryable
+              case _ => false
+            },
+            unavailableAttempts.size == 1,
+            unavailableAttempts.head.outcome ==
+              ProviderAttemptOutcome.Failed,
+            observedCode(
+              unavailableAttempts.head.errorCode,
+              "gpt_oss_endpoint_unavailable"
+            ),
+            retryEvents(unavailableRecords).isEmpty,
+            partialCalls == 1,
+            partialResult.left.exists {
+              case error: BatError.BackendFailure =>
+                error.code == "gpt_oss_body_failed" && !error.retryable &&
+                !error.safeMessage.contains(ProviderBodyCanary)
+              case _ => false
+            },
+            partialAttempts.size == 1,
+            partialAttempts.head.outcome == ProviderAttemptOutcome.Failed,
+            observedCode(
+              partialAttempts.head.errorCode,
+              "gpt_oss_body_failed"
+            ),
+            observedNonNegative(partialAttempts.head.timing.firstEventMillis),
+            observedNonNegative(partialAttempts.head.timing.streamMillis),
+            retryEvents(partialRecords).isEmpty,
+            !partialResult.toString.contains(ProviderBodyCanary),
+            !partialRecords.toString.contains(ProviderBodyCanary)
+          )
       },
       test("sanitizes bad content type and malformed provider bodies") {
         for
@@ -447,7 +557,8 @@ object GptOssBackendSpec extends ZIOSpecDefault:
       maxAttempts: Int = 1,
       retryDelay: Duration = Duration.Zero,
       credential: Option[Secret] = None,
-      responsesLimits: ResponsesLimits = ResponsesLimits.default
+      responsesLimits: ResponsesLimits = ResponsesLimits.default,
+      telemetry: Telemetry = Telemetry.noop
   ): IO[BatError, GptOssBackend] =
     for
       http <- ZIO
@@ -464,8 +575,46 @@ object GptOssBackendSpec extends ZIOSpecDefault:
           retryDelay = retryDelay
         )
       )
-      backend <- ZIO.fromEither(GptOssBackend.make(config, http))
+      backend <- ZIO.fromEither(GptOssBackend.make(config, http, telemetry))
     yield backend
+
+  private def providerAttempts(
+      records: Chunk[TelemetryRecord]
+  ): Chunk[TelemetryEvent.ProviderAttempt] =
+    records.collect {
+      case TelemetryRecord(_, event: TelemetryEvent.ProviderAttempt) => event
+    }
+
+  private def retryEvents(
+      records: Chunk[TelemetryRecord]
+  ): Chunk[TelemetryEvent.Retry] =
+    records.collect { case TelemetryRecord(_, event: TelemetryEvent.Retry) =>
+      event
+    }
+
+  private def observedNonNegative(value: Measurement[Long]): Boolean =
+    value match
+      case Measurement.Observed(number) => number >= 0L
+      case Measurement.Unavailable(_)   => false
+
+  private def observedCode(
+      value: Measurement[TelemetryCode],
+      expected: String
+  ): Boolean =
+    value match
+      case Measurement.Observed(code) => code.value == expected
+      case Measurement.Unavailable(_) => false
+
+  private def providerEventOrder(
+      records: Chunk[TelemetryRecord]
+  ): Chunk[String] =
+    records.map {
+      case TelemetryRecord(_, event: TelemetryEvent.ProviderAttempt) =>
+        s"attempt:${event.attempt}"
+      case TelemetryRecord(_, event: TelemetryEvent.Retry) =>
+        s"retry:${event.failedAttempt}"
+      case _ => "other"
+    }
 
   private def httpLayer(
       driver: ZClient.Driver[Any, Scope, Throwable]

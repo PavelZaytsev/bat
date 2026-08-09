@@ -1,6 +1,7 @@
 package bat.backend.gptoss
 
 import bat.protocol.*
+import bat.telemetry.*
 import bat.transport.*
 
 import zio.*
@@ -16,6 +17,7 @@ import zio.json.ast.Json
 final class GptOssBackend private (
     config: GptOssConfig,
     http: StreamingHttp,
+    telemetry: Telemetry,
     val capabilities: BackendCapabilities
 ) extends Backend:
   type Context = GptOssContext
@@ -26,8 +28,11 @@ final class GptOssBackend private (
       request: ModelRequest[GptOssContext],
       budget: TurnBudget
   ): IO[BatError, ModelTurn[GptOssContext]] =
+    val attribution = BdrAttribution.from(request.iteration, request.bdrState)
     prepare(request, budget)
-      .flatMap(prepared => executeWithRetries(prepared, attempt = 1))
+      .flatMap(prepared =>
+        executeWithRetries(prepared, attribution, attempt = 1)
+      )
       .timeoutFail(BatError.BudgetExceeded(BudgetKind.WallTime))(
         budget.remainingWallTime
       )
@@ -45,6 +50,14 @@ final class GptOssBackend private (
   ):
     override def toString: String =
       "GptOssBackend.FoldState(payload=<redacted>)"
+
+  private final case class AttemptProgress(
+      startedNanos: Long,
+      responseHeadersNanos: Option[Long],
+      firstEventNanos: Option[Long]
+  ):
+    override def toString: String =
+      "GptOssBackend.AttemptProgress(payload=<redacted>)"
 
   private def prepare(
       request: ModelRequest[GptOssContext],
@@ -87,23 +100,56 @@ final class GptOssBackend private (
 
   private def executeWithRetries(
       prepared: Prepared,
+      attribution: BdrAttribution,
       attempt: Int
   ): IO[BatError, ModelTurn[GptOssContext]] =
-    executeOnce(prepared).catchSome {
+    executeAttempt(prepared, attribution, attempt).catchSome {
       case failure: BatError.BackendFailure
           if failure.retryable && attempt < config.maxAttempts =>
-        ZIO.sleep(retryDelay(attempt)) *>
-          executeWithRetries(prepared, attempt + 1)
+        val delay = retryDelay(attempt)
+        telemetry.emit(
+          TelemetryEvent.Retry(
+            attribution,
+            failedAttempt = attempt,
+            nextAttempt = attempt + 1,
+            delayMillis = delay.toMillis,
+            reasonCode = TelemetryCode.capture(failure.code)
+          )
+        ) *>
+          ZIO.sleep(delay) *>
+          executeWithRetries(prepared, attribution, attempt + 1)
     }
 
+  private def executeAttempt(
+      prepared: Prepared,
+      attribution: BdrAttribution,
+      attempt: Int
+  ): IO[BatError, ModelTurn[GptOssContext]] =
+    for
+      started <- Clock.nanoTime
+      progress <- Ref.make(
+        AttemptProgress(started, None, None)
+      )
+      exit <- executeOnce(prepared, progress).exit
+      finished <- Clock.nanoTime
+      observed <- progress.get
+      _ <- telemetry.emit(
+        providerAttempt(attribution, attempt, observed, finished, exit)
+      )
+      result <- restoreExit(exit)
+    yield result
+
   private def executeOnce(
-      prepared: Prepared
+      prepared: Prepared,
+      progress: Ref[AttemptProgress]
   ): IO[BatError, ModelTurn[GptOssContext]] =
     ZIO.scoped {
       for
         response <- http
           .open(prepared.request)
           .mapError(mapTransportError)
+        headersAt <- Clock.nanoTime
+        _ <- progress.update(_.copy(responseHeadersNanos = Some(headersAt)))
         _ <- validateStatus(response.status)
         _ <- validateContentType(response.headers)
         framing <- ZIO.fromEither(
@@ -129,17 +175,10 @@ final class GptOssBackend private (
                   .map(mapSseError)
               )
               (nextFraming, events) = framed
-              nextAssembler <- ZIO.fromEither(
-                events
-                  .foldLeft[Either[BatError, ResponsesAssembler]](
-                    Right(current.assembler)
-                  ) { (next, event) =>
-                    next.flatMap(assembler =>
-                      decodeSseEvent(event).flatMap(assembler.accept)
-                    )
-                  }
-                  .left
-                  .map(mapProviderProtocolError)
+              nextAssembler <- acceptEvents(
+                current.assembler,
+                events,
+                progress
               )
             yield new FoldState(nextFraming, nextAssembler)
           }
@@ -149,23 +188,121 @@ final class GptOssBackend private (
             .left
             .map(mapSseError)
         )
-        completedAssembler <- ZIO.fromEither(
-          trailing
-            .foldLeft[Either[BatError, ResponsesAssembler]](
-              Right(folded.assembler)
-            ) { (next, event) =>
-              next.flatMap(assembler =>
-                decodeSseEvent(event).flatMap(assembler.accept)
-              )
-            }
-            .left
-            .map(mapProviderProtocolError)
+        completedAssembler <- acceptEvents(
+          folded.assembler,
+          trailing,
+          progress
         )
         turn <- ZIO.fromEither(
           completedAssembler.finish.left.map(mapProviderProtocolError)
         )
       yield turn
     }
+
+  private def acceptEvents(
+      initial: ResponsesAssembler,
+      events: Chunk[SseEvent],
+      progress: Ref[AttemptProgress]
+  ): IO[BatError, ResponsesAssembler] =
+    ZIO.foldLeft(events)(initial) { (assembler, event) =>
+      for
+        decoded <- ZIO.fromEither(
+          decodeSseEvent(event).left.map(mapProviderProtocolError)
+        )
+        _ <- markFirstSemanticEvent(progress, decoded)
+        next <- ZIO.fromEither(
+          assembler.accept(decoded).left.map(mapProviderProtocolError)
+        )
+      yield next
+    }
+
+  private def markFirstSemanticEvent(
+      progress: Ref[AttemptProgress],
+      event: ResponsesEvent
+  ): UIO[Unit] =
+    event match
+      case ResponsesEvent.StreamEnd => ZIO.unit
+      case _                        =>
+        Clock.nanoTime.flatMap(now =>
+          progress.update(current =>
+            if current.firstEventNanos.nonEmpty then current
+            else current.copy(firstEventNanos = Some(now))
+          )
+        )
+
+  private def providerAttempt(
+      attribution: BdrAttribution,
+      attempt: Int,
+      progress: AttemptProgress,
+      finishedNanos: Long,
+      exit: Exit[BatError, ModelTurn[GptOssContext]]
+  ): TelemetryEvent.ProviderAttempt =
+    val (outcome, errorCode) = exit match
+      case Exit.Success(_) =>
+        ProviderAttemptOutcome.Completed -> Measurement.Unavailable(
+          MissingReason.NotApplicable
+        )
+      case Exit.Failure(cause) =>
+        val code = cause.failureOption
+          .map(_.code)
+          .getOrElse(
+            if cause.isInterrupted then "gpt_oss_attempt_interrupted"
+            else "gpt_oss_attempt_defect"
+          )
+        // Only 429 proves this request was not admitted. A generic status or
+        // 5xx can arrive after inference began, so classifying it as rejected
+        // would overstate replay safety.
+        val rejected = code == "gpt_oss_rate_limited"
+        val classified =
+          if rejected then ProviderAttemptOutcome.Rejected
+          else ProviderAttemptOutcome.Failed
+        classified -> Measurement.Observed(TelemetryCode.capture(code))
+
+    TelemetryEvent.ProviderAttempt(
+      attribution,
+      attempt,
+      outcome,
+      ModelTimingMeasurements(
+        totalMillis = Measurement.Observed(
+          elapsedMillis(progress.startedNanos, finishedNanos)
+        ),
+        responseHeadersMillis = elapsedFromStart(
+          progress,
+          progress.responseHeadersNanos
+        ),
+        firstEventMillis = elapsedFromStart(
+          progress,
+          progress.firstEventNanos
+        ),
+        streamMillis = progress.firstEventNanos
+          .fold[Measurement[Long]](
+            Measurement.Unavailable(MissingReason.FailedBeforeMeasurement)
+          )(started =>
+            Measurement.Observed(elapsedMillis(started, finishedNanos))
+          )
+      ),
+      errorCode
+    )
+
+  private def elapsedFromStart(
+      progress: AttemptProgress,
+      observedNanos: Option[Long]
+  ): Measurement[Long] =
+    observedNanos.fold[Measurement[Long]](
+      Measurement.Unavailable(MissingReason.FailedBeforeMeasurement)
+    )(observed =>
+      Measurement.Observed(elapsedMillis(progress.startedNanos, observed))
+    )
+
+  private def elapsedMillis(startedNanos: Long, finishedNanos: Long): Long =
+    Duration
+      .fromNanos(Math.max(0L, finishedNanos - startedNanos))
+      .toMillis
+
+  private def restoreExit[E, A](exit: Exit[E, A]): IO[E, A] =
+    exit match
+      case Exit.Success(value) => ZIO.succeed(value)
+      case Exit.Failure(cause) => ZIO.refailCause(cause)
 
   private def decodeSseEvent(
       event: SseEvent
@@ -299,7 +436,14 @@ object GptOssBackend:
       config: GptOssConfig,
       http: StreamingHttp
   ): Either[BatError, GptOssBackend] =
-    if config == null || http == null then
+    make(config, http, Telemetry.noop)
+
+  def make(
+      config: GptOssConfig,
+      http: StreamingHttp,
+      telemetry: Telemetry
+  ): Either[BatError, GptOssBackend] =
+    if config == null || http == null || telemetry == null then
       Left(
         BatError.ProtocolViolation(
           "GPT-OSS backend dependencies must not be null"
@@ -308,7 +452,7 @@ object GptOssBackend:
     else
       BackendCapabilities
         .make(RequiredCapabilities)
-        .map(new GptOssBackend(config, http, _))
+        .map(new GptOssBackend(config, http, telemetry, _))
 
   /** Functional construction for application wiring. The same controller can
     * receive a differently typed `Backend` layer for Claude or Kimi without
@@ -320,5 +464,22 @@ object GptOssBackend:
         config <- ZIO.service[GptOssConfig]
         http <- ZIO.service[StreamingHttp]
         backend <- ZIO.fromEither(make(config, http))
+      yield backend
+    }
+
+  /** Application wiring that records sanitized provider-attempt telemetry in
+    * the same sink used by the controller.
+    */
+  val observed: ZLayer[
+    GptOssConfig & StreamingHttp & Telemetry,
+    BatError,
+    GptOssBackend
+  ] =
+    ZLayer.fromZIO {
+      for
+        config <- ZIO.service[GptOssConfig]
+        http <- ZIO.service[StreamingHttp]
+        telemetry <- ZIO.service[Telemetry]
+        backend <- ZIO.fromEither(make(config, http, telemetry))
       yield backend
     }
