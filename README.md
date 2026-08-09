@@ -7,7 +7,7 @@
 
   <h1>BAT</h1>
   <p><strong>BugAnnihilatorThreethousand</strong></p>
-  <p><strong>Kill the bad inference, not one symptom.</strong></p>
+  <p><strong>"It's time to kill bugs and chew bubble gum... and I'm all outta gum" - BAT</strong></p>
 </div>
 
 Point BAT at a pull request. It does not merely ask a model to “find bugs.” It makes the code stop
