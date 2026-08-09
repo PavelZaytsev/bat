@@ -36,15 +36,25 @@ object GoldenScenario:
       continuationDisplays: Chunk[String]
   )
 
+  /** Provider-neutral result from running the golden scenario with an injected
+    * backend. Backend-specific diagnostics deliberately remain outside this
+    * contract.
+    */
+  final case class BackendResult(
+      loopResult: LoopResult,
+      checkpointCalls: Int,
+      auditCalls: Int,
+      applyCalls: Int
+  )
+
+  /** Preserve the original deterministic scripted scenario used by
+    * `GoldenTrace` and the immutable trace fixture.
+    */
   def execute: IO[BatError, Result] =
     for
       identity <- from(
         BackendIdentity.make("fake", "fake-bat-model", "rev-2026-08-07")
       )
-      pins <- from(RunPins.make(identity, "high", "bat-loop-v1", Commit))
-      developer <- from(DeveloperInput.make("Follow BDR."))
-      user <- from(UserInput.make("Refactor PR 42."))
-      budgets <- from(BudgetLimits.make(3, 2, 60.seconds, 260))
       capabilities <- from(
         BackendCapabilities.make(
           Set(
@@ -55,6 +65,33 @@ object GoldenScenario:
           )
         )
       )
+      backend <- ScriptedBackend.make(identity, capabilities)
+      generic <- executeWith(backend)
+      backendTurns <- backend.turns
+    yield Result(
+      generic.loopResult,
+      backendTurns,
+      generic.checkpointCalls,
+      generic.auditCalls,
+      generic.applyCalls,
+      Chunk(backend.first.toString, backend.second.toString)
+    )
+
+  /** Run the exact two-tool golden scenario through any backend adapter.
+    *
+    * Pins are derived from the injected adapter identity. The scenario still
+    * owns its BDR session, tool registry, prompt, budgets, and expected
+    * terminal state, so adapters exercise the same controller boundary as the
+    * scripted compatibility run.
+    */
+  def executeWith(backend: Backend): IO[BatError, BackendResult] =
+    for
+      pins <- from(
+        RunPins.make(backend.identity, "high", "bat-loop-v1", Commit)
+      )
+      developer <- from(DeveloperInput.make("Follow BDR."))
+      user <- from(UserInput.make("Refactor PR 42."))
+      budgets <- from(BudgetLimits.make(3, 2, 60.seconds, 260))
       initial <- state(
         revision = 41,
         runState = "verifying",
@@ -71,7 +108,6 @@ object GoldenScenario:
         )
       )
       bdr <- FakeBdr.make(initial, terminal)
-      backend <- ScriptedBackend.make(identity, capabilities)
       registry <- ZIO.fromEither(
         ToolRegistry.make(BdrTools.all(bdr))
       )
@@ -84,17 +120,14 @@ object GoldenScenario:
         requiredCapabilities = Set(Capability.Streaming)
       )
       loopResult <- AgenticLoop.run(spec, backend, registry, bdr)
-      backendTurns <- backend.turns
       checkpointCalls <- bdr.checkpoints
       auditCalls <- bdr.audits
       applyCalls <- bdr.applies
-    yield Result(
+    yield BackendResult(
       loopResult,
-      backendTurns,
       checkpointCalls,
       auditCalls,
-      applyCalls,
-      Chunk(backend.first.toString, backend.second.toString)
+      applyCalls
     )
 
   private final class FakeContext(

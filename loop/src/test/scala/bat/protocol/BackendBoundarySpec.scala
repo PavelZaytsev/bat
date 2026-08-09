@@ -6,6 +6,7 @@ import zio.test.*
 
 object BackendBoundarySpec extends ZIOSpecDefault:
   private val defectCanary = "RAW_PROVIDER_DEFECT_7c1199"
+  private val payloadCanary = "RAW_PROVIDER_PAYLOAD_92d8c1"
 
   private def unsafe[A](value: Either[BatError, A]): A =
     value.fold(
@@ -113,5 +114,35 @@ object BackendBoundarySpec extends ZIOSpecDefault:
             result.left.exists(_.code == "provider_unavailable")
           )
         }
+      },
+      test("provider protocol values render without provider payloads") {
+        val callId = unsafe(CallId.from(payloadCanary))
+        val call = unsafe(
+          FunctionCall.make(
+            callId,
+            payloadCanary,
+            Json.Obj(Chunk("secret" -> Json.Str(payloadCanary)))
+          )
+        )
+        val output = unsafe(
+          FunctionOutput.make(callId, Json.Str(payloadCanary))
+        )
+        val finalOutput = unsafe(FinalOutput.make(payloadCanary))
+        val toolTurn = unsafe(
+          ModelTurn.toolCalls(new Context, Chunk(call), usage)
+        )
+        val finalTurn = ModelTurn.completed(finalOutput, usage)
+        val renderings = Chunk(
+          unsafe(DeveloperInput.make(payloadCanary)).toString,
+          unsafe(UserInput.make(payloadCanary)).toString,
+          call.toString,
+          output.toString,
+          finalOutput.toString,
+          request.toString,
+          toolTurn.toString,
+          finalTurn.toString
+        )
+
+        assertTrue(renderings.forall(!_.contains(payloadCanary)))
       }
     )
