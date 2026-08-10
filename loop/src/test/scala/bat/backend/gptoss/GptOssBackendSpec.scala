@@ -363,6 +363,50 @@ object GptOssBackendSpec extends ZIOSpecDefault:
             !partialRecords.toString.contains(ProviderBodyCanary)
           )
       },
+      test(
+        "distinguishes authentication, request timeout, and a missing Responses dialect"
+      ) {
+        for
+          unauthorized <- ProbeDriver.make((_, _) =>
+            ZIO.succeed(statusResponse(Status.Unauthorized))
+          )
+          unauthorizedBackend <- makeBackend(unauthorized)
+          unauthorizedResult <- unauthorizedBackend
+            .complete(directRequest, directBudget)
+            .either
+          timedOut <- ProbeDriver.make((_, _) =>
+            ZIO.succeed(statusResponse(Status.RequestTimeout))
+          )
+          timedOutBackend <- makeBackend(timedOut)
+          timedOutResult <- timedOutBackend
+            .complete(directRequest, directBudget)
+            .either
+          missing <- ProbeDriver.make((_, _) =>
+            ZIO.succeed(statusResponse(Status.NotFound))
+          )
+          missingBackend <- makeBackend(missing)
+          missingResult <- missingBackend
+            .complete(directRequest, directBudget)
+            .either
+        yield assertTrue(
+          unauthorizedResult.left.exists {
+            case error: BatError.BackendFailure =>
+              error.code == "gpt_oss_unauthorized" && !error.retryable
+            case _ => false
+          },
+          timedOutResult.left.exists {
+            case error: BatError.BackendFailure =>
+              error.code == "gpt_oss_request_timeout" && !error.retryable
+            case _ => false
+          },
+          missingResult.left.exists {
+            case error: BatError.BackendFailure =>
+              error.code == "gpt_oss_responses_unavailable" &&
+              !error.retryable
+            case _ => false
+          }
+        )
+      },
       test("sanitizes bad content type and malformed provider bodies") {
         for
           badContentType <- ProbeDriver.make((_, _) =>
