@@ -352,6 +352,11 @@ final class GptOssBackend private (
       val retryable = status.code == 429
       val code =
         if status.code == 429 then "gpt_oss_rate_limited"
+        else if status.code == 408 then "gpt_oss_request_timeout"
+        else if status.code == 401 || status.code == 403 then
+          "gpt_oss_unauthorized"
+        else if status.code == 404 || status.code == 405 then
+          "gpt_oss_responses_unavailable"
         else if status.code >= 500 then "gpt_oss_endpoint_unavailable"
         else "gpt_oss_http_status"
       ZIO.fail(

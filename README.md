@@ -66,6 +66,13 @@ rules are not. See
 [`docs/adr/0003-reasoning-backends.md`](docs/adr/0003-reasoning-backends.md) for the architecture and
 fail-closed dialect policy.
 
+An explicitly armed live conformance probe can exercise the same GPT-OSS Responses/SSE cartridge
+against a remote 20B or 120B deployment while BAT runs on a laptop or in a container. Ordinary CI
+uses deterministic loopback endpoints and makes no live model call. See
+[`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) for the environment-only command, security
+boundary, current source/container prerequisites, verdicts, and evidence artifacts. No real GPT-OSS
+deployment pass is claimed yet.
+
 Observed controller runs can emit a versioned, payload-free telemetry record that attributes model
 turns, provider attempts, retries, tools, tokens, and elapsed time to validated BDR checkpoints.
 Unknown measurements remain `null` with a reason. See
@@ -258,6 +265,7 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`skills/refactor/references/tracker.md`](skills/refactor/references/tracker.md) | state, evidence, transitions, and readiness contracts |
 | [`skills/refactor/references/autonomy.md`](skills/refactor/references/autonomy.md) | authority, safety, and interruption policy |
 | [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native memory, lifetime, and concurrency guidance |
+| [`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) | opt-in live GPT-OSS conformance and evidence capture |
 | [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
 | [`docs/quickstart.md`](docs/quickstart.md) | executable six-phase Java canary and provider portability contract |
 | [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | BAT controller and BDR methodology responsibility boundary |

@@ -3,6 +3,7 @@ package bat.conformance
 import bat.bdr.{BdrSession, BdrTools, ValidatedBdrState}
 import bat.controller.*
 import bat.protocol.*
+import bat.telemetry.Telemetry
 
 import java.nio.file.Path
 
@@ -85,13 +86,65 @@ object GoldenScenario:
     * scripted compatibility run.
     */
   def executeWith(backend: Backend): IO[BatError, BackendResult] =
+    executeWith(backend, Telemetry.noop)
+
+  /** Run the golden scenario while sending controller events to the same
+    * sanitized telemetry sink used by an observed provider backend.
+    */
+  def executeWith(
+      backend: Backend,
+      telemetry: Telemetry
+  ): IO[BatError, BackendResult] =
+    executeWithInputs(
+      backend,
+      telemetry,
+      "Follow BDR.",
+      "Refactor PR 42.",
+      promptVersion = "bat-loop-v1",
+      bdrCommit = Commit,
+      maxWallTime = 60.seconds,
+      maxTotalTokens = 260L
+    )
+
+  /** Live-provider form of the same two-tool scenario. It makes the expected
+    * sequential protocol explicit so this probe measures wire compatibility,
+    * reasoning replay, and strict tool use rather than model guesswork.
+    */
+  def executeProbeWith(
+      backend: Backend,
+      telemetry: Telemetry,
+      batCommit: String
+  ): IO[BatError, BackendResult] =
+    executeWithInputs(
+      backend,
+      telemetry,
+      """Run exactly one BAT protocol-conformance sequence. First call bdr_audit_summary with an empty object. After its output, call bdr_apply exactly once with operation_json set to {"state":"ready_for_review","type":"set_run_state"}. Call only one tool per model turn. After the second tool result, return a brief final answer. Never return a final answer before both tool calls complete.""",
+      "Run the pinned two-tool BAT conformance sequence now.",
+      promptVersion = "bat-gpt-oss-probe-v1",
+      bdrCommit = batCommit,
+      maxWallTime = 5.minutes,
+      maxTotalTokens = 32L * 1024L
+    )
+
+  private def executeWithInputs(
+      backend: Backend,
+      telemetry: Telemetry,
+      developerText: String,
+      userText: String,
+      promptVersion: String,
+      bdrCommit: String,
+      maxWallTime: Duration,
+      maxTotalTokens: Long
+  ): IO[BatError, BackendResult] =
     for
       pins <- from(
-        RunPins.make(backend.identity, "high", "bat-loop-v1", Commit)
+        RunPins.make(backend.identity, "high", promptVersion, bdrCommit)
       )
-      developer <- from(DeveloperInput.make("Follow BDR."))
-      user <- from(UserInput.make("Refactor PR 42."))
-      budgets <- from(BudgetLimits.make(3, 2, 60.seconds, 260))
+      developer <- from(DeveloperInput.make(developerText))
+      user <- from(UserInput.make(userText))
+      budgets <- from(
+        BudgetLimits.make(3, 2, maxWallTime, maxTotalTokens)
+      )
       initial <- state(
         revision = 41,
         runState = "verifying",
@@ -107,7 +160,7 @@ object GoldenScenario:
           "reason" -> Json.Str("the verified run is ready for review")
         )
       )
-      bdr <- FakeBdr.make(initial, terminal)
+      bdr <- FakeBdr.make(initial, terminal, bdrCommit)
       registry <- ZIO.fromEither(
         ToolRegistry.make(BdrTools.all(bdr))
       )
@@ -119,7 +172,7 @@ object GoldenScenario:
         budgets,
         requiredCapabilities = Set(Capability.Streaming)
       )
-      loopResult <- AgenticLoop.run(spec, backend, registry, bdr)
+      loopResult <- AgenticLoop.run(spec, backend, registry, bdr, telemetry)
       checkpointCalls <- bdr.checkpoints
       auditCalls <- bdr.audits
       applyCalls <- bdr.applies
@@ -226,13 +279,13 @@ object GoldenScenario:
       }
 
   private final class FakeBdr private (
+      val engineCommit: String,
       ref: Ref.Synchronized[ValidatedBdrState],
       terminal: ValidatedBdrState,
       checkpointCount: Ref[Int],
       auditCount: Ref[Int],
       applyCount: Ref[Int]
   ) extends BdrSession:
-    val engineCommit: String = Commit
     val actor: String = "bat"
 
     def checkpoints: UIO[Int] = checkpointCount.get
@@ -287,14 +340,22 @@ object GoldenScenario:
   private object FakeBdr:
     def make(
         initial: ValidatedBdrState,
-        terminal: ValidatedBdrState
+        terminal: ValidatedBdrState,
+        engineCommit: String
     ): UIO[FakeBdr] =
       for
         ref <- Ref.Synchronized.make(initial)
         checkpoints <- Ref.make(0)
         audits <- Ref.make(0)
         applies <- Ref.make(0)
-      yield new FakeBdr(ref, terminal, checkpoints, audits, applies)
+      yield new FakeBdr(
+        engineCommit,
+        ref,
+        terminal,
+        checkpoints,
+        audits,
+        applies
+      )
 
   private def state(
       revision: Long,
