@@ -65,6 +65,7 @@ rendering and is worth chasing hard, because it is the difference between hours 
 | reasoning effort | largest generation-side dial; 92% of output tokens at `high` | `BAT_GPT_OSS_REASONING_EFFORT=low\|medium\|high` |
 | memory headroom | may decide whether prefill is reused at all *(hypothesis)* | keep the serving node otherwise idle |
 | node choice | a roomier node both fits more and evicts less | prefer the node with the most `ramAvailable` |
+| output ceiling | bounds KV growth, which the placement gate ignores | `BAT_GPT_OSS_MAX_OUTPUT_TOKENS` |
 
 Lower effort is not free. BDR's diagnostic phases are exactly where reasoning earns its cost, so the
 useful experiment is not "always low" but "which phases tolerate low". BAT pins effort per run today,
@@ -89,6 +90,29 @@ configuration. Switching to 120b is a different `BAT_GPT_OSS_MODEL_ID` and `BAT_
 with the served identifier matching exactly what `/v1/models` reports, because the cartridge rejects a
 response attributed to a different model. Nothing in the controller, the dialects, or the evidence
 schema is 20b-specific.
+
+## The KV cache is not in the placement gate
+
+`placement_utils.py:115` compares model **weights** against `ramAvailable`. It does not account for
+the KV cache, which grows with context and generation. The `gpt-oss-120b` card advertises
+`contextLength: 131072`, so a deployment can place successfully, spend eight minutes loading, and
+then OOM on a long first prompt.
+
+Two consequences for a first 120b attempt.
+
+**Cap generation.** `BAT_GPT_OSS_MAX_OUTPUT_TOKENS` bounds tokens per turn; set it to something small
+like 1024 for a first run rather than the 32768 default.
+
+**The conformance probe is the right first exercise, precisely because it is small.** The pinned
+two-tool scenario ran at 3456 input and 1026 output tokens — roughly 3.5k of context against an
+advertised 131k. It is about as far from an OOM as a real request gets, so it tests weights, ring,
+and wire without also testing the memory ceiling. Save long-context work for after it passes.
+
+**An accepted request is not a served request.** A two-node instance observed on 2026-08-11 accepted
+a chat completion and then emitted only SSE `: keep-alive` comments for 190 seconds with no tokens and
+no error. Keep-alive comments defeat an idle timeout, because bytes keep arriving; only a wall-clock
+budget ends such a run. BAT ends it correctly as `blocked` / `probe_wall_time_exhausted`, but budget
+the wall clock deliberately rather than relying on the body-idle timeout.
 
 ## Readiness checklist for a 120b run
 
