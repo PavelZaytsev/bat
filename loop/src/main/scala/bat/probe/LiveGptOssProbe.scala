@@ -1,6 +1,7 @@
 package bat.probe
 
 import bat.backend.gptoss.GptOssBackend
+import bat.backend.harmonychat.HarmonyChatBackend
 import bat.conformance.GoldenScenario
 import bat.protocol.{BatError, BudgetKind, RunOutcome}
 import bat.telemetry.{InMemoryTelemetry, TelemetryDocument}
@@ -46,10 +47,15 @@ object LiveGptOssProbe:
         "live probe dependencies must not be null"
       )
       telemetry <- InMemoryTelemetry.make
+      // The controller is provider-neutral, so the probe only has to choose
+      // which dialect to construct. It never switches after a failure.
       backend <- ZIO.fromEither(
-        GptOssBackend
-          .make(config.gptOssConfig, http, telemetry)
-          .left
+        (config.backendConfig match
+          case ProbeBackendConfig.Responses(value) =>
+            GptOssBackend.make(value, http, telemetry)
+          case ProbeBackendConfig.HarmonyChat(value) =>
+            HarmonyChatBackend.make(value, http, telemetry)
+        ).left
           .map(_ =>
             ProbeError.make(
               "probe_backend_construction_failed",

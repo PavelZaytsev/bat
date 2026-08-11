@@ -34,7 +34,8 @@ object ProbeEnvironment:
     "BAT_GPT_OSS_RUN_ID",
     "BAT_GPT_OSS_BAT_COMMIT",
     "BAT_GPT_OSS_OUTPUT",
-    "BAT_GPT_OSS_ALLOW_INSECURE_HTTP"
+    "BAT_GPT_OSS_ALLOW_INSECURE_HTTP",
+    "BAT_GPT_OSS_DIALECT"
   )
 
   def from(
@@ -71,6 +72,7 @@ object ProbeEnvironment:
       allowInsecure <- parseFlag(
         values.get("BAT_GPT_OSS_ALLOW_INSECURE_HTTP")
       )
+      dialect <- parseDialect(values.get("BAT_GPT_OSS_DIALECT"))
       config <- LiveGptOssProbeConfig.make(
         endpoint = endpoint,
         credential = credential,
@@ -85,7 +87,8 @@ object ProbeEnvironment:
         runId = runId,
         batCommit = batCommit,
         outputDirectory = output,
-        allowInsecureHttp = allowInsecure
+        allowInsecureHttp = allowInsecure,
+        dialect = dialect
       )
       forbidden = Chunk(endpoint, outputText) ++
         values.get("BAT_GPT_OSS_TOKEN").toList
@@ -119,6 +122,26 @@ object ProbeEnvironment:
             ProbeError.make(
               "invalid_probe_credential",
               "live probe credential is invalid"
+            )
+          )
+
+  /** Absent means the Responses dialect, so an existing operator script keeps
+    * qualifying the same wire it qualified before. An unrecognised value is
+    * rejected rather than defaulted, because silently probing a different
+    * dialect than the operator named would corrupt the evidence.
+    */
+  private def parseDialect(
+      value: Option[String]
+  ): Either[ProbeError, ProbeDialect] =
+    value match
+      case None       => Right(ProbeDialect.Responses)
+      case Some(text) =>
+        ProbeDialect
+          .fromWire(text.trim)
+          .toRight(
+            ProbeError.make(
+              "invalid_probe_dialect",
+              "probe dialect must be 'responses' or 'harmony-chat'"
             )
           )
 

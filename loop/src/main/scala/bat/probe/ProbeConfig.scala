@@ -7,6 +7,7 @@ import java.util.Locale
 import scala.util.control.NonFatal
 
 import bat.backend.gptoss.{GptOssConfig, ResponsesLimits}
+import bat.backend.harmonychat.{HarmonyChatConfig, HarmonyChatLimits}
 import bat.protocol.BackendIdentity
 import bat.telemetry.{DeploymentFingerprint, Measurement, TelemetryRunId}
 import bat.transport.{Secret, SseLimits, TransportConfig}
@@ -36,12 +37,55 @@ object ProbeError:
       .getOrElse("probe configuration is invalid")
     new ProbeError(safeCode, safeText)
 
-/** The live GPT-OSS cartridge intentionally has no Chat Completions dialect. */
+/** The wire dialect a probe run qualifies.
+  *
+  * A dialect is selected explicitly by the operator and recorded in the
+  * deployment fingerprint. Nothing here is a fallback for anything else: a
+  * failure on one dialect never re-attempts another, because the point of the
+  * probe is to say which wire a deployment actually satisfies.
+  */
 enum ProbeDialect(val wire: String, val path: String):
   case Responses
       extends ProbeDialect("responses_sse", GptOssConfig.ResponsesPath)
 
+  /** Native Harmony over Chat Completions, for endpoints that carry raw
+    * reasoning in `reasoning_content`. See ADR 0005.
+    */
+  case HarmonyChat
+      extends ProbeDialect(
+        "harmony_chat_sse",
+        HarmonyChatConfig.ChatCompletionsPath
+      )
+
   final override def toString: String = s"ProbeDialect($wire)"
+
+object ProbeDialect:
+  /** Operator-facing selector values, kept stable for scripts and evidence. */
+  def fromWire(value: String): Option[ProbeDialect] =
+    value match
+      case "responses" | "responses_sse"       => Some(ProbeDialect.Responses)
+      case "harmony-chat" | "harmony_chat_sse" => Some(ProbeDialect.HarmonyChat)
+      case _                                   => None
+
+/** The cartridge configuration for the selected dialect. */
+enum ProbeBackendConfig(val dialect: ProbeDialect):
+  case Responses(value: GptOssConfig)
+      extends ProbeBackendConfig(ProbeDialect.Responses)
+  case HarmonyChat(value: HarmonyChatConfig)
+      extends ProbeBackendConfig(ProbeDialect.HarmonyChat)
+
+  def identity: BackendIdentity =
+    this match
+      case Responses(value)   => value.identity
+      case HarmonyChat(value) => value.identity
+
+  def credential: Option[Secret] =
+    this match
+      case Responses(value)   => value.credential
+      case HarmonyChat(value) => value.credential
+
+  final override def toString: String =
+    s"ProbeBackendConfig(dialect=${dialect.wire}, payload=<redacted>)"
 
 /** Absolute lexical destination selected by the operator.
   *
@@ -112,20 +156,20 @@ object ProbeBatCommit:
   * neither can enter a result artifact through this API.
   */
 final class LiveGptOssProbeConfig private (
-    val dialect: ProbeDialect,
     val transportConfig: TransportConfig,
-    val gptOssConfig: GptOssConfig,
+    val backendConfig: ProbeBackendConfig,
     val deployment: DeploymentFingerprint,
     val runId: TelemetryRunId,
     val batCommit: ProbeBatCommit,
     val outputDirectory: ProbeOutputDirectory,
     val allowInsecureHttp: Boolean
 ):
-  val identity: BackendIdentity = gptOssConfig.identity
-  val credential: Option[Secret] = gptOssConfig.credential
+  val dialect: ProbeDialect = backendConfig.dialect
+  val identity: BackendIdentity = backendConfig.identity
+  val credential: Option[Secret] = backendConfig.credential
 
   override def toString: String =
-    s"LiveGptOssProbeConfig(dialect=responses_sse, endpoint=<redacted>, credential=<redacted>, deployment=<redacted>, runId=<redacted>, batCommit=<redacted>, outputDirectory=<redacted>, allowInsecureHttp=$allowInsecureHttp)"
+    s"LiveGptOssProbeConfig(dialect=${dialect.wire}, endpoint=<redacted>, credential=<redacted>, deployment=<redacted>, runId=<redacted>, batCommit=<redacted>, outputDirectory=<redacted>, allowInsecureHttp=$allowInsecureHttp)"
 
 object LiveGptOssProbeConfig:
   val DefaultOpenTimeout: Duration = Duration.fromMillis(10_000L)
@@ -156,9 +200,11 @@ object LiveGptOssProbeConfig:
       maxSseEventBytes: Long = DefaultMaxSseEventBytes,
       maxSseStreamBytes: Long = DefaultMaxSseStreamBytes,
       responsesLimits: ResponsesLimits = ResponsesLimits.default,
+      chatLimits: HarmonyChatLimits = HarmonyChatLimits.default,
       maxOutputTokens: Long = GptOssConfig.DefaultMaxOutputTokens,
       maxAttempts: Int = GptOssConfig.DefaultMaxAttempts,
-      retryDelay: Duration = GptOssConfig.DefaultRetryDelay
+      retryDelay: Duration = GptOssConfig.DefaultRetryDelay,
+      dialect: ProbeDialect = ProbeDialect.Responses
   ): Either[ProbeError, LiveGptOssProbeConfig] =
     for
       _ <- require(
@@ -167,9 +213,17 @@ object LiveGptOssProbeConfig:
         "probe credential must be an optional Secret"
       )
       _ <- validateEndpointPolicy(endpoint, credential, allowInsecureHttp)
-      identity <- GptOssConfig
-        .identity(modelId, weightRevision)
-        .left
+      // The backend name is part of the pinned identity, so the dialect a run
+      // qualifies cannot be confused with another one after the fact.
+      identity <- (dialect match
+        case ProbeDialect.Responses =>
+          GptOssConfig.identity(
+            modelId,
+            weightRevision
+          )
+        case ProbeDialect.HarmonyChat =>
+          HarmonyChatConfig.identity(modelId, weightRevision)
+      ).left
         .map(_ =>
           ProbeError.make(
             "invalid_probe_identity",
@@ -181,7 +235,7 @@ object LiveGptOssProbeConfig:
           identity = identity,
           runtime = Measurement.Observed(runtime),
           runtimeRevision = Measurement.Observed(runtimeRevision),
-          protocol = ProbeDialect.Responses.wire,
+          protocol = dialect.wire,
           templateRevision = Measurement.Observed(harmonyTemplateRevision),
           quantization = Measurement.Observed(quantization),
           topology = Measurement.Observed(topologyClass),
@@ -215,21 +269,36 @@ object LiveGptOssProbeConfig:
         .map(error =>
           ProbeError.make(error.code, "probe SSE limits are invalid")
         )
-      backend <- GptOssConfig
-        .make(
-          identity = identity,
-          credential = credential,
-          sseLimits = sseLimits,
-          responsesLimits = responsesLimits,
-          maxOutputTokens = maxOutputTokens,
-          maxAttempts = maxAttempts,
-          retryDelay = retryDelay
-        )
-        .left
+      backend <- (dialect match
+        case ProbeDialect.Responses =>
+          GptOssConfig
+            .make(
+              identity = identity,
+              credential = credential,
+              sseLimits = sseLimits,
+              responsesLimits = responsesLimits,
+              maxOutputTokens = maxOutputTokens,
+              maxAttempts = maxAttempts,
+              retryDelay = retryDelay
+            )
+            .map(ProbeBackendConfig.Responses(_))
+        case ProbeDialect.HarmonyChat =>
+          HarmonyChatConfig
+            .make(
+              identity = identity,
+              credential = credential,
+              sseLimits = sseLimits,
+              chatLimits = chatLimits,
+              maxOutputTokens = maxOutputTokens,
+              maxAttempts = maxAttempts,
+              retryDelay = retryDelay
+            )
+            .map(ProbeBackendConfig.HarmonyChat(_))
+      ).left
         .map(_ =>
           ProbeError.make(
             "invalid_probe_backend",
-            "probe GPT-OSS Responses configuration is invalid"
+            "probe cartridge configuration is invalid"
           )
         )
       safeRunId <- TelemetryRunId
@@ -244,7 +313,6 @@ object LiveGptOssProbeConfig:
       safeCommit <- ProbeBatCommit.from(batCommit)
       safeOutput <- ProbeOutputDirectory.from(outputDirectory)
     yield new LiveGptOssProbeConfig(
-      ProbeDialect.Responses,
       transport,
       backend,
       deployment,

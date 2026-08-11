@@ -53,6 +53,15 @@ final class HarmonyChatAssembler private (
       finishReason <- state.finishReason.toRight(
         protocolError("Harmony Chat stream is incomplete or truncated")
       )
+      // A terminal finish reason is not proof the stream completed. Every
+      // terminal path on this wire emits the `[DONE]` sentinel, so a stream
+      // that stops before it was cut short and must not be mistaken for a
+      // finished turn.
+      _ <- Either.cond(
+        state.streamEnded,
+        (),
+        protocolError("Harmony Chat stream ended before the [DONE] sentinel")
+      )
       // A turn without reported usage cannot be attributed. BAT records an
       // unavailable measurement as absent, never as zero, so the honest
       // outcome here is to reject the turn rather than invent a total.

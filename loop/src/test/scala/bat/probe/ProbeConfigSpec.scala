@@ -15,13 +15,47 @@ object ProbeConfigSpec extends ZIOSpecDefault:
 
   def spec: Spec[TestEnvironment, Any] =
     suite("live GPT-OSS probe configuration")(
+      test("pins the Harmony Chat dialect when the operator selects it") {
+        val credential = unsafe(Secret.from(CredentialCanary))
+        val config = unsafe(
+          validConfig(
+            credential = Some(credential),
+            dialect = ProbeDialect.HarmonyChat
+          )
+        )
+        assertTrue(
+          config.dialect == ProbeDialect.HarmonyChat,
+          config.dialect.path == "/v1/chat/completions",
+          config.dialect.wire == "harmony_chat_sse",
+          // The dialect is part of the pinned identity and of the recorded
+          // fingerprint, so evidence always says which wire was qualified.
+          config.identity.backend == "gpt-oss-harmony-chat",
+          config.deployment.protocol == "harmony_chat_sse",
+          config.backendConfig
+            .isInstanceOf[ProbeBackendConfig.HarmonyChat],
+          !config.backendConfig.toString.contains(CredentialCanary)
+        )
+      },
+      test("accepts both operator spellings and rejects an unknown dialect") {
+        assertTrue(
+          ProbeDialect.fromWire("responses").contains(ProbeDialect.Responses),
+          ProbeDialect
+            .fromWire("harmony-chat")
+            .contains(ProbeDialect.HarmonyChat),
+          ProbeDialect
+            .fromWire("harmony_chat_sse")
+            .contains(ProbeDialect.HarmonyChat),
+          ProbeDialect.fromWire("chat_completions").isEmpty,
+          ProbeDialect.fromWire("").isEmpty
+        )
+      },
       test("pins the Responses deployment and builds both live configs") {
         val credential = unsafe(Secret.from(CredentialCanary))
         val config = unsafe(validConfig(credential = Some(credential)))
         val rendered = List(
           config.toString,
           config.transportConfig.toString,
-          config.gptOssConfig.toString,
+          config.backendConfig.toString,
           config.deployment.toString,
           config.outputDirectory.toString,
           config.batCommit.toString
@@ -31,8 +65,8 @@ object ProbeConfigSpec extends ZIOSpecDefault:
           config.dialect == ProbeDialect.Responses,
           config.dialect.path == "/v1/responses",
           config.dialect.wire == "responses_sse",
-          config.gptOssConfig.identity == config.identity,
-          config.gptOssConfig.credential.contains(credential),
+          config.backendConfig.identity == config.identity,
+          config.backendConfig.credential.contains(credential),
           config.credential.contains(credential),
           config.identity.backend == "gpt-oss-responses",
           config.identity.modelId == "openai/gpt-oss-20b",
@@ -180,9 +214,11 @@ object ProbeConfigSpec extends ZIOSpecDefault:
       runId: String = "probe-run-0001",
       batCommit: String = Commit,
       outputDirectory: Path = Path.of("/private/tmp", OutputCanary),
-      allowInsecureHttp: Boolean = false
+      allowInsecureHttp: Boolean = false,
+      dialect: ProbeDialect = ProbeDialect.Responses
   ): Either[ProbeError, LiveGptOssProbeConfig] =
     LiveGptOssProbeConfig.make(
+      dialect = dialect,
       endpoint = endpoint,
       credential = credential,
       modelId = modelId,

@@ -66,6 +66,14 @@ rules are not. See
 [`docs/adr/0003-reasoning-backends.md`](docs/adr/0003-reasoning-backends.md) for the architecture and
 fail-closed dialect policy.
 
+Two GPT-OSS dialects exist behind that boundary: OpenAI Responses over SSE, and native Harmony over
+Chat Completions for endpoints that carry the raw analysis channel in `reasoning_content`. Neither is
+a fallback for the other — a dialect is selected explicitly and recorded in the evidence. Everything
+identical across SSE-framed reasoning providers lives in one shared streaming backend, so the next
+provider is a dialect rather than another copy of the transport loop. See
+[`docs/adr/0005-wire-dialect-seam.md`](docs/adr/0005-wire-dialect-seam.md), which also records why
+exo's Responses endpoint is treated as incompatible.
+
 An explicitly armed live conformance probe can exercise the same GPT-OSS Responses/SSE cartridge
 against a remote 20B or 120B deployment while BAT runs on a laptop or in a container. Ordinary CI
 uses deterministic loopback endpoints and makes no live model call. See
@@ -226,10 +234,11 @@ This repository currently contains:
 - idempotent GitHub issue projection with an offline outbox; and
 - benchmark records plus integrity validation.
 
-The hardware-independent GPT-OSS Responses adapter and shared scoped ZIO HTTP/SSE transport are
-implemented and conformance-tested against deterministic in-process fake endpoints in ordinary CI.
-No live GPT-OSS or exo-cluster validation is claimed yet. Claude Messages, Kimi Chat, cost
-telemetry, trusted publishing, and PR automation remain future work.
+The hardware-independent GPT-OSS Responses and Harmony Chat adapters and the shared scoped ZIO
+HTTP/SSE transport are implemented and conformance-tested against deterministic in-process fake
+endpoints and exo-shaped payloads in ordinary CI. No live GPT-OSS or exo-cluster validation is
+claimed yet. Claude Messages, Kimi Chat, cost telemetry, trusted publishing, and PR automation
+remain future work.
 
 ## Safety and authority
 

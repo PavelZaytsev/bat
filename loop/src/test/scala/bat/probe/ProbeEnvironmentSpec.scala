@@ -111,7 +111,7 @@ object ProbeEnvironmentSpec extends ZIOSpecDefault:
           loaded.toString,
           loaded.config.toString,
           loaded.config.transportConfig.toString,
-          loaded.config.gptOssConfig.toString,
+          loaded.config.backendConfig.toString,
           loaded.config.outputDirectory.toString,
           loaded.config.batCommit.toString,
           rejected.toString,

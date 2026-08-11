@@ -14,12 +14,37 @@ This is deployment evidence, not a general model benchmark. The probe drives BAT
 three-turn, two-tool scenario and records whether that exact model/runtime/protocol combination can
 complete it without violating the controller contract.
 
+## Choosing a dialect
+
+The probe qualifies exactly one wire dialect per run, selected by `BAT_GPT_OSS_DIALECT`:
+
+| value | endpoint | when to use it |
+|---|---|---|
+| `responses` (default) | `POST /v1/responses` over SSE | Hosted or self-served endpoints that emit `response.reasoning_text.*` and replay reasoning items verbatim. |
+| `harmony-chat` | `POST /v1/chat/completions` over SSE | Endpoints that carry the raw analysis channel in a first-class `reasoning_content` field, such as exo. |
+
+Neither dialect is a fallback for the other. A failure on one never re-attempts the other, because
+the point of a probe run is to record which wire a deployment actually satisfies. The selected
+dialect becomes part of the pinned backend identity and of the recorded deployment fingerprint, so
+an artifact always says which wire produced its verdict.
+
+**For exo, select `harmony-chat`.** exo serves both endpoints, but its Responses surface is a
+translation shim that flattens replayed reasoning into ordinary assistant content and emits a
+`response.reasoning_summary_*` vocabulary. Only its Chat Completions surface round-trips raw
+reasoning. See [`docs/adr/0005-wire-dialect-seam.md`](adr/0005-wire-dialect-seam.md) for the
+measured evidence.
+
 ## What the probe requires
 
-The cartridge speaks only the OpenAI **Responses API over SSE** at `/v1/responses`. It does not
-fall back to Chat Completions, follow a redirect to another dialect, or silently reinterpret an
-incompatible response. A server that exposes only a Chat Completions-compatible endpoint is not a
-compatible endpoint for this probe.
+Both dialects require SSE streaming, function calling with exact call identifiers, replayable raw
+reasoning, and terminal usage. Neither follows a redirect to another dialect or silently
+reinterprets an incompatible response.
+
+The `responses` dialect additionally requires the `response.reasoning_text.*` event vocabulary and
+verbatim replay of provider output items. The `harmony-chat` dialect reconstructs the assistant
+message from streamed deltas instead, so it additionally requires that reasoning be non-empty, that
+tool call identity never change mid-stream, that the served model match the pin, and that the stream
+reach the `[DONE]` sentinel. A turn that fails any of those is a failed turn, not a best effort.
 
 GPT-OSS uses the Harmony response format. Across tool calls, implementations must preserve and
 replay the model's reasoning items as opaque continuation state. OpenAI's
@@ -89,6 +114,7 @@ The complete environment surface is:
 | `BAT_GPT_OSS_BAT_COMMIT` | yes | Full lowercase 40-character BAT Git commit. |
 | `BAT_GPT_OSS_OUTPUT` | yes | Absolute, normalized destination that does not exist yet. |
 | `BAT_GPT_OSS_ALLOW_INSECURE_HTTP` | no | `1` permits credential-free HTTP; absent or `0` requires HTTPS. |
+| `BAT_GPT_OSS_DIALECT` | no | `responses` (default) or `harmony-chat`. An unrecognised value is rejected rather than defaulted. |
 
 Provide `BAT_GPT_OSS_TOKEN` through the shell or secret manager only when the endpoint requires it.
 Do not put the token on the Scala command line. Plain HTTP is intended only for a deliberately
@@ -102,6 +128,32 @@ export BAT_GPT_OSS_ALLOW_INSECURE_HTTP='1'
 
 The insecure opt-in never permits a bearer token over HTTP. With a token present, HTTPS remains
 mandatory.
+
+### Example: an exo cluster over plain HTTP
+
+exo serves the OpenAI-compatible API on port `52415` without a credential, so this is the
+credential-free HTTP case. Replace the address, and pin the deployment values from the cluster
+operator rather than guessing them:
+
+```bash
+export BAT_GPT_OSS_LIVE='1'
+export BAT_GPT_OSS_DIALECT='harmony-chat'
+export BAT_GPT_OSS_ENDPOINT='http://10.0.0.1:52415'
+export BAT_GPT_OSS_ALLOW_INSECURE_HTTP='1'
+unset BAT_GPT_OSS_TOKEN
+export BAT_GPT_OSS_MODEL_ID='openai/gpt-oss-20b'
+export BAT_GPT_OSS_RUNTIME='exo'
+export BAT_GPT_OSS_TOPOLOGY='exo_thunderbolt'
+export BAT_GPT_OSS_NODE_COUNT='1'
+```
+
+`BAT_GPT_OSS_MODEL_ID` must be the served identifier exactly as `/v1/models` reports it, because the
+cartridge rejects a response attributed to a different model.
+
+Two exo-specific operational notes. Inference requires a **placed instance**: if
+`curl $BAT_GPT_OSS_ENDPOINT/state` shows `"instances": {}`, nothing can serve and the probe will
+report `blocked`. Custom model cards and placed instances do not survive an exo restart, so a model
+that 404s usually needs re-registering rather than re-downloading.
 
 ### Prepare the evidence destination
 
