@@ -150,10 +150,54 @@ export BAT_GPT_OSS_NODE_COUNT='1'
 `BAT_GPT_OSS_MODEL_ID` must be the served identifier exactly as `/v1/models` reports it, because the
 cartridge rejects a response attributed to a different model.
 
-Two exo-specific operational notes. Inference requires a **placed instance**: if
-`curl $BAT_GPT_OSS_ENDPOINT/state` shows `"instances": {}`, nothing can serve and the probe will
-report `blocked`. Custom model cards and placed instances do not survive an exo restart, so a model
-that 404s usually needs re-registering rather than re-downloading.
+#### exo placement is setup, not bootstrap
+
+A registered model card and a placed instance are different state. `POST /models/add` creates a
+card, which is what `/v1/models` reports; only `POST /place_instance` creates a runner with shard
+assignments. There is no lazy placement on first request — exo's chat path fails closed with
+`404 No instance found for model ...`. So a downloaded, registered, visible model still serves
+nothing while `instances` is empty.
+
+Both cards and instances are in-memory cluster state and **do not survive an exo restart**. Treat
+place-then-verify as part of every run's setup rather than a one-time bootstrap: if placement was
+expected and `instances` is empty, the likely cause is a restart, not a failed POST.
+
+```bash
+# 1. place (single node; multi-node still needs the topology-edge work)
+curl -sS -X POST "$BAT_GPT_OSS_ENDPOINT/place_instance" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model_id\":\"$BAT_GPT_OSS_MODEL_ID\",\"sharding\":\"Pipeline\",\"instance_meta\":\"MlxRing\",\"min_nodes\":1}"
+
+# 2. wait until a runner exists with shards assigned, and absorb the cold load
+until curl -sS "$BAT_GPT_OSS_ENDPOINT/state" \
+  | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("instances") else 1)'
+do sleep 5; done
+```
+
+The readiness poll matters for a second reason: after placement the runner must load the weights —
+roughly 13 GB for the 20b — before it serves anything. The first request can therefore take tens of
+seconds while later ones are fast. Polling until the instance appears moves that cold load outside
+the probe, so a cold start cannot be misread as a deployment failure. If you skip the poll, raise
+the transport's body-idle allowance rather than the retry count; a retry would re-queue work the
+server has already started.
+
+#### Give a reasoning model room to answer
+
+gpt-oss spends its token allowance on the analysis channel first. With a small `max_tokens` it can
+return status `200`, valid framing, and `content: ''` — measured on `gpt-oss-20b` at `max_tokens: 24`:
+`completion_tokens: 24`, of which `reasoning_tokens: 21`, and no visible output. At `max_tokens: 250`
+the same deployment produced 237 tokens of real prose.
+
+That is a budget fact, not a wire fault, and it is the cosmetic-looking failure most likely to waste
+an afternoon. BAT reports it as `harmony_chat_output_budget_exhausted` with the observed
+`reasoning_tokens`, `output_tokens`, and content length, rather than as a protocol violation. Allow at
+least ~150 output tokens per probe turn; the pinned conformance scenario already budgets 32768.
+
+A 404 from the chat path has two distinguishable causes — no instance for a downloaded model, versus
+weights that are absent, which also raises a user-facing download notification. Both fail closed, so
+BAT reports the endpoint's own detail string alongside the status in the operator-facing message
+(`status=404, detail=No instance found for model ...`). The reason code in the artifact stays stable;
+the detail is for the human reading the console.
 
 ### Prepare the evidence destination
 

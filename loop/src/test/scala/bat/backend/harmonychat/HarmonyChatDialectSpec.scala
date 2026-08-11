@@ -162,6 +162,22 @@ object HarmonyChatDialectSpec extends ZIOSpecDefault:
           .getOrElse(throw AssertionError("no framed event"))
         assertTrue(dialect.accept(seeded, event).isLeft)
       },
+      test("separates a spent token budget from a broken wire") {
+        // Observed on gpt-oss-20b at max_tokens 24: completion_tokens 24 of
+        // which reasoning_tokens 21, content ''. Status 200, valid framing,
+        // nothing wrong with the cartridge — the allowance was just too small.
+        val message =
+          runStream(firstRequest, budgetExhaustedStream).left.toOption
+            .map(_.safeMessage)
+            .getOrElse("")
+        assertTrue(
+          failureCode(budgetExhaustedStream)
+            .contains("harmony_chat_output_budget_exhausted"),
+          message.contains("reasoning_tokens=21"),
+          message.contains("output_tokens=24"),
+          message.contains("content_characters=0")
+        )
+      },
       test("names the failing check in a code that survives the boundary") {
         // Without a distinct BackendFailure code these all collapse into one
         // generic protocol violation and an operator cannot tell them apart.
@@ -317,6 +333,14 @@ object HarmonyChatDialectSpec extends ZIOSpecDefault:
   private val wrongModelStream =
     event(reasoningChunk(ReasoningCanary)) +
       event(toolCallChunk("call_audit_1", model = "openai/gpt-oss-120b")) +
+      done
+
+  /** gpt-oss-20b with a small max_tokens: the whole allowance goes to the
+    * analysis channel and `content` comes back empty under status 200.
+    */
+  private val budgetExhaustedStream =
+    event(reasoningChunk(ReasoningCanary)) +
+      s"""data: {"id":"cmd-1","created":4,"model":"$ModelId","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":"length"}],"usage":{"prompt_tokens":80,"completion_tokens":24,"total_tokens":104,"completion_tokens_details":{"reasoning_tokens":21}}}\n\n""" +
       done
 
   private val badArgumentsStream =

@@ -127,14 +127,38 @@ final class HarmonyChatAssembler private (
         _ <- Either.cond(
           finishReason != "length",
           (),
-          protocolError("Harmony Chat response was truncated by a token limit")
+          budgetExhausted(finishReason, usage)
         )
         output <- FinalOutput.make(state.content)
       yield ModelTurn.completed(output, usage)
+    else Left(emptyOutputFailure(finishReason, usage))
+
+  /** A reasoning model with a small token allowance can spend the entire budget
+    * in the analysis channel and return `content: ''` under a perfectly valid
+    * status. That is a budget fact, not a wire-format fault, and reporting it
+    * as a generic protocol violation sends the operator hunting the wrong
+    * problem.
+    */
+  private def emptyOutputFailure(
+      finishReason: String,
+      usage: Usage
+  ): BatError =
+    val spentOnReasoning = usage.reasoningTokens.exists(reasoning =>
+      usage.outputTokens.exists(output => output > 0 && reasoning * 2 >= output)
+    )
+    if finishReason == "length" || spentOnReasoning then
+      budgetExhausted(finishReason, usage)
     else
-      violation(
-        "Harmony Chat turn has neither tool calls nor final output"
-      )
+      protocolError("Harmony Chat turn has neither tool calls nor final output")
+
+  private def budgetExhausted(finishReason: String, usage: Usage): BatError =
+    diagnostic(
+      "output_budget_exhausted",
+      s"Harmony Chat turn spent its token allowance without usable output (finish_reason=${safeValue(finishReason)}, reasoning_tokens=${render(usage.reasoningTokens)}, output_tokens=${render(usage.outputTokens)}, content_characters=${state.content.length}); raise the output token budget"
+    )
+
+  private def render(value: Option[Long]): String =
+    value.fold("unreported")(_.toString)
 
   /** Every call identifier must be genuinely new. A reused identifier would let
     * a later tool result be attributed to an earlier call.

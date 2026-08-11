@@ -407,6 +407,46 @@ object GptOssBackendSpec extends ZIOSpecDefault:
           }
         )
       },
+      test("carries a bounded rejection detail for the operator") {
+        // Two operator mistakes share status 404 on an inference server: a
+        // model with no running instance, and weights that are not present.
+        // The stable code cannot separate them, so the detail must.
+        val noInstance =
+          """{"detail":"No instance found for model openai/gpt-oss-20b"}"""
+        for
+          missing <- ProbeDriver.make((_, _) =>
+            ZIO.succeed(statusResponse(Status.NotFound, noInstance))
+          )
+          missingBackend <- makeBackend(missing)
+          missingResult <- missingBackend
+            .complete(directRequest, directBudget)
+            .either
+          oversized <- ProbeDriver.make((_, _) =>
+            ZIO.succeed(
+              statusResponse(Status.NotFound, "x" * 4096)
+            )
+          )
+          oversizedBackend <- makeBackend(oversized)
+          oversizedResult <- oversizedBackend
+            .complete(directRequest, directBudget)
+            .either
+        yield assertTrue(
+          missingResult.left.exists {
+            case error: BatError.BackendFailure =>
+              error.code == "gpt_oss_responses_unavailable" &&
+              error.safeMessage.contains("status=404") &&
+              error.safeMessage.contains("No instance found for model")
+            case _ => false
+          },
+          oversizedResult.left.exists {
+            case error: BatError.BackendFailure =>
+              // Bounded: a hostile endpoint cannot use the detail as a
+              // channel for an arbitrarily large payload.
+              error.safeMessage.length < 1024
+            case _ => false
+          }
+        )
+      },
       test("sanitizes bad content type and malformed provider bodies") {
         for
           badContentType <- ProbeDriver.make((_, _) =>
@@ -1219,6 +1259,13 @@ object GptOssBackendSpec extends ZIOSpecDefault:
       status = status,
       headers = Headers("content-type" -> "text/plain"),
       body = Body.empty
+    )
+
+  private def statusResponse(status: Status, detail: String): Response =
+    Response(
+      status = status,
+      headers = Headers("content-type" -> "application/json"),
+      body = Body.fromString(detail)
     )
 
   private val partialFailureResponse: Response =

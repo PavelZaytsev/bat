@@ -1,5 +1,7 @@
 package bat.backend.wire
 
+import java.nio.charset.StandardCharsets
+
 import bat.protocol.*
 import bat.telemetry.*
 import bat.transport.*
@@ -145,7 +147,7 @@ final class StreamingWireBackend[D <: WireDialect] private (
           .mapError(mapTransportError)
         headersAt <- Clock.nanoTime
         _ <- progress.update(_.copy(responseHeadersNanos = Some(headersAt)))
-        _ <- validateStatus(response.status)
+        _ <- validateStatus(response)
         _ <- validateContentType(response.headers)
         framing <- ZIO.fromEither(
           SseDecoder.initial(dialect.sseLimits).left.map(mapSseError)
@@ -270,18 +272,55 @@ final class StreamingWireBackend[D <: WireDialect] private (
       case Exit.Success(value) => ZIO.succeed(value)
       case Exit.Failure(cause) => ZIO.refailCause(cause)
 
-  private def validateStatus(status: ResponseStatus): IO[BatError, Unit] =
-    if status.code == 200 then ZIO.unit
+  /** A rejected request carries a bounded operator-facing detail.
+    *
+    * Two different operator mistakes can produce the same status — on an
+    * inference server a 404 can mean "this model has no running instance" or
+    * "these weights are not present at all" — and collapsing them into one code
+    * costs a debugging session to tell apart.
+    *
+    * The detail is deliberately confined to `safeMessage`, which the probe
+    * prints for a human but never embeds in an artifact; evidence carries the
+    * stable code only. It is read solely from a non-200 control-plane response,
+    * never from a successful stream, and it is bounded and stripped of anything
+    * that is not plain printable text.
+    */
+  private def validateStatus(
+      response: StreamingResponse
+  ): IO[BatError, Unit] =
+    if response.status.code == 200 then ZIO.unit
     else
-      val classified = dialect.statusFailure(status.code)
-      ZIO.fail(
-        BatError.BackendFailure(
-          errorCode = classified.code,
-          safeMessage =
-            s"${dialect.dialectLabel} endpoint rejected the request",
-          retryable = classified.retryable
+      val classified = dialect.statusFailure(response.status.code)
+      errorDetail(response).flatMap { detail =>
+        ZIO.fail(
+          BatError.BackendFailure(
+            errorCode = classified.code,
+            safeMessage =
+              s"${dialect.dialectLabel} endpoint rejected the request (status=${response.status.code}$detail)",
+            retryable = classified.retryable
+          )
         )
+      }
+
+  private def errorDetail(response: StreamingResponse): UIO[String] =
+    response.body
+      .take(StreamingWireBackend.MaxErrorDetailBytes)
+      .runCollect
+      .timeoutTo(Chunk.empty[Byte])(collected => collected)(
+        StreamingWireBackend.ErrorDetailTimeout
       )
+      .orElseSucceed(Chunk.empty[Byte])
+      .map(summarizeErrorBody)
+
+  private def summarizeErrorBody(bytes: Chunk[Byte]): String =
+    val text = new String(bytes.toArray, StandardCharsets.UTF_8)
+    val collapsed = text.trim.replaceAll("\\s+", " ")
+    if collapsed.isEmpty then ""
+    else if collapsed.forall(character =>
+        !character.isControl && character >= ' ' && character <= '~'
+      )
+    then s", detail=$collapsed"
+    else ", detail=<unprintable>"
 
   private def validateContentType(
       headers: ResponseHeaders
@@ -337,6 +376,16 @@ final class StreamingWireBackend[D <: WireDialect] private (
     ZIO.fromEither(result.left.map(mapTransportError))
 
 object StreamingWireBackend:
+  /** Enough to carry an inference server's error detail, far too little to
+    * carry a response.
+    */
+  private val MaxErrorDetailBytes = 512L
+
+  /** A rejecting endpoint may also stall. Diagnosing the rejection must not
+    * become another way to hang.
+    */
+  private val ErrorDetailTimeout: Duration = Duration.fromMillis(2000L)
+
   def make[D <: WireDialect](
       dialect: D,
       http: StreamingHttp,
