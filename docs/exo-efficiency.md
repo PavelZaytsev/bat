@@ -4,7 +4,8 @@ Measured notes for getting usable throughput out of an exo-served GPT-OSS deploy
 changes when a larger model or a third node arrives.
 
 Everything marked *measured* came from a real run. Everything marked *hypothesis* did not, and should
-be confirmed before anyone builds on it.
+be confirmed before anyone builds on it. Where a claim here was previously wrong, the correction is
+kept rather than quietly replaced.
 
 ## Where the time actually goes
 
@@ -30,40 +31,57 @@ At ~104 tokens/second with no cache reuse, one 40k-token turn costs roughly six 
 model emits anything, and a run is hundreds of turns. Prefill reuse is therefore worth more than any
 other optimisation, including a faster model.
 
-## Prefix caching
+## Prefix caching — measured
 
-exo has a working KV prefix cache and it is enabled for ordinary chat completions:
+exo has a working KV prefix cache, it is enabled for ordinary chat completions, and **it works with
+BAT's exact message shape**. Measured on 2026-08-11 against single-node `gpt-oss-20b` on the M4 Pro:
 
-- `KVPrefixCache.get_kv_cache` does token-level longest-prefix matching over stored prompts
-  (`worker/engines/mlx/cache.py:314`).
-- It is gated only against bench requests — `not is_bench or task_params.use_prefix_cache`
-  (`worker/engines/mlx/generator/batch_generate.py:165`).
-- Hits are reported honestly as `usage.prompt_tokens_details.cached_tokens = prefix_hit_length`
-  (`batch_generate.py:442`) and as `prefix_cache_hit` in the `generation_stats` SSE comment.
+| sequence | prompt tokens | cached | hit |
+|---|---:|---:|---|
+| plain conversation, second request extends the first, back-to-back | 114 | **94** | `partial` |
+| BAT shape (developer instructions, user, trailing `<bat_turn_context>` developer message), back-to-back | 116 | **114** | `exact` |
+| any extension with **another request interleaved** between the two | 116–168 | **0** | `none` |
 
-So a reported `cached_tokens: 0` is a genuine miss, not a reporting gap.
+The mechanism: `KVPrefixCache.get_kv_cache` does token-level longest-prefix matching
+(`worker/engines/mlx/cache.py:314`), it is gated only against bench requests
+(`batch_generate.py:165`), and hits are reported as
+`usage.prompt_tokens_details.cached_tokens = prefix_hit_length` (`batch_generate.py:442`). A reported
+`0` is a genuine miss, not a reporting gap.
 
-BAT is already built to be cacheable. Both dialects keep a byte-stable prefix: developer instructions
-enter the replay prefix once, mutable BDR state is appended as a trailing developer message rather
-than edited in place, and every later request extends the previous request's exact prefix. Nothing in
-the request shape rotates.
+**The operational rule is that the cache is effectively single-conversation.** Retention is small and
+eviction is aggressive — `add_kv_cache` evicts LRU entries when memory is high (`cache.py:260`). An
+unrelated request between two turns of the same run reliably destroyed reuse in every trial. The
+original observation of zero cached tokens across a whole BAT run is consistent with this: that run
+executed on the M1 Pro, holding a 13.7 GB model in roughly 18 GB of available memory.
 
-**Why the observed run still missed is unresolved.** The leading hypothesis is LRU eviction under
-memory pressure — `add_kv_cache` "evicts LRU entries if memory is high" (`cache.py:260`), and that run
-held a 13.7 GB model on a node with roughly 18 GB available. That predicts the same run on a node with
-more headroom would hit. **This is a hypothesis and has not been tested.**
+Two consequences that matter more than they look:
 
-To test it, run any two-turn exchange where the second request extends the first, on a node with
-comfortable headroom, and read `cached_tokens` on the second response. If it is non-zero, the cache
-works and memory headroom is the variable. If it is zero on a roomy node, the miss is in prompt
-rendering and is worth chasing hard, because it is the difference between hours and minutes.
+**Do not share a serving endpoint between concurrent BAT runs.** Two runs interleaving on one instance
+will evict each other continuously, and each turn pays full prefill. At BDR scale that is the
+difference between minutes and hours. Serialise runs per instance, or give each run its own.
+
+**Prefer the roomiest node.** Headroom decides how long an entry survives.
+
+BAT's request shape needs no change. Both dialects keep a byte-stable prefix: developer instructions
+enter the replay prefix once, mutable BDR state is appended as a trailing message rather than edited
+in place, and every later request extends the previous request's exact prefix. That design is
+confirmed cache-friendly by the `exact` hit above.
+
+### A correction worth recording
+
+An earlier revision of this document claimed BAT's trailing developer message defeated the cache.
+That was wrong, and the error is instructive: the variant tests were run in sequence, so each
+"BAT-shaped" attempt had unrelated requests between store and reuse. The confound, not the message
+shape, produced the misses. Isolating one variable at a time against a *freshly stored* prefix
+reversed the conclusion.
 
 ## Levers available today
 
 | lever | effect | how |
 |---|---|---|
 | reasoning effort | largest generation-side dial; 92% of output tokens at `high` | `BAT_GPT_OSS_REASONING_EFFORT=low\|medium\|high` |
-| memory headroom | may decide whether prefill is reused at all *(hypothesis)* | keep the serving node otherwise idle |
+| run isolation | decides whether prefill is reused at all *(measured)* | never interleave another request between a run's turns |
+| memory headroom | how long a cache entry survives | prefer the node with the most `ramAvailable` |
 | node choice | a roomier node both fits more and evicts less | prefer the node with the most `ramAvailable` |
 | output ceiling | bounds KV growth, which the placement gate ignores | `BAT_GPT_OSS_MAX_OUTPUT_TOKENS` |
 
@@ -81,9 +99,9 @@ when distributed. A third node makes `gpt-oss-120b` possible; it does not make i
 `resolve_allow_patterns` returns `["*"]` unconditionally — so every node stores the full 61 GB, and
 the memory check uses `ramAvailable`, not `ramTotal`.
 
-**Prefill gets worse before it gets better.** A larger model prefills more slowly per token, so an
-unresolved prefix-cache miss hurts 120b more than it hurts 20b. Confirming the cache is the highest
--value work available before the third node lands.
+**Prefill gets worse before it gets better.** A larger model prefills more slowly per token, so a
+cache miss hurts 120b more than it hurts 20b. Since the cache is effectively single-conversation,
+serialising runs matters more on 120b than on 20b, not less.
 
 **BAT itself needs no change.** Model, dialect, effort, topology class, and node count are all
 configuration. Switching to 120b is a different `BAT_GPT_OSS_MODEL_ID` and `BAT_GPT_OSS_NODE_COUNT`,
@@ -119,8 +137,12 @@ the wall clock deliberately rather than relying on the body-idle timeout.
 1. Weights present and registered on every participating node; cards do not survive a restart.
 2. Enough `ramAvailable` on each node for its shard plus KV cache, checked via `/state` after a
    fresh boot rather than assumed.
-3. A cycle in `/state` topology — both directed edges *and* a non-empty `thunderboltBridgeCycles`.
-   Bidirectional edges alone are not sufficient for placement.
+3. Both directed topology edges present and stable in `/state`. Placement calls
+   `topology.get_cycles()` (`placement.py:117`), a plain graph cycle search; **nothing in the
+   placement path reads `thunderboltBridgeCycles`**, and placement has succeeded in practice with
+   that field empty. On hardware where `bridge0` carries no packets it can never legitimately be
+   populated, so do not treat it as a gate. What actually fails after placement is
+   `mx.distributed.init`, not placement itself.
 4. An instance placed and visible in `/state`, with the runner past its cold load.
 5. `BAT_GPT_OSS_MODEL_ID` exactly as served, `BAT_GPT_OSS_NODE_COUNT` set to the real count, and
    `BAT_GPT_OSS_TOPOLOGY` naming the real topology class.
