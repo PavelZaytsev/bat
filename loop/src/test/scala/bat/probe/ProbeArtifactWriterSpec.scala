@@ -339,10 +339,20 @@ object ProbeArtifactWriterSpec extends ZIOSpecDefault:
         finally stream.close()
     }.ignore
 
+  /** Creates an output parent that satisfies the writer's publication boundary.
+    * `createDirectories` honours the process umask, and a developer or CI host
+    * with `umask 002` would otherwise produce a group-writable parent that the
+    * writer correctly refuses. The permissions are therefore set explicitly
+    * rather than inherited.
+    */
   private def makeDirectories(paths: Path*): ZIO[Any, Throwable, Unit] =
     ZIO.attemptBlocking {
       paths.foreach(path => {
         val _ = Files.createDirectories(path)
+        val _ = Files.setPosixFilePermissions(
+          path,
+          PosixFilePermissions.fromString("rwx------")
+        )
       })
     }
 
