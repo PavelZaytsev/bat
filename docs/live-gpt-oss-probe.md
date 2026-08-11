@@ -65,8 +65,15 @@ of the pinned weights, serving runtime, Harmony template, quantization, and hard
 cannot accidentally turn the fake check into a paid or cluster-backed run merely by discovering an
 endpoint.
 
-**No real GPT-OSS 20B or 120B deployment has passed this probe in this repository yet.** A checked-in
-fake result must not be presented as live model evidence.
+**One real deployment has now passed this probe.** On 2026-08-11, `openai/gpt-oss-20b` served
+single-node by exo `0.3.70` on an Apple M1 Pro returned `compatible` over the `harmony-chat` dialect:
+three model turns, both pinned tools in the required order, terminal `ready_for_review`, 4482 total
+tokens of which 948 reasoning, 33.8 output tokens per second, 48.6 s wall, mean time to first event
+6.0 s.
+
+That is a transport and protocol result for one model on one topology. It is **not** evidence about
+`gpt-oss-120b`, about distributed placement, or about model quality on real defects. A checked-in fake
+result must still never be presented as live model evidence.
 
 ## Configure a live run
 

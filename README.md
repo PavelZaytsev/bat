@@ -78,8 +78,8 @@ An explicitly armed live conformance probe can exercise the same GPT-OSS Respons
 against a remote 20B or 120B deployment while BAT runs on a laptop or in a container. Ordinary CI
 uses deterministic loopback endpoints and makes no live model call. See
 [`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) for the environment-only command, security
-boundary, current source/container prerequisites, verdicts, and evidence artifacts. No real GPT-OSS
-deployment pass is claimed yet.
+boundary, current source/container prerequisites, verdicts, and evidence artifacts. A single-node 20B
+exo deployment has passed it; larger and distributed topologies have not been exercised.
 
 Observed controller runs can emit a versioned, payload-free telemetry record that attributes model
 turns, provider attempts, retries, tools, tokens, and elapsed time to validated BDR checkpoints.
@@ -236,9 +236,13 @@ This repository currently contains:
 
 The hardware-independent GPT-OSS Responses and Harmony Chat adapters and the shared scoped ZIO
 HTTP/SSE transport are implemented and conformance-tested against deterministic in-process fake
-endpoints and exo-shaped payloads in ordinary CI. No live GPT-OSS or exo-cluster validation is
-claimed yet. Claude Messages, Kimi Chat, cost telemetry, trusted publishing, and PR automation
-remain future work.
+endpoints and exo-shaped payloads in ordinary CI.
+
+One live deployment has passed the conformance probe: `gpt-oss-20b` served single-node by exo on an
+Apple M1 Pro, over the Harmony Chat dialect, reaching the terminal BDR checkpoint through both pinned
+tools. That is a transport and protocol result for one model on one topology — not evidence about
+`gpt-oss-120b`, distributed placement, or model quality on real defects. Claude Messages, Kimi Chat,
+cost telemetry, trusted publishing, and PR automation remain future work.
 
 ## Safety and authority
 
@@ -286,10 +290,12 @@ still stop a run. Ordinary review and CI remain the merge authority.
 
 BAT and BDR are alpha. The workflow is promising and the state engine is designed to fail closed,
 but the method has not yet been independently validated across multiple domains or organizations.
-The isolated worker, provider-neutral backend harness, and hardware-independent GPT-OSS Responses
-adapter are implemented as controller modules. The adapter is fake-endpoint tested but not yet
-live- or exo-validated. Provider transports and production worker orchestration are not wired into
-the public host adapters. The telemetry foundation is in-process and hardware-independent; durable
+The isolated worker, provider-neutral backend harness, and the hardware-independent GPT-OSS Responses
+and Harmony Chat adapters are implemented as controller modules. The Responses adapter is
+fake-endpoint tested only; the Harmony Chat adapter has additionally passed one live single-node
+`gpt-oss-20b` exo deployment. Neither has been exercised on a distributed or 120B deployment, and
+neither has been evaluated on real defects. Provider transports and production worker orchestration
+are not wired into the public host adapters. The telemetry foundation is in-process and hardware-independent; durable
 experiment storage and live deployment fingerprints belong to the future runner.
 
 Start with a supervised pilot, inspect the audit trail, and retain ordinary code review and CI as
