@@ -100,6 +100,35 @@ pin, or whose terminal usage is absent, is a failed turn rather than a best
 effort. An unavailable measurement stays unavailable; it is never reported as
 zero.
 
+### Fail-closed checks must say which check failed
+
+Fail-closed refusal is only usable if an operator can tell *why* without a second
+run. The dialect boundary deliberately collapses an anonymous protocol violation
+into one generic code, which would make every refusal look identical.
+
+So each Harmony Chat check that can plausibly fire on a real deployment carries
+its own stable `BackendFailure` code, which survives the boundary into run
+telemetry and the probe's reason code:
+
+| code | meaning |
+|---|---|
+| `harmony_chat_reasoning_stripped` | tool turn carried no replayable reasoning |
+| `harmony_chat_usage_absent` | turn reached a finish reason without reported usage |
+| `harmony_chat_missing_stream_end` | stream stopped before the `[DONE]` sentinel |
+| `harmony_chat_model_mismatch` | served model differs from the pin, or changed mid-stream |
+| `harmony_chat_unstable_response_id` | response id changed mid-stream |
+| `harmony_chat_duplicate_call_id` | one turn emitted the same call id twice |
+| `harmony_chat_reused_call_id` | a call id from earlier in the run reappeared |
+
+Where the deciding value is operator-facing metadata — a model identifier, a
+finish reason, a chunk count, whether usage was present — the observed value is
+reported beside the expected one, so a cosmetic mismatch is a one-line diagnosis.
+
+**The stream tail is not reported.** On this wire the tail is precisely where
+reasoning and content live, so dumping it to diagnose a framing failure would
+publish the material this dialect exists to protect. The structured observed
+shape carries the diagnostic value without that cost.
+
 ### Known fidelity limit
 
 Even on the Chat dialect, `reasoning_content` fidelity is the endpoint's claim,

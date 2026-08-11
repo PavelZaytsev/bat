@@ -162,6 +162,34 @@ object HarmonyChatDialectSpec extends ZIOSpecDefault:
           .getOrElse(throw AssertionError("no framed event"))
         assertTrue(dialect.accept(seeded, event).isLeft)
       },
+      test("names the failing check in a code that survives the boundary") {
+        // Without a distinct BackendFailure code these all collapse into one
+        // generic protocol violation and an operator cannot tell them apart.
+        assertTrue(
+          failureCode(strippedReasoningStream)
+            .contains("harmony_chat_reasoning_stripped"),
+          failureCode(noUsageStream).contains("harmony_chat_usage_absent"),
+          failureCode(truncatedStream)
+            .contains("harmony_chat_missing_stream_end"),
+          failureCode(wrongModelStream).contains("harmony_chat_model_mismatch"),
+          failureCode(duplicateCallIdStream)
+            .contains("harmony_chat_duplicate_call_id")
+        )
+      },
+      test("reports the observed value beside the expected one") {
+        val message = runStream(firstRequest, wrongModelStream).left.toOption
+          .map(_.safeMessage)
+          .getOrElse("")
+        val truncation = runStream(firstRequest, truncatedStream).left.toOption
+          .map(_.safeMessage)
+          .getOrElse("")
+        assertTrue(
+          message.contains("openai/gpt-oss-20b"),
+          message.contains("openai/gpt-oss-120b"),
+          truncation.contains("finish_reason=tool_calls"),
+          truncation.contains("usage=present")
+        )
+      },
       test("keeps raw reasoning out of every redacted representation") {
         val turn = unsafe(runStream(firstRequest, toolCallStream))
         val context = turn match
@@ -176,6 +204,9 @@ object HarmonyChatDialectSpec extends ZIOSpecDefault:
         assertTrue(!rendered.contains(ReasoningCanary))
       }
     )
+
+  private def failureCode(payload: String): Option[String] =
+    runStream(firstRequest, payload).left.toOption.map(_.code)
 
   /** Feeds the payload through the real framer one byte at a time. */
   private def runStream(

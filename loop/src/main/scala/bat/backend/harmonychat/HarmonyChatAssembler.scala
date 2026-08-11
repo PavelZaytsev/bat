@@ -57,16 +57,29 @@ final class HarmonyChatAssembler private (
       // terminal path on this wire emits the `[DONE]` sentinel, so a stream
       // that stops before it was cut short and must not be mistaken for a
       // finished turn.
+      //
+      // The observed shape travels with the failure so a cosmetic mismatch is
+      // diagnosable without a second run. The stream *tail* deliberately does
+      // not: on this wire the tail is where reasoning and content live.
       _ <- Either.cond(
         state.streamEnded,
         (),
-        protocolError("Harmony Chat stream ended before the [DONE] sentinel")
+        diagnostic(
+          "missing_stream_end",
+          s"Harmony Chat stream ended before the [DONE] sentinel (finish_reason=${safeValue(finishReason)}, chunks=${state.chunks}, usage=${
+              if state.usage.isDefined then "present"
+              else "absent"
+            })"
+        )
       )
       // A turn without reported usage cannot be attributed. BAT records an
       // unavailable measurement as absent, never as zero, so the honest
       // outcome here is to reject the turn rather than invent a total.
       usage <- state.usage.toRight(
-        protocolError("Harmony Chat turn did not report terminal usage")
+        diagnostic(
+          "usage_absent",
+          "Harmony Chat turn did not report terminal usage"
+        )
       )
       turn <- assemble(finishReason, usage)
     yield turn
@@ -94,7 +107,8 @@ final class HarmonyChatAssembler private (
         _ <- Either.cond(
           state.reasoning.nonEmpty,
           (),
-          protocolError(
+          diagnostic(
+            "reasoning_stripped",
             "Harmony Chat tool turn is missing replayable reasoning"
           )
         )
@@ -132,14 +146,20 @@ final class HarmonyChatAssembler private (
       _ <- Either.cond(
         calls.map(_.id).toSet.size == calls.size,
         (),
-        protocolError("Harmony Chat turn contains duplicate tool call ids")
+        diagnostic(
+          "duplicate_call_id",
+          "Harmony Chat turn contains duplicate tool call ids"
+        )
       )
       _ <- Either.cond(
         calls.forall(call =>
           !request.historicalCallIds.exists(_.value == call.id)
         ),
         (),
-        protocolError("Harmony Chat turn reused a historical tool call id")
+        diagnostic(
+          "reused_call_id",
+          "Harmony Chat turn reused a historical tool call id"
+        )
       )
       validated <- traverse(calls)(toFunctionCall)
     yield validated
@@ -207,14 +227,24 @@ final class HarmonyChatAssembler private (
         (),
         protocolError("Harmony Chat stream exceeded the pinned chunk bound")
       )
-      _ <- requireStable(state.responseId, event.responseId, "id")
-      _ <- requireStable(state.model, event.model, "model")
+      _ <- requireStable(
+        state.responseId,
+        event.responseId,
+        "id",
+        "unstable_response_id"
+      )
+      _ <- requireStable(state.model, event.model, "model", "model_mismatch")
       // The served model is part of the evidence pin. A response attributed to
-      // another model is not the run that was requested.
+      // another model is not the run that was requested. Both identifiers are
+      // operator-facing metadata rather than model output, so reporting them is
+      // safe and turns a cosmetic mismatch into a one-line diagnosis.
       _ <- Either.cond(
         event.model == identity.modelId,
         (),
-        protocolError("Harmony Chat response was served by a different model")
+        diagnostic(
+          "model_mismatch",
+          s"Harmony Chat response was served by a different model (expected ${safeValue(identity.modelId)}, observed ${safeValue(event.model)})"
+        )
       )
       reasoning <- boundedAppend(
         state.reasoning,
@@ -286,13 +316,19 @@ final class HarmonyChatAssembler private (
   private def requireStable(
       current: Option[String],
       observed: String,
-      field: String
+      field: String,
+      suffix: String
   ): Either[BatError, Unit] =
     current match
       case None             => Right(())
       case Some(`observed`) => Right(())
-      case Some(_)          =>
-        violation(s"Harmony Chat stream changed its $field mid-response")
+      case Some(previous)   =>
+        Left(
+          diagnostic(
+            suffix,
+            s"Harmony Chat stream changed its $field mid-response (expected ${safeValue(previous)}, observed ${safeValue(observed)})"
+          )
+        )
 
   private def boundedAppend(
       current: String,
@@ -330,6 +366,34 @@ final class HarmonyChatAssembler private (
 
   private def obj(fields: (String, Json)*): Json.Obj =
     Json.Obj(Chunk.fromIterable(fields))
+
+  /** A fail-closed check that an operator will need to diagnose.
+    *
+    * The dialect boundary collapses an anonymous protocol violation into one
+    * generic code, which would hide *which* check rejected the turn. A distinct
+    * `BackendFailure` code survives that boundary and reaches the run's
+    * telemetry and the probe's reason code, so a refusal is self-explaining
+    * without a second run and without emitting provider output.
+    */
+  private def diagnostic(suffix: String, message: String): BatError =
+    BatError.BackendFailure(
+      errorCode = s"harmony_chat_$suffix",
+      safeMessage = message,
+      retryable = false
+    )
+
+  /** Renders an operator-facing identifier. Provider-supplied metadata is still
+    * provider-supplied, so it is length-bounded and stripped of anything that
+    * is not plain printable text before it can appear in a message.
+    */
+  private def safeValue(value: String): String =
+    val bounded = Option(value).getOrElse("").take(64)
+    if bounded.isEmpty then "<absent>"
+    else if bounded.forall(character =>
+        !character.isControl && character >= ' ' && character <= '~'
+      )
+    then bounded
+    else "<unsafe>"
 
   private def protocolError(message: String): BatError =
     BatError.ProtocolViolation(message)
