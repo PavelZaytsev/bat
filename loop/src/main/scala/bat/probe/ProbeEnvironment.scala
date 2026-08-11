@@ -35,7 +35,8 @@ object ProbeEnvironment:
     "BAT_GPT_OSS_BAT_COMMIT",
     "BAT_GPT_OSS_OUTPUT",
     "BAT_GPT_OSS_ALLOW_INSECURE_HTTP",
-    "BAT_GPT_OSS_DIALECT"
+    "BAT_GPT_OSS_DIALECT",
+    "BAT_GPT_OSS_REASONING_EFFORT"
   )
 
   def from(
@@ -73,6 +74,11 @@ object ProbeEnvironment:
         values.get("BAT_GPT_OSS_ALLOW_INSECURE_HTTP")
       )
       dialect <- parseDialect(values.get("BAT_GPT_OSS_DIALECT"))
+      effort = values
+        .get("BAT_GPT_OSS_REASONING_EFFORT")
+        .map(_.trim)
+        .filter(_.nonEmpty)
+        .getOrElse(LiveGptOssProbeConfig.DefaultReasoningEffort)
       config <- LiveGptOssProbeConfig.make(
         endpoint = endpoint,
         credential = credential,
@@ -88,7 +94,8 @@ object ProbeEnvironment:
         batCommit = batCommit,
         outputDirectory = output,
         allowInsecureHttp = allowInsecure,
-        dialect = dialect
+        dialect = dialect,
+        reasoningEffort = effort
       )
       forbidden = Chunk(endpoint, outputText) ++
         values.get("BAT_GPT_OSS_TOKEN").toList

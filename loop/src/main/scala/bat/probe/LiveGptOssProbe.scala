@@ -64,7 +64,12 @@ object LiveGptOssProbe:
           )
       )
       exit <- GoldenScenario
-        .executeProbeWith(backend, telemetry, config.batCommit.value)
+        .executeProbeWith(
+          backend,
+          telemetry,
+          config.batCommit.value,
+          config.reasoningEffort
+        )
         .exit
       result <- exit match
         case Exit.Success(completed) =>

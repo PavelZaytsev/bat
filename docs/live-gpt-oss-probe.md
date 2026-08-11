@@ -122,6 +122,7 @@ The complete environment surface is:
 | `BAT_GPT_OSS_OUTPUT` | yes | Absolute, normalized destination that does not exist yet. |
 | `BAT_GPT_OSS_ALLOW_INSECURE_HTTP` | no | `1` permits credential-free HTTP; absent or `0` requires HTTPS. |
 | `BAT_GPT_OSS_DIALECT` | no | `responses` (default) or `harmony-chat`. An unrecognised value is rejected rather than defaulted. |
+| `BAT_GPT_OSS_REASONING_EFFORT` | no | `low`, `medium`, or `high` (default). The dominant cost dial; recorded in the safe trace. |
 
 Provide `BAT_GPT_OSS_TOKEN` through the shell or secret manager only when the endpoint requires it.
 Do not put the token on the Scala command line. Plain HTTP is intended only for a deliberately

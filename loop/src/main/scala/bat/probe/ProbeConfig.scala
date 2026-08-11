@@ -162,7 +162,8 @@ final class LiveGptOssProbeConfig private (
     val runId: TelemetryRunId,
     val batCommit: ProbeBatCommit,
     val outputDirectory: ProbeOutputDirectory,
-    val allowInsecureHttp: Boolean
+    val allowInsecureHttp: Boolean,
+    val reasoningEffort: String
 ):
   val dialect: ProbeDialect = backendConfig.dialect
   val identity: BackendIdentity = backendConfig.identity
@@ -176,6 +177,13 @@ object LiveGptOssProbeConfig:
   val DefaultBodyIdleTimeout: Duration = Duration.fromMillis(120_000L)
   val DefaultMaxSseEventBytes: Long = 1024L * 1024L
   val DefaultMaxSseStreamBytes: Long = 16L * 1024L * 1024L
+
+  /** Reasoning effort dominates cost on this model family: a passing 20B run
+    * spent 92% of its output tokens in the analysis channel. It is therefore an
+    * operator dial, not a constant, and it is recorded in the safe trace.
+    */
+  val DefaultReasoningEffort = "high"
+  val SupportedReasoningEfforts: Set[String] = Set("low", "medium", "high")
 
   def make(
       endpoint: String,
@@ -204,9 +212,15 @@ object LiveGptOssProbeConfig:
       maxOutputTokens: Long = GptOssConfig.DefaultMaxOutputTokens,
       maxAttempts: Int = GptOssConfig.DefaultMaxAttempts,
       retryDelay: Duration = GptOssConfig.DefaultRetryDelay,
-      dialect: ProbeDialect = ProbeDialect.Responses
+      dialect: ProbeDialect = ProbeDialect.Responses,
+      reasoningEffort: String = DefaultReasoningEffort
   ): Either[ProbeError, LiveGptOssProbeConfig] =
     for
+      _ <- require(
+        SupportedReasoningEfforts.contains(reasoningEffort),
+        "invalid_probe_reasoning_effort",
+        "probe reasoning effort must be low, medium, or high"
+      )
       _ <- require(
         credential != null && !credential.contains(null),
         "invalid_probe_credential",
@@ -319,7 +333,8 @@ object LiveGptOssProbeConfig:
       safeRunId,
       safeCommit,
       safeOutput,
-      allowInsecureHttp
+      allowInsecureHttp,
+      reasoningEffort
     )
 
   private def validateEndpointPolicy(
