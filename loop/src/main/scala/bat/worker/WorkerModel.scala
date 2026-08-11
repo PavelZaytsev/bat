@@ -239,6 +239,7 @@ enum WorkerOperationKind(val wire: String, val mutating: Boolean):
   case MavenVerify extends WorkerOperationKind("maven_verify", false)
   case GradleTest extends WorkerOperationKind("gradle_test", false)
   case GradleCheck extends WorkerOperationKind("gradle_check", false)
+  case BazelTest extends WorkerOperationKind("bazel_test", false)
   case Checkout extends WorkerOperationKind("checkout", true)
 
 object WorkerOperationKind:
