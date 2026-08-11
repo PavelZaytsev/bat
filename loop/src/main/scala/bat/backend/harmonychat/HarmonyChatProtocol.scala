@@ -126,18 +126,14 @@ object HarmonyChatProtocol:
         protocolError("Harmony Chat chunk must carry exactly one choice")
       )
       delta <- requiredObject(choice, "delta", "Harmony Chat choice")
-      reasoning <- optionalNonEmptyString(
+      reasoning <- optionalText(
         delta,
         "reasoning_content",
         "Harmony Chat delta"
       )
-      content <- optionalNonEmptyString(
-        delta,
-        "content",
-        "Harmony Chat delta"
-      )
+      content <- optionalText(delta, "content", "Harmony Chat delta")
       toolCalls <- decodeToolCalls(delta, limits)
-      finishReason <- optionalNonEmptyString(
+      finishReason <- optionalText(
         choice,
         "finish_reason",
         "Harmony Chat choice"
@@ -420,11 +416,15 @@ object HarmonyChatProtocol:
       )
     }
 
-  /** An absent field and an explicitly null field mean the same thing on this
-    * wire. An empty string is rejected so a stripped value cannot masquerade as
-    * a present one.
+  /** An absent field, an explicitly null field, and an empty string all mean
+    * "this delta contributed nothing" on this wire.
+    *
+    * Observed on exo: the terminal chunk carries `"content": ""` alongside the
+    * finish reason. Rejecting an empty string here would fail a perfectly valid
+    * stream. Whether a *turn* is missing something it needed is decided at
+    * finish, where the accumulated value is known, not per fragment.
     */
-  private def optionalNonEmptyString(
+  private def optionalText(
       value: Json.Obj,
       name: String,
       label: String
@@ -432,11 +432,7 @@ object HarmonyChatProtocol:
     field(value, name) match
       case None | Some(Json.Null) => Right(None)
       case Some(Json.Str(result)) =>
-        Either.cond(
-          result.nonEmpty,
-          Some(result),
-          protocolError(s"$label.$name must not be an empty string")
-        )
+        Right(Option.when(result.nonEmpty)(result))
       case _ => violation(s"$label.$name must be a string")
 
   private def requiredNonNegativeLong(
