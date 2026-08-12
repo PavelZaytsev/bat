@@ -12,47 +12,6 @@ object JavaPolicySpec extends ZIOSpecDefault:
 
   def spec =
     suite("Java build command policy")(
-      test("plans an offline focused Bazel test against the mounted caches") {
-        val request = unsafe(
-          JavaBuildRequest.make(
-            JavaBuildAction.BazelTest,
-            Some("//core/datastore-manager:TopologyChangeManagerTest")
-          )
-        )
-        val plan = Policy.plan(request)
-        val argv = plan.argv
-        assertTrue(
-          plan.kind == WorkerOperationKind.BazelTest,
-          !plan.kind.mutating,
-          // The worker has no network, so fetching is refused outright rather
-          // than attempted and failing slowly.
-          argv.contains("--nofetch"),
-          argv.contains("--repository_cache=/bat/run/cache/bazel/repo"),
-          argv.contains("--disk_cache=/bat/run/cache/bazel/disk"),
-          argv.contains("--output_user_root=/bat/run/cache/bazel/root"),
-          argv.last == "//core/datastore-manager:TopologyChangeManagerTest",
-          plan.requestIdentity.startsWith("java-build-v1:bazel_test:selector=")
-        )
-      },
-      test("rejects a Bazel request that is not one focused absolute label") {
-        assertTrue(
-          // Bazel cannot run "everything" implicitly, and an unfocused run is
-          // not the focused selection BDR asked for.
-          JavaBuildRequest.make(JavaBuildAction.BazelTest, None).isLeft,
-          JavaBuildRequest
-            .make(JavaBuildAction.BazelTest, Some("core/datastore-manager:X"))
-            .isLeft,
-          JavaBuildRequest
-            .make(JavaBuildAction.BazelTest, Some("//..."))
-            .isLeft,
-          JavaBuildRequest
-            .make(JavaBuildAction.BazelTest, Some("//pkg:t --config=evil"))
-            .isLeft,
-          JavaBuildRequest
-            .make(JavaBuildAction.BazelTest, Some("//core/dsm/..."))
-            .isRight
-        )
-      },
       test("renders exact offline Maven test argv with one literal selector") {
         val request = unsafe(
           JavaBuildRequest.make(
@@ -128,8 +87,7 @@ object JavaPolicySpec extends ZIOSpecDefault:
             "maven_test",
             "maven_verify",
             "gradle_test",
-            "gradle_check",
-            "bazel_test"
+            "gradle_check"
           )
         )
       },

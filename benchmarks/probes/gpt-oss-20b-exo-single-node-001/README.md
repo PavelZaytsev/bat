@@ -43,7 +43,7 @@ Three model turns; both pinned tools invoked in the required order; terminal BDR
 
 Reasoning is 92% of output tokens, which is ordinary for this model family at `high` effort and is the
 reason a small output allowance yields empty content. See the budget guidance in
-[`../../docs/live-gpt-oss-probe.md`](../../docs/live-gpt-oss-probe.md).
+[`../../../docs/live-gpt-oss-probe.md`](../../../docs/live-gpt-oss-probe.md).
 
 ## What this is not
 
@@ -52,5 +52,5 @@ reason a small output allowance yields empty content. See the budget guidance in
   one-way topology edge.
 - Not evidence about model quality on real defects. The scenario is a fixed protocol exercise with
   trusted stub tools; it does not run the six-phase BDR loop against a repository.
-- Not a throughput benchmark. Turns two and three reuse a cached prompt prefix, so this figure is not
-  comparable to a single cold request.
+- Not a throughput benchmark. Turns two and three replay a growing prompt prefix, and this deployment
+  reported zero cached input tokens on every turn, so the run does not demonstrate prefix-cache reuse.

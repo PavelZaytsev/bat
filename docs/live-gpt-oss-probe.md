@@ -202,11 +202,10 @@ an afternoon. BAT reports it as `harmony_chat_output_budget_exhausted` with the 
 `reasoning_tokens`, `output_tokens`, and content length, rather than as a protocol violation. Allow at
 least ~150 output tokens per probe turn; the pinned conformance scenario already budgets 32768.
 
-A 404 from the chat path has two distinguishable causes — no instance for a downloaded model, versus
-weights that are absent, which also raises a user-facing download notification. Both fail closed, so
-BAT reports the endpoint's own detail string alongside the status in the operator-facing message
-(`status=404, detail=No instance found for model ...`). The reason code in the artifact stays stable;
-the detail is for the human reading the console.
+A 404 from the chat path has two common causes — no instance for a downloaded model, or weights that
+are absent. Both fail closed under the same stable reason code. BAT deliberately does not copy the
+provider's response body into an error message because even a printable error can echo source,
+prompts, or credentials. Use exo's deployment state and server logs to distinguish the two causes.
 
 ### Prepare the evidence destination
 
@@ -239,7 +238,7 @@ The application prints only the verdict and a bounded reason code. Exit codes ar
 | `0` | compatible |
 | `2` | incompatible wire protocol or Responses dialect |
 | `3` | nonconformant model behavior in the pinned scenario |
-| `4` | blocked by credentials, rate limits, timeout, or endpoint availability |
+| `4` | blocked by credentials, rate limits, timeout, endpoint availability, filtering, or an inadequate output allowance |
 | `64` | invalid, missing, unsafe, or unarmed configuration |
 | `70` | internal setup or artifact-publication failure |
 
@@ -250,7 +249,7 @@ The application prints only the verdict and a bounded reason code. Exit codes ar
 | `compatible` | The deployment completed the exact three-turn, two-tool audit/apply scenario and reached the expected BDR checkpoint. |
 | `incompatible` | The endpoint could not satisfy BAT's Responses/SSE wire contract. This does not trigger a Chat fallback. |
 | `nonconformant` | The wire protocol worked, but the model stopped early, used the wrong tools/order, exceeded a logical budget, or otherwise failed the scenario contract. |
-| `blocked` | Infrastructure prevented a meaningful result—for example authorization, rate limiting, timeout, or endpoint unavailability. |
+| `blocked` | Deployment, policy, or configuration prevented a meaningful result—for example authorization, rate limiting, timeout, endpoint unavailability, filtering, or an inadequate output allowance. |
 
 A blocked run is not evidence that the model is incompatible, and a fake compatible run is not
 evidence that a live deployment is compatible.

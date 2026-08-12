@@ -8,7 +8,14 @@ scenario without violating the controller contract?
 They say nothing about model quality on real defects. Model-quality evidence lives in
 [`../pilot/`](../pilot/README.md), which has its own protocol, oracle isolation, and artifact checker.
 
-## Contents of a run
+## Inventory and contents
+
+`index.json` is the machine-readable authority for the immutable run
+directories. Its directory and run-ID inventory must match the filesystem
+exactly; unlisted directories, repeated IDs, symbolic links, and extra files
+fail validation.
+
+Each indexed run contains exactly:
 
 | file | contents |
 |---|---|
@@ -17,21 +24,20 @@ They say nothing about model quality on real defects. Model-quality evidence liv
 | `telemetry.json` | payload-free run, attempt, token, tool, timing, and terminal telemetry |
 
 The digests in `result.json` cover the exact UTF-8 bytes of the other two files, so a copied record
-stays internally bound. Verify one with:
+stays internally bound. Validate the complete committed inventory with the Scala validator used by
+ordinary CI:
 
 ```bash
-python3 -c '
-import json,hashlib,sys
-d=json.load(open(sys.argv[1]+"/result.json"))
-for name,key in (("safe-trace.json","safe_trace_sha256"),("telemetry.json","telemetry_sha256")):
-    actual=hashlib.sha256(open(sys.argv[1]+"/"+name,"rb").read()).hexdigest()
-    print(name, "MATCH" if actual==d[key] else "MISMATCH")
-' benchmarks/probes/<run>
+scala-cli --power run --offline --server=false loop \
+  --main-class bat.probe.CommittedProbeValidatorApp -- benchmarks/probes
 ```
 
-These records are immutable. Do not normalize whitespace, replace a run, or edit an artifact — add a
-new run instead. A failed, blocked, incompatible, or nonconformant run is a result and is preserved
-as one.
+The validator reconstructs telemetry through the production domain model, verifies causal flow and
+derived summaries, binds embedded and standalone documents byte-for-byte, checks SHA-256 digests,
+enforces verdict/terminal invariants, and rejects raw payload, secret, URL, hostname, and absolute
+path shapes. These records are immutable. Do not normalize whitespace, replace a run, or edit an
+artifact—add a new indexed run instead. A failed, blocked, incompatible, or nonconformant run is a
+result and is preserved as one.
 
 ## Recorded runs
 

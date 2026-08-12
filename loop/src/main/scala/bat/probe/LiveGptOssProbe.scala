@@ -19,7 +19,7 @@ import zio.{Chunk, Exit, IO, ZIO}
   * channel. Interruption is never converted into a successful artifact.
   */
 object LiveGptOssProbe:
-  private val OperationalFailures = Set(
+  private val BlockedFailures = Set(
     "gpt_oss_rate_limited",
     "gpt_oss_request_timeout",
     "gpt_oss_unauthorized",
@@ -31,7 +31,20 @@ object LiveGptOssProbe:
     "gpt_oss_response_failed",
     "gpt_oss_response_incomplete",
     "gpt_oss_stream_error",
-    "gpt_oss_attempt_interrupted"
+    "gpt_oss_attempt_interrupted",
+    "harmony_chat_rate_limited",
+    "harmony_chat_request_timeout",
+    "harmony_chat_unauthorized",
+    "harmony_chat_endpoint_unavailable",
+    "harmony_chat_open_failed",
+    "harmony_chat_open_timed_out",
+    "harmony_chat_invalid_response",
+    "harmony_chat_body_failed",
+    "harmony_chat_body_timed_out",
+    "harmony_chat_chat_error",
+    "harmony_chat_content_filtered",
+    "harmony_chat_output_budget_exhausted",
+    "harmony_chat_attempt_interrupted"
   )
 
   private val ScenarioNonconformant = "probe_scenario_nonconformant"
@@ -161,7 +174,7 @@ object LiveGptOssProbe:
       case _: BatError.BudgetExceeded =>
         ProbeVerdict.Nonconformant -> ScenarioNonconformant
       case failure: BatError.BackendFailure
-          if OperationalFailures.contains(failure.code) =>
+          if BlockedFailures.contains(failure.code) =>
         ProbeVerdict.Blocked -> failure.code
       case _: BatError.ProtocolViolation | _: BatError.ToolFailure |
           _: BatError.BdrFailure | _: BatError.PrematureFinal =>
@@ -175,7 +188,8 @@ object LiveGptOssProbe:
 
   private def isInternalDefect(error: BatError): Boolean =
     error.code == "backend_adapter_defect" ||
-      error.code == "gpt_oss_attempt_defect"
+      error.code == "gpt_oss_attempt_defect" ||
+      error.code == "harmony_chat_attempt_defect"
 
   private def conforms(result: GoldenScenario.BackendResult): Boolean =
     val loop = result.loopResult

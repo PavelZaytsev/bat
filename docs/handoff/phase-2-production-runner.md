@@ -141,8 +141,9 @@ scala-cli test --server=false loop
 ## Explicit non-goals
 
 - No live model run, no cluster work, no 120b.
-- No Bazel support. datastore builds with Bazel and the worker currently exposes offline
-  Maven/Gradle only; that is tracked separately and is not part of this task.
+- No Bazel support. The worker currently exposes only the reviewed offline Maven/Gradle path;
+  project-specific build systems, images, targets, and dependency snapshots belong to a separate
+  integration task.
 - No changes to the BDR protocol, state engine, or evidence schema.
 - No GitHub automation, no pushing, no merging.
 

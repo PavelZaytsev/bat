@@ -92,15 +92,37 @@ final class HarmonyChatAssembler private (
       usage: Usage
   ): Either[BatError, ModelTurn[HarmonyChatContext]] =
     val calls = state.orderedToolCalls
-    if calls.nonEmpty then
-      for
-        _ <- Either.cond(
-          finishReason == "tool_calls",
-          (),
-          protocolError(
-            "Harmony Chat turn emitted tool calls under a non-tool finish reason"
+    finishReason match
+      case "tool_calls"     => assembleToolCalls(calls, usage)
+      case "stop"           => assembleFinalOutput(calls, usage)
+      case "length"         => Left(budgetExhausted(finishReason, usage))
+      case "content_filter" =>
+        Left(
+          diagnostic(
+            "content_filtered",
+            "Harmony Chat response was filtered before a usable output was available"
           )
         )
+      case _ =>
+        Left(
+          diagnostic(
+            "finish_reason_unsupported",
+            "Harmony Chat response used an unsupported finish reason"
+          )
+        )
+
+  private def assembleToolCalls(
+      calls: Chunk[RawToolCall],
+      usage: Usage
+  ): Either[BatError, ModelTurn[HarmonyChatContext]] =
+    if calls.isEmpty then
+      Left(
+        protocolError(
+          "Harmony Chat turn declared tool calls without emitting one"
+        )
+      )
+    else
+      for
         // Harmony puts the model's plan in the analysis channel. Replaying a
         // tool turn without it silently discards the reasoning the next turn
         // depends on, so an endpoint that strips it is not usable.
@@ -122,16 +144,21 @@ final class HarmonyChatAssembler private (
         )
         turn <- ModelTurn.toolCalls(context, validated, usage)
       yield turn
-    else if state.content.nonEmpty then
-      for
-        _ <- Either.cond(
-          finishReason != "length",
-          (),
-          budgetExhausted(finishReason, usage)
+
+  private def assembleFinalOutput(
+      calls: Chunk[RawToolCall],
+      usage: Usage
+  ): Either[BatError, ModelTurn[HarmonyChatContext]] =
+    if calls.nonEmpty then
+      Left(
+        protocolError(
+          "Harmony Chat turn emitted tool calls under a final-output finish reason"
         )
-        output <- FinalOutput.make(state.content)
+      )
+    else if state.content.nonEmpty then
+      for output <- FinalOutput.make(state.content)
       yield ModelTurn.completed(output, usage)
-    else Left(emptyOutputFailure(finishReason, usage))
+    else Left(emptyOutputFailure("stop", usage))
 
   /** A reasoning model with a small token allowance can spend the entire budget
     * in the analysis channel and return `content: ''` under a perfectly valid

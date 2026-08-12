@@ -24,6 +24,7 @@ object HarmonyChatDialectSpec extends ZIOSpecDefault:
   private val ModelId = "openai/gpt-oss-20b"
   private val ModelRevision = "weights-2026-08-10"
   private val ReasoningCanary = "RAW_ANALYSIS_CANARY_7b31"
+  private val FilteredContentCanary = "FILTERED_PROVIDER_TEXT_CANARY_f841"
 
   private val identity = unsafe(
     HarmonyChatConfig.identity(ModelId, ModelRevision)
@@ -128,6 +129,26 @@ object HarmonyChatDialectSpec extends ZIOSpecDefault:
               usage.totalTokens == 90L
             )
           case _ => assertTrue(false)
+      },
+      test("fails closed on filtered and unsupported finish reasons") {
+        val filtered = runStream(firstRequest, contentFilteredStream)
+        val unsupported = runStream(firstRequest, unsupportedFinishStream)
+        val rendered = List(filtered, unsupported).mkString(" ")
+        assertTrue(
+          filtered.left.exists(
+            _.code == "harmony_chat_content_filtered"
+          ),
+          unsupported.left.exists(
+            _.code == "harmony_chat_finish_reason_unsupported"
+          ),
+          !rendered.contains(FilteredContentCanary)
+        )
+      },
+      test("does not accept final content under a tool-call finish reason") {
+        assertTrue(
+          failureCode(toolFinishWithContentStream)
+            .contains("harmony_chat_protocol_violation")
+        )
       },
       test("rejects a tool turn whose reasoning was stripped") {
         assertTrue(runStream(firstRequest, strippedReasoningStream).isLeft)
@@ -308,6 +329,20 @@ object HarmonyChatDialectSpec extends ZIOSpecDefault:
       event(contentChunk("Audit ")) +
       s"""data: {"id":"cmd-1","created":4,"model":"$ModelId","choices":[{"index":0,"delta":{"role":"assistant","content":"complete."},"finish_reason":"stop"}],"usage":{"prompt_tokens":70,"completion_tokens":20,"total_tokens":90}}\n\n""" +
       done
+
+  private def terminalContentStream(finishReason: String): String =
+    event(contentChunk(FilteredContentCanary)) +
+      s"""data: {"id":"cmd-1","created":4,"model":"$ModelId","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":"$finishReason"}],"usage":{"prompt_tokens":70,"completion_tokens":20,"total_tokens":90}}\n\n""" +
+      done
+
+  private val contentFilteredStream =
+    terminalContentStream("content_filter")
+
+  private val unsupportedFinishStream =
+    terminalContentStream("future_finish_reason")
+
+  private val toolFinishWithContentStream =
+    terminalContentStream("tool_calls")
 
   private val strippedReasoningStream =
     event(toolCallChunk("call_audit_1")) + done

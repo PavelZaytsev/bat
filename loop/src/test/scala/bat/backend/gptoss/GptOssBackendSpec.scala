@@ -407,15 +407,12 @@ object GptOssBackendSpec extends ZIOSpecDefault:
           }
         )
       },
-      test("carries a bounded rejection detail for the operator") {
-        // Two operator mistakes share status 404 on an inference server: a
-        // model with no running instance, and weights that are not present.
-        // The stable code cannot separate them, so the detail must.
-        val noInstance =
-          """{"detail":"No instance found for model openai/gpt-oss-20b"}"""
+      test("keeps rejected provider bodies out of safe failures") {
+        val rejectedBody =
+          s"""{"detail":"$ProviderBodyCanary"}"""
         for
           missing <- ProbeDriver.make((_, _) =>
-            ZIO.succeed(statusResponse(Status.NotFound, noInstance))
+            ZIO.succeed(statusResponse(Status.NotFound, rejectedBody))
           )
           missingBackend <- makeBackend(missing)
           missingResult <- missingBackend
@@ -435,14 +432,15 @@ object GptOssBackendSpec extends ZIOSpecDefault:
             case error: BatError.BackendFailure =>
               error.code == "gpt_oss_responses_unavailable" &&
               error.safeMessage.contains("status=404") &&
-              error.safeMessage.contains("No instance found for model")
+              !error.safeMessage.contains(ProviderBodyCanary)
             case _ => false
           },
+          !missingResult.toString.contains(ProviderBodyCanary),
           oversizedResult.left.exists {
             case error: BatError.BackendFailure =>
-              // Bounded: a hostile endpoint cannot use the detail as a
-              // channel for an arbitrarily large payload.
-              error.safeMessage.length < 1024
+              error.code == "gpt_oss_responses_unavailable" &&
+              error.safeMessage ==
+                "GPT-OSS Responses endpoint rejected the request (status=404)"
             case _ => false
           }
         )
