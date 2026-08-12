@@ -234,6 +234,8 @@ enum WorkerOperationKind(val wire: String, val mutating: Boolean):
   case Patch extends WorkerOperationKind("patch", true)
   case GitStatus extends WorkerOperationKind("git_status", false)
   case GitDiff extends WorkerOperationKind("git_diff", false)
+  case TargetPaths extends WorkerOperationKind("target_paths", false)
+  case TargetDiff extends WorkerOperationKind("target_diff", false)
   case GitCommit extends WorkerOperationKind("git_commit", true)
   case MavenTest extends WorkerOperationKind("maven_test", false)
   case MavenVerify extends WorkerOperationKind("maven_verify", false)

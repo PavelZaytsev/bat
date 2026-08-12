@@ -191,6 +191,36 @@ object GitCommandPolicy:
     "git-v1:diff"
   )
 
+  def targetDiff(pins: PullRequestPins): JavaCommandPlan =
+    JavaCommandPlan(
+      WorkerOperationKind.TargetDiff,
+      PolicyId,
+      Prefix ++ Chunk(
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--binary",
+        pins.baseCommit.value,
+        pins.headCommit.value
+      ),
+      s"git-v1:target-diff:${pins.baseCommit.value}:${pins.headCommit.value}"
+    )
+
+  def targetPaths(pins: PullRequestPins): JavaCommandPlan =
+    JavaCommandPlan(
+      WorkerOperationKind.TargetPaths,
+      PolicyId,
+      Prefix ++ Chunk(
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        pins.baseCommit.value,
+        pins.headCommit.value
+      ),
+      s"git-v1:target-paths:${pins.baseCommit.value}:${pins.headCommit.value}"
+    )
+
   val applyPatch: JavaCommandPlan = JavaCommandPlan(
     WorkerOperationKind.Patch,
     PolicyId,

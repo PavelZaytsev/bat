@@ -1134,6 +1134,20 @@ def successful_command_records(records: Any) -> bool:
     return command_records_valid(records) and all(record.get("exit_code") == 0 for record in records)
 
 
+def standalone_passing_verification_evidence(state: dict[str, Any], evidence_id: Any) -> bool:
+    if not evidence_has_kind(state, evidence_id, {"test", "verification"}):
+        return False
+    commands = state["evidence"][evidence_id].get("commands")
+    return successful_command_records(commands)
+
+
+def counterfactual_verification_evidence(state: dict[str, Any], evidence_id: Any) -> bool:
+    if not evidence_has_kind(state, evidence_id, {"counterfactual_test"}):
+        return False
+    commands = state["evidence"][evidence_id].get("commands")
+    return command_records_valid(commands) and any(record.get("exit_code") != 0 for record in commands)
+
+
 def live_phase_attempt_for_evidence(
     state: dict[str, Any], evidence_id: Any, phase: str, expected_slice: str | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
@@ -1260,7 +1274,7 @@ def passing_verification_evidence(
     state: dict[str, Any], evidence_id: Any, expected_slice: str | None = None,
     *, allow_active_falsify: bool = False,
 ) -> bool:
-    if evidence_has_kind(state, evidence_id, {"test", "verification"}):
+    if standalone_passing_verification_evidence(state, evidence_id):
         return True
     minimum = version_tuple(state.get("minimum_validator_version"))
     lean_minimum = version_tuple(LEAN_GATE_MINIMUM_VERSION)
@@ -1538,8 +1552,8 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
         if baseline is not None:
             if not isinstance(baseline, dict) or not isinstance(baseline.get("usable"), bool):
                 add_error(errors, "V001", "run.baseline must state usable as a boolean")
-            elif baseline.get("usable") is True and not command_records_valid(baseline.get("commands")):
-                add_error(errors, "V001", "a usable baseline requires command evidence")
+            elif baseline.get("usable") is True and not successful_command_records(baseline.get("commands")):
+                add_error(errors, "V001", "a usable baseline requires successful command evidence")
     source = state.get("source")
     if not isinstance(source, dict):
         add_error(errors, "V001", "source must be an object")
@@ -1822,7 +1836,7 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
                 )
                 if not delivery_is_fresh and not delivery_evidence_valid:
                     delivery_evidence_valid = (
-                        evidence_has_kind(state, delivery.get("evidence"), {"test", "verification"})
+                        standalone_passing_verification_evidence(state, delivery.get("evidence"))
                         or (
                             minimum is not None
                             and minimum >= version_tuple(LEAN_GATE_MINIMUM_VERSION)  # type: ignore[operator]
@@ -1949,7 +1963,7 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
                     if not passing_verification_evidence(
                         state, resolution.get("passing_test"), current_owner(finding),
                         allow_active_falsify=True,
-                    ) or not evidence_has_kind(state, resolution.get("counterfactual_test"), {"counterfactual_test"}):
+                    ) or not counterfactual_verification_evidence(state, resolution.get("counterfactual_test")):
                         add_error(errors, "V004", f"finding {fid} fixed without passing and counterfactual evidence")
                 elif kind == "split":
                     children = resolution.get("remainders")
@@ -1959,7 +1973,7 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
                             state, resolution.get("passing_test"), current_owner(finding),
                             allow_active_falsify=True,
                         )
-                        or not evidence_has_kind(state, resolution.get("counterfactual_test"), {"counterfactual_test"})
+                        or not counterfactual_verification_evidence(state, resolution.get("counterfactual_test"))
                     ):
                         add_error(errors, "V004", f"finding {fid} split lacks fixed-scope and counterfactual proof")
                     if not isinstance(children, list) or not children:
@@ -2013,13 +2027,13 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
                         add_error(errors, "V004", f"finding {fid} historical repair requires validator 2.2 ownership metadata")
                     elif (
                         not (
-                            evidence_has_kind(state, previous.get("passing_test"), {"test", "verification"})
+                            standalone_passing_verification_evidence(state, previous.get("passing_test"))
                             or historical_saturate_verification_attempt(
                                 state, previous.get("passing_test"), verification_slice
                             ) is not None
                         )
-                        or not evidence_has_kind(
-                            state, previous.get("counterfactual_test"), {"counterfactual_test"}
+                        or not counterfactual_verification_evidence(
+                            state, previous.get("counterfactual_test")
                         )
                     ):
                         add_error(errors, "V004", f"finding {fid} historical repair lacks typed proof")
@@ -2283,7 +2297,7 @@ def validate_readiness(state: dict[str, Any], errors: list[tuple[str, str]]) -> 
     if state.get("active_operation") is not None:
         add_error(errors, "V008", "ready_for_review while a phase operation is active")
     baseline = run.get("baseline")
-    if not isinstance(baseline, dict) or baseline.get("usable") is not True or not command_records_valid(baseline.get("commands")):
+    if not isinstance(baseline, dict) or baseline.get("usable") is not True or not successful_command_records(baseline.get("commands")):
         add_error(errors, "V008", "ready_for_review without a usable evidence-backed baseline")
     required_slices = {
         sid for sid, slice_ in state.get("slices", {}).items()
@@ -3174,8 +3188,19 @@ def apply_one(
         baseline = copy.deepcopy(require_mapping(operation, "baseline"))
         if state["run"].get("baseline") is not None and operation.get("replace") is not True:
             raise BdrError("baseline already exists; replacement must be explicit")
+        if baseline.get("usable") is True and not successful_command_records(baseline.get("commands")):
+            raise BdrError("a usable baseline requires successful command evidence")
         state["run"]["baseline"] = baseline
-        state["run"]["state"] = "auditing" if baseline.get("usable") is True else "blocked_environment"
+        if baseline.get("usable") is True:
+            state["run"]["state"] = "auditing"
+            state["run"]["terminal_reason"] = None
+        else:
+            state["run"]["state"] = "blocked_environment"
+            reason = baseline.get("reason")
+            state["run"]["terminal_reason"] = (
+                reason if is_nonempty_string(reason)
+                else "baseline verification is not usable in the isolated environment"
+            )
         return {"usable": baseline.get("usable")}
 
     if kind == "record_fixed_point":
@@ -3985,8 +4010,20 @@ def fixture_state(root: Path) -> dict[str, Any]:
     }
     state["evidence"] = {
         "E-0001": {"kind": "code_read", "claim": "K belongs to S-0001"},
-        "E-0002": {"kind": "test", "claim": "finding passes"},
-        "E-0003": {"kind": "counterfactual_test", "claim": "reversion fails"},
+        "E-0002": {
+            "kind": "test", "claim": "finding passes",
+            "commands": [{
+                "command": "fixture-passing-test", "exit_code": 0,
+                "output_digest": "sha256:passing-test",
+            }],
+        },
+        "E-0003": {
+            "kind": "counterfactual_test", "claim": "reversion fails",
+            "commands": [{
+                "command": "fixture-counterfactual", "exit_code": 1,
+                "output_digest": "sha256:counterfactual-failure",
+            }],
+        },
         "E-0010": {"kind": "rescan", "claim": "no new merge blockers"},
     }
     state["findings"]["F-0001"] = {
@@ -4072,8 +4109,8 @@ def selftest() -> list[str]:
 
         legacy_v2 = copy.deepcopy(state)
         if validate_state(legacy_v2):
-            raise BdrError("2.1.0 command-backed tracker is no longer valid")
-        passed.append("2.1.0 command-backed tracker compatibility")
+            raise BdrError("safe command-backed 2.1.0 tracker is no longer valid")
+        passed.append("safe command-backed 2.1.0 tracker compatibility")
 
         upgraded_legacy_history = copy.deepcopy(state)
         upgraded_legacy_history["minimum_validator_version"] = LEAN_GATE_MINIMUM_VERSION
@@ -4142,6 +4179,82 @@ def selftest() -> list[str]:
             if "V005" not in {rule for rule, _ in validate_state(broken)}:
                 raise BdrError(f"SATURATE {label} command evidence was accepted")
         passed.append("SATURATE still requires focused green evidence")
+
+        for label, commands in (
+            ("missing", None),
+            ("all green", [{
+                "command": "fixture-counterfactual", "exit_code": 0,
+                "output_digest": "sha256:unexpected-success",
+            }]),
+        ):
+            broken = copy.deepcopy(state)
+            if commands is None:
+                broken["evidence"]["E-0003"].pop("commands")
+            else:
+                broken["evidence"]["E-0003"]["commands"] = commands
+            if "V004" not in {rule for rule, _ in validate_state(broken)}:
+                raise BdrError(f"fixed resolution accepted {label} counterfactual command evidence")
+        passed.append("fixed resolution requires red counterfactual command evidence")
+
+        for label, commands in (
+            ("missing", None),
+            ("all red", [{
+                "command": "fixture-passing-test", "exit_code": 1,
+                "output_digest": "sha256:passing-test-failure",
+            }]),
+        ):
+            broken = copy.deepcopy(state)
+            if commands is None:
+                broken["evidence"]["E-0002"].pop("commands")
+            else:
+                broken["evidence"]["E-0002"]["commands"] = commands
+            if "V004" not in {rule for rule, _ in validate_state(broken)}:
+                raise BdrError(f"fixed resolution accepted {label} passing command evidence")
+        passed.append("fixed resolution requires green standalone passing command evidence")
+
+        for label, commands in (
+            ("missing", None),
+            ("all red", [{
+                "command": "fixture-passing-test", "exit_code": 1,
+                "output_digest": "sha256:passing-test-failure",
+            }]),
+        ):
+            broken = copy.deepcopy(state)
+            broken["minimum_validator_version"] = LEAN_GATE_MINIMUM_VERSION
+            previous = copy.deepcopy(broken["findings"]["F-0001"]["resolution"])
+            previous.update({
+                "reopened_at": utc_now(),
+                "reopen_evidence": "E-0001",
+                "verification_slice": "S-0001",
+            })
+            broken["findings"]["F-0001"]["resolution_history"] = [previous]
+            broken["findings"]["F-0001"]["resolution"] = {
+                "kind": "superseded", "evidence": "E-0001", "at": utc_now(),
+            }
+            if commands is None:
+                broken["evidence"]["E-0002"].pop("commands")
+            else:
+                broken["evidence"]["E-0002"]["commands"] = commands
+            if "V004" not in {rule for rule, _ in validate_state(broken)}:
+                raise BdrError(f"historical resolution accepted {label} passing command evidence")
+        passed.append("historical resolution requires green standalone passing command evidence")
+
+        for label, commands in (
+            ("missing", None),
+            ("failing", [{
+                "command": "fixture-baseline", "exit_code": 1,
+                "output_digest": "sha256:baseline-failure",
+            }]),
+        ):
+            broken = copy.deepcopy(state)
+            if commands is None:
+                broken["run"]["baseline"].pop("commands")
+            else:
+                broken["run"]["baseline"]["commands"] = commands
+            rules = {rule for rule, _ in validate_state(broken)}
+            if "V001" not in rules:
+                raise BdrError(f"ready state accepted {label} baseline command evidence")
+        passed.append("usable baseline requires successful command evidence")
 
         falsify_without_proof = copy.deepcopy(lean_state)
         falsify_without_proof["evidence"]["E-0025"].pop("saturate_evidence")
@@ -4626,6 +4739,33 @@ def selftest() -> list[str]:
         replacement["evidence"] = "E-RESUME"
         apply_one(baseline_resume, replacement, root)
 
+        unusable_baseline = copy.deepcopy(state)
+        unusable_baseline["run"]["state"] = "preflighting"
+        unusable_baseline["run"]["baseline"] = None
+        unusable_baseline["run"]["terminal_reason"] = None
+        apply_one(
+            unusable_baseline,
+            {
+                "type": "set_baseline",
+                "baseline": {
+                    "usable": False,
+                    "reason": "offline dependencies are unavailable",
+                },
+            },
+            root,
+        )
+        unusable_next = derive_next_action(unusable_baseline)
+        if (
+            unusable_baseline["run"]["state"] != "blocked_environment"
+            or unusable_baseline["run"]["terminal_reason"]
+            != "offline dependencies are unavailable"
+            or unusable_next.get("action") != "handoff_terminal"
+            or unusable_next.get("reason")
+            != "offline dependencies are unavailable"
+        ):
+            raise BdrError("an unusable baseline did not produce a valid terminal handoff")
+        passed.append("unusable baseline produces a reasoned terminal handoff")
+
         github_off = copy.deepcopy(state)
         try:
             apply_one(github_off, {
@@ -4831,8 +4971,26 @@ def selftest() -> list[str]:
             "type": "batch",
             "operations": [
                 {"type": "add_evidence", "id": "E-0001", "evidence": {"kind": "code_read", "claim": "K belongs here"}},
-                {"type": "add_evidence", "id": "E-0002", "evidence": {"kind": "test", "claim": "intermediate commit verification"}},
-                {"type": "add_evidence", "id": "E-0003", "evidence": {"kind": "counterfactual_test", "claim": "reversion fails"}},
+                {
+                    "type": "add_evidence", "id": "E-0002",
+                    "evidence": {
+                        "kind": "test", "claim": "intermediate commit verification",
+                        "commands": [{
+                            "command": "fixture-passing-test", "exit_code": 0,
+                            "output_digest": "sha256:passing-test",
+                        }],
+                    },
+                },
+                {
+                    "type": "add_evidence", "id": "E-0003",
+                    "evidence": {
+                        "kind": "counterfactual_test", "claim": "reversion fails",
+                        "commands": [{
+                            "command": "fixture-counterfactual", "exit_code": 1,
+                            "output_digest": "sha256:counterfactual-failure",
+                        }],
+                    },
+                },
                 {"type": "add_evidence", "id": "E-0004", "evidence": {"kind": "rescan", "claim": "clean rescan"}},
                 {
                     "type": "add_slice", "id": "S-0001", "name": "release authority",

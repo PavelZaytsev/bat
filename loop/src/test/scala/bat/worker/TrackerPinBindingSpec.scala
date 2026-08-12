@@ -186,7 +186,7 @@ object TrackerPinBindingSpec extends ZIOSpecDefault:
       root: String
   ): Unit =
     val json =
-      s"""{"source":{"base_sha":${base.toJson},"starting_head_sha":${head.toJson},"root":${root.toJson}}}"""
+      s"""{"source":{"base_sha":${base.toJson},"starting_head_sha":${head.toJson},"root":${root.toJson}},"policy":{"github_projection":"off"},"evidence":{}}"""
     val _ = Files.writeString(path, json, StandardCharsets.UTF_8)
 
   private def errorCode[A](result: Either[WorkerError, A]): Option[String] =

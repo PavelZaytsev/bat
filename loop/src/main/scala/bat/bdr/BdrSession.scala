@@ -226,8 +226,23 @@ object BdrSession:
       GitEngineIdentityVerifier
     )
 
-  def resume(config: BdrConfig): IO[BatError, BdrSession] =
+  private[bdr] def resume(config: BdrConfig): IO[BatError, BdrSession] =
     resume(config, JdkProcessRunner, GitEngineIdentityVerifier)
+
+  /** Resume an existing tracker only when its immutable initialization identity
+    * still matches BAT-owned pins and policy. Unlike initialization, a resume
+    * may begin at any valid tracker revision.
+    */
+  def resume(
+      config: BdrConfig,
+      initialization: BdrInitialization
+  ): IO[BatError, BdrSession] =
+    resume(
+      config,
+      initialization,
+      JdkProcessRunner,
+      GitEngineIdentityVerifier
+    )
 
   private[bdr] def initialize(
       config: BdrConfig,
@@ -243,15 +258,35 @@ object BdrSession:
         config,
         runner,
         verifier,
-        Some(initialization)
+        Some(InitializationValidation.Fresh(initialization))
       )
     yield session
 
   private[bdr] def resume(
       config: BdrConfig,
       runner: ProcessRunner,
+      verifier: EngineIdentityVerifier
+  ): IO[BatError, BdrSession] =
+    resume(config, runner, verifier, None)
+
+  private[bdr] def resume(
+      config: BdrConfig,
+      initialization: BdrInitialization,
+      runner: ProcessRunner,
+      verifier: EngineIdentityVerifier
+  ): IO[BatError, BdrSession] =
+    resume(
+      config,
+      runner,
+      verifier,
+      Some(InitializationValidation.Resumed(initialization))
+    )
+
+  private def resume(
+      config: BdrConfig,
+      runner: ProcessRunner,
       verifier: EngineIdentityVerifier,
-      initialization: Option[BdrInitialization] = None
+      initialization: Option[InitializationValidation]
   ): IO[BatError, BdrSession] =
     for
       _ <- verifier.verify(config)
@@ -273,6 +308,18 @@ object BdrSession:
       initial <- live.validatedSnapshot(initialization)
       state <- Ref.Synchronized.make[SessionState](SessionState.Active(initial))
     yield live.withState(state)
+
+  private[bdr] enum InitializationValidation:
+    case Fresh(expected: BdrInitialization)
+    case Resumed(expected: BdrInitialization)
+
+    def expectedIdentity: BdrInitialization = this match
+      case Fresh(expected)   => expected
+      case Resumed(expected) => expected
+
+    def requiresRevisionZero: Boolean = this match
+      case Fresh(_)   => true
+      case Resumed(_) => false
 
   private enum SessionState:
     case Active(value: ValidatedBdrState)
@@ -541,7 +588,7 @@ object BdrSession:
       validatedSnapshot(None)
 
     private[bdr] def validatedSnapshot(
-        initialization: Option[BdrInitialization]
+        initialization: Option[InitializationValidation]
     ): IO[BatError, ValidatedBdrState] =
       for
         checkedJson <- runJson(
@@ -612,11 +659,11 @@ object BdrSession:
           .unless(
             trackerRevision == checkedRevision && trackerRunState == checkedRunState
           )
-        _ <- ZIO.foreachDiscard(initialization)(expected =>
+        _ <- ZIO.foreachDiscard(initialization)(validation =>
           validateInitializationIdentity(
             trackerJson,
             trackerRevision,
-            expected
+            validation
           )
         )
         digest = sha256(trackerBytes)
@@ -628,8 +675,9 @@ object BdrSession:
     private def validateInitializationIdentity(
         tracker: Json.Obj,
         revision: Revision,
-        expected: BdrInitialization
+        validation: InitializationValidation
     ): IO[BatError, Unit] =
+      val expected = validation.expectedIdentity
       for
         source <- requiredObject(tracker, "source", "BDR tracker")
         repository <- requiredString(
@@ -661,7 +709,7 @@ object BdrSession:
           "max_phase_attempts",
           "BDR tracker policy"
         )
-        matches = revision.value == 0L &&
+        matches = (!validation.requiresRevisionZero || revision.value == 0L) &&
           repository == expected.repository &&
           baseSha == expected.baseSha &&
           headSha == expected.headSha &&

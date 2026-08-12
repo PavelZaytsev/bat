@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.{Files, Path, StandardOpenOption}
 import java.security.MessageDigest
+import java.util.Base64
 
 import scala.jdk.CollectionConverters.*
 
@@ -42,6 +43,8 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
               tool.definition.name -> tool.authority
             )
             expectedInventory = Chunk(
+              "worker_workspace" -> ToolAuthority.ReadOnly,
+              "worker_target_diff" -> ToolAuthority.ReadOnly,
               "worker_read_file" -> ToolAuthority.ReadOnly,
               "worker_search" -> ToolAuthority.ReadOnly,
               "worker_apply_patch" -> ToolAuthority.Writer,
@@ -51,6 +54,8 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
               "worker_java_build" -> ToolAuthority.ReadOnly
             )
             expectedFields = Map(
+              "worker_workspace" -> Set.empty[String],
+              "worker_target_diff" -> Set.empty[String],
               "worker_read_file" -> Set("path", "max_bytes"),
               "worker_search" -> Set("text", "max_matches"),
               "worker_apply_patch" -> Set(
@@ -137,6 +142,25 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
           )
         }
       },
+      test("binds source identity to every authenticated pull-request pin") {
+        val original = Pins
+        val changedRepository = pins(Head, baseRepository = "other-repository")
+        val changedPullRequest = pins(Head, pullRequestId = "43")
+        val changedRef = pins(Head, headRef = "refs/heads/other-feature")
+        val first = WorkerSourceIdentity.digest(original)
+        val again = WorkerSourceIdentity.digest(original)
+        val variants = Chunk(
+          WorkerSourceIdentity.digest(changedRepository),
+          WorkerSourceIdentity.digest(changedPullRequest),
+          WorkerSourceIdentity.digest(changedRef)
+        )
+        assertTrue(
+          first == again,
+          first.matches("[0-9a-f]{64}"),
+          variants.forall(_ != first),
+          variants.toSet.size == variants.size
+        )
+      },
       test("binds operation IDs to call IDs and replays without rerunning") {
         ZIO.scoped {
           for
@@ -171,6 +195,278 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
             boolField(replayJson, "replayed").contains(true),
             requests.size == 1,
             requests.head.operationId == expectedId
+          )
+        }
+      },
+      test("supplies trusted workspace bootstrap and immutable target diff") {
+        ZIO.scoped {
+          val targetDiff =
+            "diff --git a/src/Main.java b/src/Main.java\n+target change\n"
+          val targetPaths = "src/Main.java\u0000src/Other.java\u0000"
+          for
+            sandbox <- RecordingSandbox.makeWith(request =>
+              if request.argv.contains("--name-only") then
+                RecordingSandbox.result(
+                  request,
+                  Chunk.fromArray(
+                    targetPaths.getBytes(StandardCharsets.UTF_8)
+                  ),
+                  Chunk.empty
+                )
+              else
+                RecordingSandbox.result(
+                  request,
+                  Chunk.fromArray(
+                    targetDiff.getBytes(StandardCharsets.UTF_8)
+                  ),
+                  Chunk.empty
+                )
+            )
+            fixture <- openSession(emptyGit, sandbox)
+            registry <- fromBat(
+              ToolRegistry.make(WorkerTools.all(fixture.session))
+            )
+            workspace <- registry.execute(
+              functionCall("workspace", "worker_workspace", obj()),
+              RunMode.FullWriter
+            )
+            diff <- registry.execute(
+              functionCall("target-diff", "worker_target_diff", obj()),
+              RunMode.FullWriter
+            )
+            requests <- sandbox.requests
+            workspaceJson = objectOutput(workspace)
+            diffJson = objectOutput(diff)
+          yield assertTrue(
+            stringField(workspaceJson, "base_commit").contains(
+              Pins.baseCommit.value
+            ),
+            stringField(workspaceJson, "starting_head_commit").contains(
+              Pins.headCommit.value
+            ),
+            numberField(workspaceJson, "workspace_revision").contains(0L),
+            stringField(workspaceJson, "workspace_fingerprint").contains(
+              fixture.session.workspace.initialFingerprint.value
+            ),
+            stringField(diffJson, "base_commit").contains(
+              Pins.baseCommit.value
+            ),
+            stringField(diffJson, "starting_head_commit").contains(
+              Pins.headCommit.value
+            ),
+            stringField(diffJson, "stdout_preview").contains(targetDiff),
+            stringField(diffJson, "stdout_preview_base64").contains(
+              Base64.getEncoder.encodeToString(
+                targetDiff.getBytes(StandardCharsets.UTF_8)
+              )
+            ),
+            boolField(diffJson, "stdout_preview_truncated").contains(false),
+            boolField(diffJson, "stderr_preview_truncated").contains(false),
+            boolField(diffJson, "changed_paths_complete").contains(true),
+            numberField(diffJson, "changed_path_count").contains(2L),
+            stringArrayField(diffJson, "changed_paths").contains(
+              Chunk("src/Main.java", "src/Other.java")
+            ),
+            requests.size == 2,
+            requests.forall(
+              _.argv.takeRight(2) == Chunk(
+                Pins.baseCommit.value,
+                Pins.headCommit.value
+              )
+            )
+          )
+        }
+      },
+      test("fails target diff closed on failure or truncated output") {
+        ZIO.scoped {
+          val inventory = Chunk.fromArray(
+            "src/Main.java\u0000".getBytes(StandardCharsets.UTF_8)
+          )
+          for
+            failedSandbox <- RecordingSandbox.makeWith(request =>
+              if request.argv.contains("--name-only") then
+                RecordingSandbox.result(request, inventory, Chunk.empty)
+              else
+                RecordingSandbox.result(
+                  request,
+                  Chunk.empty,
+                  Chunk.empty,
+                  OciRunOutcome.Exited(1)
+                )
+            )
+            failedFixture <- openSession(emptyGit, failedSandbox)
+            failedRegistry <- fromBat(
+              ToolRegistry.make(WorkerTools.all(failedFixture.session))
+            )
+            failed <- failedRegistry.execute(
+              functionCall("target-failed", "worker_target_diff", obj()),
+              RunMode.FullWriter
+            )
+            truncatedSandbox <- RecordingSandbox.makeWith(request =>
+              if request.argv.contains("--name-only") then
+                RecordingSandbox.result(request, inventory, Chunk.empty)
+              else
+                RecordingSandbox.truncatedResult(
+                  request,
+                  Chunk.fromArray("partial".getBytes(StandardCharsets.UTF_8)),
+                  totalStdoutBytes = 100L
+                )
+            )
+            truncatedFixture <- openSession(emptyGit, truncatedSandbox)
+            truncatedRegistry <- fromBat(
+              ToolRegistry.make(WorkerTools.all(truncatedFixture.session))
+            )
+            truncated <- truncatedRegistry.execute(
+              functionCall(
+                "target-truncated",
+                "worker_target_diff",
+                obj()
+              ),
+              RunMode.FullWriter
+            )
+          yield assertTrue(
+            errorOutput(failed).contains("target_diff_failed"),
+            errorOutput(truncated).contains("target_diff_truncated")
+          )
+        }
+      },
+      test(
+        "returns build previews with binary fallback and trusted evidence"
+      ) {
+        ZIO.scoped {
+          val stdout = Chunk.fromArray(
+            "Tests passed\n".getBytes(StandardCharsets.UTF_8)
+          )
+          val stderr = Chunk(0xc3.toByte, 0x28.toByte)
+          for
+            sandbox <- RecordingSandbox.makeWith(request =>
+              RecordingSandbox.result(request, stdout, stderr)
+            )
+            fixture <- openSession(emptyGit, sandbox)
+            current <- fixture.session.currentWorkspace
+            registry <- fromBat(
+              ToolRegistry.make(WorkerTools.all(fixture.session))
+            )
+            output <- registry.execute(
+              functionCall(
+                "java-build-output",
+                "worker_java_build",
+                merge(
+                  workspaceArguments(current),
+                  obj(
+                    "action" -> Json.Str("maven_test"),
+                    "test_selector" -> Json.Str("")
+                  )
+                )
+              ),
+              RunMode.FullWriter
+            )
+            json = objectOutput(output)
+            evidence = objectField(json, "command_evidence")
+          yield assertTrue(
+            stringField(json, "stdout_preview").contains("Tests passed\n"),
+            field(json, "stderr_preview").contains(Json.Null),
+            stringField(json, "stderr_preview_base64").contains(
+              Base64.getEncoder.encodeToString(stderr.toArray)
+            ),
+            evidence
+              .flatMap(stringField(_, "command"))
+              .contains(
+                "java-build-v1:maven_test:full"
+              ),
+            evidence.flatMap(stringField(_, "policy")).contains("java-v1"),
+            evidence.flatMap(numberField(_, "exit_code")).contains(0L),
+            field(json, "command_evidence_unavailable_reason").contains(
+              Json.Null
+            )
+          )
+        }
+      },
+      test("preserves a timed-out build result without inventing evidence") {
+        ZIO.scoped {
+          val stdout = Chunk.fromArray(
+            "partial output\n".getBytes(StandardCharsets.UTF_8)
+          )
+          for
+            sandbox <- RecordingSandbox.makeWith(request =>
+              RecordingSandbox.result(
+                request,
+                stdout,
+                Chunk.empty,
+                OciRunOutcome.TimedOut
+              )
+            )
+            fixture <- openSession(emptyGit, sandbox)
+            current <- fixture.session.currentWorkspace
+            registry <- fromBat(
+              ToolRegistry.make(WorkerTools.all(fixture.session))
+            )
+            output <- registry.execute(
+              functionCall(
+                "java-build-timeout",
+                "worker_java_build",
+                merge(
+                  workspaceArguments(current),
+                  obj(
+                    "action" -> Json.Str("maven_test"),
+                    "test_selector" -> Json.Str("")
+                  )
+                )
+              ),
+              RunMode.FullWriter
+            )
+            json = objectOutput(output)
+          yield assertTrue(
+            stringField(json, "outcome").contains("timed_out"),
+            field(json, "exit_code").contains(Json.Null),
+            stringField(json, "stdout_preview").contains("partial output\n"),
+            field(json, "command_evidence").contains(Json.Null),
+            stringField(
+              json,
+              "command_evidence_unavailable_reason"
+            ).contains("process_did_not_exit")
+          )
+        }
+      },
+      test("returns the canonical full head for a successful Git commit") {
+        ZIO.scoped {
+          for
+            sandbox <- RecordingSandbox.make
+            git <- RecordingGit.make(invocation =>
+              if invocation.arguments == Chunk(
+                  "rev-parse",
+                  "--verify",
+                  "HEAD^{commit}"
+                )
+              then GitResult(0, LocalHead + "\n")
+              else GitResult(1, "")
+            )
+            fixture <- openSession(git, sandbox)
+            current <- fixture.session.currentWorkspace
+            registry <- fromBat(
+              ToolRegistry.make(WorkerTools.all(fixture.session))
+            )
+            output <- registry.execute(
+              functionCall(
+                "git-commit-head",
+                "worker_git_commit",
+                merge(
+                  workspaceArguments(current),
+                  obj("message" -> Json.Str("fix target defect"))
+                )
+              ),
+              RunMode.FullWriter
+            )
+            requests <- sandbox.requests
+            calls <- git.calls
+            json = objectOutput(output)
+          yield assertTrue(
+            stringField(json, "head_commit").contains(LocalHead),
+            LocalHead.length == 40,
+            requests.size == 1,
+            calls.map(_.arguments) == Chunk(
+              Chunk("rev-parse", "--verify", "HEAD^{commit}")
+            )
           )
         }
       },
@@ -369,6 +665,72 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
           )
         }
       },
+      test(
+        "keeps receipt materialization and BDR apply in one worker transaction"
+      ) {
+        ZIO.scoped {
+          for
+            captured <- Ref.make(Chunk.empty[Json.Obj])
+            sandbox <- RecordingSandbox.make
+            fixture <- openSession(
+              emptyGit,
+              sandbox,
+              repository => recordingApplyBdr(repository, captured)
+            )
+            current <- fixture.session.currentWorkspace
+            operationId <- ZIO.fromEither(OperationId.from("atomic-evidence"))
+            request <- ZIO.fromEither(
+              JavaBuildRequest.make(JavaBuildAction.MavenTest, None)
+            )
+            result <- fixture.session.build(operationId, current, request)
+            operation = obj(
+              "type" -> Json.Str("set_baseline"),
+              "baseline" -> obj(
+                "usable" -> Json.Bool(true),
+                "commands" -> Json.Arr(
+                  obj(
+                    "receipt_id" -> Json.Str(result.receipt.operationId.value)
+                  )
+                )
+              )
+            )
+            materialized <- Promise.make[Nothing, Unit]
+            release <- Promise.make[Nothing, Unit]
+            applying <- fixture.session
+              .applyReceiptBound(
+                operation,
+                materialized.succeed(()) *> release.await
+              )
+              .forkScoped
+            _ <- materialized.await
+            queued <- Promise.make[Nothing, Unit]
+            blockedFiber <- (queued.succeed(()) *>
+              fixture.session.currentWorkspace).timeout(1.second).forkScoped
+            _ <- queued.await
+            _ <- TestClock.adjust(1.second)
+            blocked <- blockedFiber.join
+            beforeRelease <- captured.get
+            _ <- release.succeed(())
+            accepted <- applying.join
+            afterRelease <- captured.get
+            command = afterRelease.headOption
+              .flatMap(objectField(_, "baseline"))
+              .flatMap(value => field(value, "commands"))
+              .collect { case Json.Arr(values) => values }
+              .flatMap(_.headOption)
+              .collect { case value: Json.Obj => value }
+          yield assertTrue(
+            blocked.isEmpty,
+            beforeRelease.isEmpty,
+            boolField(accepted, "accepted").contains(true),
+            afterRelease.size == 1,
+            command.flatMap(stringField(_, "image_sha256")).contains("a" * 64),
+            command
+              .flatMap(stringField(_, "artifact"))
+              .exists(_.contains(result.receipt.operationId.value))
+          )
+        }
+      },
       test("rejects dirty code before reading or exporting history") {
         ZIO.scoped {
           for
@@ -563,11 +925,13 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
   private def fixedBdr(session: BdrSession): WorkerBdrLifecycle =
     new WorkerBdrLifecycle:
       def initialize(
+          runId: RunId,
           repository: Path,
           pins: PullRequestPins
       ): IO[WorkerError, BdrSession] = ZIO.succeed(session)
 
       def resume(
+          runId: RunId,
           repository: Path,
           pins: PullRequestPins
       ): IO[WorkerError, BdrSession] = ZIO.succeed(session)
@@ -585,6 +949,25 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
       "ready_for_review",
       obj("action" -> Json.Str("handoff"))
     )
+
+  private def recordingApplyBdr(
+      repository: Path,
+      captured: Ref[Chunk[Json.Obj]]
+  ): BdrSession =
+    val delegate = fixedStateBdr(
+      repository,
+      "preflighting",
+      obj("action" -> Json.Str("set_baseline"))
+    )
+    new BdrSession:
+      val engineCommit: String = delegate.engineCommit
+      val actor: String = delegate.actor
+      def current = delegate.current
+      def checkpoint = delegate.checkpoint
+      def apply(operation: Json.Obj): IO[BatError, Json.Obj] =
+        captured.update(_ :+ operation).as(obj("accepted" -> Json.Bool(true)))
+      def auditSummary = delegate.auditSummary
+      def completionCheck = delegate.completionCheck
 
   private def fixedStateBdr(
       repository: Path,
@@ -687,7 +1070,8 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
       yield BlockingMutationSandbox(started, release)
 
   private final class RecordingSandbox private (
-      ref: Ref[Chunk[OciRunRequest]]
+      ref: Ref[Chunk[OciRunRequest]],
+      response: OciRunRequest => OciRunResult
   ) extends OciSandbox:
     val image: PinnedImage = unsafeOci(
       PinnedImage.from("ghcr.io/bat/java-worker@sha256:" + ("a" * 64))
@@ -698,27 +1082,58 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
     def cleanup(operationId: String): IO[OciFailure, Unit] = ZIO.unit
 
     def run(request: OciRunRequest): IO[OciFailure, OciRunResult] =
-      val empty = OciStreamReceipt(
-        0L,
-        EmptyDigest,
-        Chunk.empty,
-        previewTruncated = false
-      )
-      ref
-        .update(_ :+ request)
-        .as(
-          OciRunResult(
-            request.operationId,
-            OciRunOutcome.Exited(0),
-            empty,
-            empty,
-            0L
-          )
-        )
+      ref.update(_ :+ request).as(response(request))
 
   private object RecordingSandbox:
     def make: UIO[RecordingSandbox] =
-      Ref.make(Chunk.empty[OciRunRequest]).map(new RecordingSandbox(_))
+      makeWith(request => result(request, Chunk.empty, Chunk.empty))
+
+    def makeWith(
+        response: OciRunRequest => OciRunResult
+    ): UIO[RecordingSandbox] =
+      Ref
+        .make(Chunk.empty[OciRunRequest])
+        .map(new RecordingSandbox(_, response))
+
+    def result(
+        request: OciRunRequest,
+        stdout: Chunk[Byte],
+        stderr: Chunk[Byte],
+        outcome: OciRunOutcome = OciRunOutcome.Exited(0)
+    ): OciRunResult =
+      OciRunResult(
+        request.operationId,
+        outcome,
+        stream(stdout),
+        stream(stderr),
+        0L
+      )
+
+    def truncatedResult(
+        request: OciRunRequest,
+        stdoutPreview: Chunk[Byte],
+        totalStdoutBytes: Long
+    ): OciRunResult =
+      OciRunResult(
+        request.operationId,
+        OciRunOutcome.Exited(0),
+        OciStreamReceipt(
+          totalStdoutBytes,
+          sha256(stdoutPreview.toArray),
+          stdoutPreview,
+          previewTruncated = true
+        ),
+        stream(Chunk.empty),
+        0L
+      )
+
+    private def stream(bytes: Chunk[Byte]): OciStreamReceipt =
+      OciStreamReceipt(
+        bytes.length.toLong,
+        sha256(bytes.toArray),
+        bytes,
+        previewTruncated = false
+      )
 
     val discarding: OciSandbox = new OciSandbox:
       val image: PinnedImage = unsafeOci(
@@ -799,6 +1214,11 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
       case value: Json.Obj => value
       case _ => throw new IllegalStateException("expected object output")
 
+  private def errorOutput(output: FunctionOutput): Option[String] =
+    Option
+      .when(output.isError)(objectOutput(output))
+      .flatMap(stringField(_, "error"))
+
   private def propertyNames(schema: Json.Obj): Set[String] =
     properties(schema).fields.map(_._1).toSet
 
@@ -828,18 +1248,40 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
   private def boolField(value: Json.Obj, name: String): Option[Boolean] =
     field(value, name).collect { case Json.Bool(result) => result }
 
+  private def numberField(value: Json.Obj, name: String): Option[Long] =
+    field(value, name).collect { case Json.Num(result) => result.longValue }
+
+  private def objectField(value: Json.Obj, name: String): Option[Json.Obj] =
+    field(value, name).collect { case result: Json.Obj => result }
+
+  private def stringArrayField(
+      value: Json.Obj,
+      name: String
+  ): Option[Chunk[String]] =
+    field(value, name).collect { case Json.Arr(values) =>
+      values.collect { case Json.Str(text) => text }
+    }
+
+  private def merge(left: Json.Obj, right: Json.Obj): Json.Obj =
+    Json.Obj(left.fields ++ right.fields)
+
   private def obj(fields: (String, Json)*): Json.Obj =
     Json.Obj(Chunk.fromIterable(fields))
 
-  private def pins(head: String): PullRequestPins =
+  private def pins(
+      head: String,
+      baseRepository: String = "R_base",
+      pullRequestId: String = "PR_42",
+      headRef: String = "refs/pull/42/head"
+  ): PullRequestPins =
     unsafeWorker(
       PullRequestPins.make(
-        "R_base",
+        baseRepository,
         "R_head",
-        "PR_42",
+        pullRequestId,
         "refs/heads/main",
         "1" * 40,
-        "refs/pull/42/head",
+        headRef,
         head
       )
     )

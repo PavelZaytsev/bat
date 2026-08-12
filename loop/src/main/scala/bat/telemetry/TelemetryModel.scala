@@ -409,6 +409,13 @@ final case class DeploymentFingerprint private (
   override def toString: String =
     "DeploymentFingerprint(payload=<redacted>)"
 
+  /** Check the opened backend against the operator-pinned deployment without
+    * exposing the sanitized deployment fields.
+    */
+  def matchesBackend(value: BackendIdentity): Boolean =
+    value != null &&
+      identity.digest == TelemetryBackendIdentity.identityDigest(value)
+
 object DeploymentFingerprint:
   private val Identifier = "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$".r
   private val Protocol = "^[a-z][a-z0-9_-]{0,63}$".r
