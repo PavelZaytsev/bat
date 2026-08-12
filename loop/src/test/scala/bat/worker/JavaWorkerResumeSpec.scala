@@ -349,8 +349,8 @@ object JavaWorkerResumeSpec extends ZIOSpecDefault:
       "BDR must not open after failed resume validation"
     )
     WorkerBdrLifecycle.make(
-      (_, _) => calls.update(_ + 1) *> ZIO.fail(failure),
-      (_, _) => calls.update(_ + 1) *> ZIO.fail(failure)
+      (_, _, _) => calls.update(_ + 1) *> ZIO.fail(failure),
+      (_, _, _) => calls.update(_ + 1) *> ZIO.fail(failure)
     )
 
   private def unexpectedSandbox(calls: Ref[Int]): OciSandbox =

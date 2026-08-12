@@ -1,10 +1,12 @@
-# Handoff — the Phase 2 production runner
+# Handoff — production-runner integration
 
-A self-contained brief for a coding agent working without cluster access. Advances #25 Phase 2.
+A self-contained brief for the remaining deployment integration after the provider-neutral runner
+core. Advances #25 Phase 2 without claiming the six-phase worker acceptance is complete.
 
-**You do not need a model endpoint, a GPU, or the exo cluster to complete this.** Everything here is
-verified against a scripted backend and a sealed evaluator. A live model is a later config change,
-not a code change, because the backend boundary already abstracts it.
+**You do not need a model endpoint, a GPU, or the exo cluster to finish the offline composition.**
+The runner, worker discovery surface, receipt-bound BDR bridge, and typed GPT-OSS backend factories
+exist. The remaining work is a production-compatible canary/build cartridge and a concrete sealed
+evaluator; current tests use an injected evaluator double and do not claim OCI evaluator coverage.
 
 ## Outcome
 
@@ -17,15 +19,16 @@ Backend (any dialect)
   -> AgenticLoop + shared telemetry sink
   -> real BdrTools + isolated Java worker tools
   -> ready-for-review handoff
-  -> independent OCI evaluator
+  -> injected trusted evaluator (concrete OCI implementation still required)
 ```
 
 ## Why this is the critical path
 
-Nothing composes these today. `bat.quickstart.ToyQuickstart` wires a *scripted* backend to *toy*
-tools. `bat.probe.LiveGptOssProbe` wires a *real* backend to *stub* tools. The diagonal — real
-backend, real tools — does not exist, and every downstream question about model quality is blocked
-behind it.
+`bat.quickstart.ToyQuickstart` wires a *scripted* backend to *toy* tools.
+`bat.probe.LiveGptOssProbe` wires a *real* backend to *stub* tools. `bat.runner.ProductionRunner`
+now supplies the diagonal composition for a real backend and real Java-worker tools. It deliberately
+does not manufacture a project build cartridge, worker image, application config loader, or sealed
+evaluator implementation.
 
 ## Read first
 
@@ -50,21 +53,25 @@ behind it.
 | handoff | `loop/src/main/scala/bat/worker/Handoff.scala` |
 | OCI sandbox | `loop/src/main/scala/bat/worker/oci/OciSandbox.scala` |
 | backend seam | `loop/src/main/scala/bat/backend/wire/WireDialect.scala` |
-| a scripted backend to test with | `loop/src/main/scala/bat/quickstart/ScriptedToyBackend.scala` |
+| production composition | `loop/src/main/scala/bat/runner/ProductionRunner.scala` |
+| versioned actor contract | `loop/src/main/resources/bat/runner/java-bdr-v1.md` |
 | end-to-end six-phase example | `loop/src/main/scala/bat/quickstart/ToyScenario.scala` |
 | telemetry sink | `loop/src/main/scala/bat/telemetry/Telemetry.scala` |
 
-Read `ToyScenario.scala` closely. It is the shape of what you are building, with the two ends
-replaced.
+Read `ProductionRunner.scala` first. `ToyScenario.scala` remains useful methodology evidence, but its
+`toy_*` tools and direct host `javac` execution are intentionally impossible to select in a
+production run.
 
-## What to build
+## Production integration contract
 
-A runner that:
+The embedding application must preserve these runner guarantees:
 
 1. **Composes rather than copies.** Use `AgenticLoop`, `BdrTools`, `WorkerTools`, and a `Backend`
    injected by the caller. If you find yourself reimplementing loop or phase logic, stop.
 2. **Uses one shared telemetry collector** for provider attempts, logical turns, BDR attribution,
-   tool execution, retries, tokens, timings, and terminal outcome.
+   tool execution, retries, tokens, timings, and terminal outcome. An embedding must allocate a
+   fresh collector per attempt and call `ProductionRunner.runObserved` when it needs to retain
+   telemetry after a typed run failure.
 3. **Gives the model a versioned, reviewed prompt/tool contract** — never reference patches, hidden
    tests, expected findings, or hard-coded operations.
 4. **Supplies trusted initial workspace state and the final canonical commit SHA** rather than asking
@@ -72,8 +79,8 @@ A runner that:
 5. **Materialises verification evidence from worker receipts inside the trusted controller.** Literal
    model-authored command output must be rejected as evidence.
 6. **Invokes handoff only after a valid `ready_for_review` outcome.**
-7. **Evaluates the delivered commit in a fresh OCI sandbox after the actor is gone**, mounting sealed
-   oracle material only for that phase.
+7. **Invokes the injected trusted evaluator only after the actor is gone.** Its concrete production
+   implementation must use a fresh OCI sandbox and mount sealed oracle material only for that phase.
 
 ## Hard rules — violating any of these makes the result worthless
 
@@ -87,10 +94,18 @@ A runner that:
   distinct stable error code over a generic one; see the `harmony_chat_*` codes for the pattern.
 - **Do not edit anything under `benchmarks/`.** Committed runs are immutable records.
 
+A receipt authenticates the reviewed command identity, worker image, exit status, and output
+digests. It does not yet parse Java test output or independently prove that a nonzero EXPOSE or
+counterfactual result reached the actor-named assertion. Treat that semantic attribution as an
+actor claim until a build cartridge supplies a signed structured test outcome; the sealed evaluator
+and human review remain independent authority.
+
 ## Verification, all offline
 
-Build against `examples/java-six-phase/` with `ScriptedToyBackend`, then confirm the same runner
-accepts a real `Backend` without source changes.
+Do not pass `ScriptedToyBackend` to the production runner: it calls `toy_*` tools by design. Add a
+production-worker scripted actor that speaks `worker_*`, and give the fixture a reviewed structured
+Java 17 action inside the OCI worker (or an equivalent checked-in offline build). Then confirm a
+real backend is a configuration swap only.
 
 The fixture's contract: materialise only `subject/base/` plus `subject/head.patch`; keep `oracle/` and
 `reference/` outside every actor-visible mount; require real EXPOSE → REPRESENT → ROUTE → COLLAPSE →
@@ -126,15 +141,20 @@ scala-cli test --server=false loop
 
 ## Acceptance criteria
 
-- [ ] A runner composes a caller-injected `Backend`, `AgenticLoop`, real `BdrTools`, the isolated
-      Java worker, one telemetry sink, handoff, and an isolated evaluator.
-- [ ] It drives the six-phase canary to a terminal BDR state using `ScriptedToyBackend`, with the
-      sealed evaluator passing on the delivered commit, and **no provider call**.
-- [ ] Swapping in a real `Backend` requires configuration only — no change to runner source.
-- [ ] Strict local toy tools are unreachable from any non-scripted backend, enforced by a test.
-- [ ] Verification evidence derives from worker receipts, and model-authored command output is
+- [x] A runner composes a typed GPT-OSS backend factory, `AgenticLoop`, real `BdrTools`, the isolated
+      Java worker, one telemetry sink, receipt-bound handoff evidence, and a trusted evaluator seam.
+- [ ] A concrete sealed OCI evaluator implementation binds its report to the handed-off commit and
+      patch digest.
+- [ ] A production-worker scripted actor drives the six-phase canary to a terminal BDR state, with
+      the sealed evaluator passing on the delivered commit and **no provider call**. It must not use
+      `ScriptedToyBackend` or any `toy_*` tool.
+- [x] Swapping between GPT-OSS Responses and Harmony Chat requires configuration only — no change
+      to runner source.
+- [x] Strict local toy tools are unreachable from the sealed production worker factory, enforced by
+      a test.
+- [x] Verification evidence derives from worker receipts, and model-authored command output is
       rejected, enforced by a test.
-- [ ] Telemetry attributes turns and tokens to BDR phases; unknown measurements are `null` with a
+- [x] Telemetry attributes turns and tokens to BDR phases; unknown measurements are `null` with a
       reason.
 - [ ] Full local gate green; ordinary CI makes no model call.
 

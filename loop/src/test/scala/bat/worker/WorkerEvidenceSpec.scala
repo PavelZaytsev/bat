@@ -37,8 +37,8 @@ object WorkerEvidenceSpec extends ZIOSpecDefault:
               "b" * 64,
               "java-build-v1:maven_test:selector=com.acme.CacheTest#evictsEntry"
             )
-            fullResult <- ledger.execute(full)(completed)
-            focusedResult <- ledger.execute(focused)(completed)
+            fullResult <- ledger.execute(full)(completed())
+            focusedResult <- ledger.execute(focused)(completed())
             fullEvidence <- TrustedEvidenceMaterializer.materialize(
               fullResult.receipt,
               Initial
@@ -56,6 +56,10 @@ object WorkerEvidenceSpec extends ZIOSpecDefault:
             ),
             stringField(fullEvidence, "policy").contains("java-v1"),
             stringField(focusedEvidence, "policy").contains("java-v1"),
+            stringField(fullEvidence, "image_sha256").contains(ImageDigest),
+            stringField(focusedEvidence, "image_sha256").contains(
+              ImageDigest
+            ),
             stringField(fullEvidence, "request_sha256").contains("a" * 64),
             stringField(focusedEvidence, "request_sha256").contains("b" * 64),
             fullResult.receipt.requestIdentity !=
@@ -78,7 +82,7 @@ object WorkerEvidenceSpec extends ZIOSpecDefault:
                 "c" * 64,
                 "java-build-v1:maven_test:selector=CacheTest"
               )
-            )(completed)
+            )(completed())
             other = WorkspacePrecondition(
               unsafe(WorkspaceRevision.from(1L)),
               Initial.fingerprint
@@ -92,18 +96,59 @@ object WorkerEvidenceSpec extends ZIOSpecDefault:
             )
           )
         }
+      },
+      test("rejects non-verification and non-exited receipts") {
+        ZIO.scoped {
+          for
+            control <- temporaryDirectory
+            ledger <- WorkerLedger.open(
+              control,
+              unsafe(RunId.from("run-evidence-kind")),
+              Initial
+            )
+            nonVerification <- ledger.execute(
+              operation(
+                "not-verification",
+                "d" * 64,
+                "worker-request-v1:read",
+                WorkerOperationKind.Read
+              )
+            )(completed())
+            timedOut <- ledger.execute(
+              operation(
+                "timed-out",
+                "e" * 64,
+                "java-build-v1:maven_test:full"
+              )
+            )(completed(CommandOutcome.TimedOut))
+            wrongKind <- TrustedEvidenceMaterializer
+              .materialize(nonVerification.receipt, Initial)
+              .either
+            wrongOutcome <- TrustedEvidenceMaterializer
+              .materialize(timedOut.receipt, Initial)
+              .either
+          yield assertTrue(
+            wrongKind.left.toOption.exists(
+              _.code == "receipt_not_verification"
+            ),
+            wrongOutcome.left.toOption.exists(
+              _.code == "receipt_not_successful_process"
+            )
+          )
+        }
       }
     ) @@ TestAspect.sequential
 
   private def operation(
       id: String,
       digest: String,
-      identity: String
+      identity: String,
+      kind: WorkerOperationKind = WorkerOperationKind.MavenTest
   ): WorkerOperation =
     unsafe(
       WorkerOperation.make(
         unsafe(OperationId.from(id)),
-        WorkerOperationKind.MavenTest,
+        kind,
         digest,
         identity,
         Initial,
@@ -112,12 +157,14 @@ object WorkerEvidenceSpec extends ZIOSpecDefault:
       )
     )
 
-  private def completed: UIO[CompletedOperation] =
+  private def completed(
+      outcome: CommandOutcome = CommandOutcome.Exited(0)
+  ): UIO[CompletedOperation] =
     ZIO.succeed(
       CompletedOperation(
         unsafe(
           CommandObservation.make(
-            CommandOutcome.Exited(0),
+            outcome,
             Chunk.empty,
             Chunk.empty,
             sha256(Array.emptyByteArray),

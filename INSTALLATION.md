@@ -11,8 +11,8 @@ Refactoring**). BAT packages one portable BDR skill and three thin host adapters
 | Codex adapter | `.codex-plugin/plugin.json` | BAT plugin identity and `$refactor` skill discovery |
 
 The host invocations documented below currently execute the portable skill and established BDR
-engine. `loop/` is the provider-neutral Scala controller and conformance module; it is not wired
-into these host adapters until the hosted OpenAI and gpt-oss transports are implemented.
+engine. `loop/` is the provider-neutral Scala controller, reasoning-backend, and production-runner
+module; these host adapters still invoke the portable skill/engine rather than that Scala runtime.
 
 Keep these BAT files in one private, versioned source repository. Within one BAT deployment, do not
 copy and independently edit the method into each target or application repository; that creates
@@ -106,6 +106,15 @@ by the selected command in checked-in inputs, or the build will fail as an envir
 solve that failure by mounting a developer home, SSH agent, API key, Docker configuration, or ambient
 package cache. A controlled dependency materialization mechanism, worker-image distribution,
 scheduling, run cleanup, and trusted pushing are separate deployment concerns.
+
+The provider-neutral production runner is currently an embedding API, not a packaged `bat` command.
+An embedding application supplies one validated Responses or Harmony Chat backend configuration,
+the `JavaWorkerSession.start`/`resume` inputs above, and a trusted evaluator implementation. BAT
+closes the model and actor-worker scopes before acquiring that evaluator, and requires its report to
+bind the exact final commit and patch digest. BAT does not yet ship the evaluator's OCI image or
+oracle-mount policy. The maintained dependency-free Java canary uses direct `javac`/`java`, whereas
+the production worker exposes only the reviewed Maven/Gradle actions; a production-worker canary or
+project-specific offline build cartridge remains separate deployment work.
 
 ## Claude Code
 

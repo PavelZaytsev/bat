@@ -1,5 +1,6 @@
 //> using scala "3.8.4"
 //> using jvm "temurin:21"
+//> using resourceDir "src/main/resources"
 //> using options "-deprecation" "-feature" "-unchecked" "-Wvalue-discard" "-Wnonunit-statement"
 //> using dep "dev.zio::zio:2.1.26"
 //> using dep "dev.zio::zio-http:3.11.2"

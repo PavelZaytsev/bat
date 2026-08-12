@@ -227,6 +227,9 @@ This repository currently contains:
 - a commit-verified, validated JSON subprocess bridge from BAT to the existing BDR engine;
 - a pinned, resumable, OCI-isolated Java PR worker with durable operation receipts and local-only
   handoff;
+- a provider-neutral production-runner core that composes GPT-OSS Responses or Harmony Chat with
+  that worker, one telemetry sink, receipt-bound BDR evidence, and a separately injected trusted
+  evaluator boundary;
 - an executable, reasoning-redacted two-tool conformance harness that accepts an injected backend;
 - an executable, dependency-free Java canary that drives all six BDR phases with a sealed evaluator;
 - thin host-installation adapters for Claude Code, ChatGPT, and Codex;
@@ -295,9 +298,14 @@ The isolated worker, provider-neutral backend harness, and the hardware-independ
 and Harmony Chat adapters are implemented as controller modules. The Responses adapter is
 fake-endpoint tested only; the Harmony Chat adapter has additionally passed one live single-node
 `gpt-oss-20b` exo deployment. Neither has been exercised on a distributed or 120B deployment, and
-neither has been evaluated on real defects. Provider transports and production worker orchestration
-are not wired into the public host adapters. The telemetry foundation is in-process and hardware-independent; durable
-experiment storage and live deployment fingerprints belong to the future runner.
+neither has been evaluated on real defects. The production-runner core now joins either GPT-OSS
+dialect to the isolated Java worker, but it is still an embedding API rather than a public launcher:
+deployment configuration, a reviewed worker image/dependency snapshot, and a sealed evaluator
+implementation remain integration inputs. The maintained six-phase canary still uses trusted local
+`javac` tools and is not yet a production-worker acceptance run. Provider transports and production
+worker orchestration are not wired into the public host adapters. The telemetry foundation is
+in-process and hardware-independent; durable experiment storage belongs to the embedding
+application.
 
 Start with a supervised pilot, inspect the audit trail, and retain ordinary code review and CI as
 the final merge authority.

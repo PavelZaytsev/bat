@@ -3,6 +3,8 @@ package bat.worker
 import bat.controller.*
 import bat.protocol.*
 
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.Base64
@@ -15,6 +17,8 @@ import zio.json.ast.Json
 object WorkerTools:
   def all(session: JavaWorkerSession): Chunk[Tool] =
     Chunk(
+      WorkspaceTool(session),
+      TargetDiffTool(session),
       ReadFileTool(session),
       SearchTool(session),
       ApplyPatchTool(session),
@@ -23,6 +27,65 @@ object WorkerTools:
       GitCommitTool(session),
       JavaBuildTool(session)
     )
+
+  private final case class WorkspaceTool(session: JavaWorkerSession)
+      extends Tool:
+    override val authority: ToolAuthority = ToolAuthority.ReadOnly
+    val definition: ToolDefinition = Definitions.Workspace
+
+    def execute(invocation: ToolInvocation): IO[ToolError, Json] =
+      worker {
+        session.workspaceBootstrap.map { bootstrap =>
+          Json.Obj(
+            Chunk(
+              "base_commit" -> Json.Str(bootstrap.baseCommit.value),
+              "starting_head_commit" -> Json.Str(
+                bootstrap.startingHeadCommit.value
+              ),
+              "workspace_revision" -> number(
+                bootstrap.workspace.revision.value
+              ),
+              "workspace_fingerprint" -> Json.Str(
+                bootstrap.workspace.fingerprint.value
+              )
+            )
+          )
+        }
+      }
+
+  private final case class TargetDiffTool(session: JavaWorkerSession)
+      extends Tool:
+    override val authority: ToolAuthority = ToolAuthority.ReadOnly
+    val definition: ToolDefinition = Definitions.TargetDiff
+
+    def execute(invocation: ToolInvocation): IO[ToolError, Json] =
+      worker {
+        for result <- session.targetDiff(
+            operationId(invocation, session, definition.name),
+            operationId(
+              invocation,
+              session,
+              s"${definition.name}_inventory"
+            )
+          )
+        yield receiptJson(
+          result.operation,
+          Chunk(
+            "base_commit" -> Json.Str(result.baseCommit.value),
+            "starting_head_commit" -> Json.Str(
+              result.startingHeadCommit.value
+            ),
+            "changed_paths_complete" -> Json.Bool(true),
+            "changed_path_count" -> number(result.changedPaths.length.toLong),
+            "changed_paths" -> Json.Arr(
+              result.changedPaths.map(path => Json.Str(path.value.toString))
+            ),
+            "inventory_receipt_id" -> Json.Str(
+              result.inventoryOperation.receipt.operationId.value
+            )
+          )
+        )
+      }
 
   private final case class ReadFileTool(session: JavaWorkerSession)
       extends Tool:
@@ -105,13 +168,22 @@ object WorkerTools:
     val definition: ToolDefinition = Definitions.GitCommit
 
     def execute(invocation: ToolInvocation): IO[ToolError, Json] =
-      executeReceipt(invocation, session, definition.name) {
-        (operationId, expected) =>
-          session.gitCommit(
-            operationId,
+      worker {
+        for
+          expected <- expectedWorkspace(invocation)
+          result <- session.gitCommitWithHead(
+            operationId(invocation, session, definition.name),
             expected,
             requiredString(invocation, "message")
           )
+        yield receiptJson(
+          result.operation,
+          Chunk(
+            "head_commit" -> result.headCommit
+              .map(value => Json.Str(value.value))
+              .getOrElse(Json.Null)
+          )
+        )
       }
 
   private final case class JavaBuildTool(session: JavaWorkerSession)
@@ -120,28 +192,41 @@ object WorkerTools:
     val definition: ToolDefinition = Definitions.JavaBuild
 
     def execute(invocation: ToolInvocation): IO[ToolError, Json] =
-      executeReceipt(invocation, session, definition.name) {
-        (operationId, expected) =>
-          for
-            action <- ZIO.fromEither(
-              JavaBuildAction.values
-                .find(_.wire == requiredString(invocation, "action"))
-                .toRight(
-                  WorkerError.InvalidInput(
-                    "invalid_java_build_action",
-                    "Java build action is not supported"
-                  )
+      worker {
+        for
+          expected <- expectedWorkspace(invocation)
+          action <- ZIO.fromEither(
+            JavaBuildAction.values
+              .find(_.wire == requiredString(invocation, "action"))
+              .toRight(
+                WorkerError.InvalidInput(
+                  "invalid_java_build_action",
+                  "Java build action is not supported"
                 )
-            )
-            selector = requiredString(invocation, "test_selector")
-            request <- ZIO.fromEither(
-              JavaBuildRequest.make(
-                action,
-                Option.when(selector.nonEmpty)(selector)
               )
+          )
+          selector = requiredString(invocation, "test_selector")
+          request <- ZIO.fromEither(
+            JavaBuildRequest.make(
+              action,
+              Option.when(selector.nonEmpty)(selector)
             )
-            result <- session.build(operationId, expected, request)
-          yield result
+          )
+          result <- session.buildWithEvidence(
+            operationId(invocation, session, definition.name),
+            expected,
+            request
+          )
+        yield receiptJson(
+          result.operation,
+          Chunk(
+            "command_evidence" -> result.commandEvidence
+              .getOrElse(Json.Null),
+            "command_evidence_unavailable_reason" -> result.commandEvidenceUnavailableReason
+              .map(Json.Str(_))
+              .getOrElse(Json.Null)
+          )
+        )
       }
 
   private def executeReceipt(
@@ -157,9 +242,9 @@ object WorkerTools:
     worker {
       for
         expected <- expectedWorkspace(invocation)
-        operationId = OperationId.derive(
-          session.runId,
-          invocation.callId.value,
+        operationId = WorkerTools.operationId(
+          invocation,
+          session,
           toolName
         )
         result <- execute(operationId, expected)
@@ -179,12 +264,22 @@ object WorkerTools:
       )
     yield WorkspacePrecondition(revision, fingerprint)
 
-  private def receiptJson(result: OperationResult): Json.Obj =
+  private def operationId(
+      invocation: ToolInvocation,
+      session: JavaWorkerSession,
+      toolName: String
+  ): OperationId =
+    OperationId.derive(session.runId, invocation.callId.value, toolName)
+
+  private def receiptJson(
+      result: OperationResult,
+      additional: Chunk[(String, Json)] = Chunk.empty
+  ): Json.Obj =
     val receipt = result.receipt
     val exitCode = receipt.outcome match
       case CommandOutcome.Exited(code) => number(code.toLong)
       case _                           => Json.Null
-    Json.Obj(
+    val fields =
       Chunk(
         "receipt_id" -> Json.Str(receipt.operationId.value),
         "replayed" -> Json.Bool(result.replayed),
@@ -194,12 +289,20 @@ object WorkerTools:
         "stderr_sha256" -> Json.Str(receipt.stderrDigest.value),
         "stdout_bytes" -> number(receipt.stdoutBytes),
         "stderr_bytes" -> number(receipt.stderrBytes),
+        "stdout_preview_truncated" -> Json.Bool(
+          receipt.stdoutBytes > receipt.stdoutPreviewBytes.toLong
+        ),
+        "stderr_preview_truncated" -> Json.Bool(
+          receipt.stderrBytes > receipt.stderrPreviewBytes.toLong
+        ),
+        "stdout_preview" -> utf8(result.stdout),
+        "stderr_preview" -> utf8(result.stderr),
         "stdout_preview_base64" -> Json.Str(base64(result.stdout)),
         "stderr_preview_base64" -> Json.Str(base64(result.stderr)),
         "workspace_revision" -> number(receipt.afterRevision.value),
         "workspace_fingerprint" -> Json.Str(receipt.afterFingerprint.value)
-      )
-    )
+      ) ++ additional
+    Json.Obj(fields)
 
   private def outcomeWire(outcome: CommandOutcome): String = outcome match
     case CommandOutcome.Exited(_)   => "exited"
@@ -209,6 +312,16 @@ object WorkerTools:
 
   private def base64(bytes: Chunk[Byte]): String =
     Base64.getEncoder.encodeToString(bytes.toArray)
+
+  private def utf8(bytes: Chunk[Byte]): Json =
+    Try(
+      StandardCharsets.UTF_8
+        .newDecoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+        .decode(ByteBuffer.wrap(bytes.toArray))
+        .toString
+    ).toOption.map(Json.Str(_)).getOrElse(Json.Null)
 
   private def worker[A](effect: IO[WorkerError, A]): IO[ToolError, A] =
     effect.mapError(error =>
@@ -283,6 +396,18 @@ object WorkerTools:
     )
 
   private object Definitions:
+    val Workspace = definition(
+      "worker_workspace",
+      "Read trusted pinned commits and the current workspace precondition.",
+      properties()
+    )
+
+    val TargetDiff = definition(
+      "worker_target_diff",
+      "Read the bounded immutable diff from the pinned base commit to the starting PR head.",
+      properties()
+    )
+
     val ReadFile = definition(
       "worker_read_file",
       "Read one bounded UTF-8 regular file without following symlinks.",

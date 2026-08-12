@@ -70,9 +70,11 @@ a durable actor name.
   base is supplied it uses `HEAD^`. A supplied/resolved base must be an ancestor and the pinned
   head must equal checkout `HEAD`. Ref names and abbreviated hashes are resolved once; state stores
   canonical full commit object IDs, and validation rejects older floating/abbreviated pins. New
-  trackers record the creating engine as `minimum_validator_version`. The 2.2 validator continues
-  to accept command-backed 2.1 trackers; using a 2.2 lean gate form in an existing tracker raises
-  that floor before the new form is committed to the journal.
+  trackers record the creating engine as `minimum_validator_version`. The 2.2 validator accepts
+  2.1 trackers only when every relied-on baseline, passing proof, and counterfactual already has
+  the command records now required by the fail-closed evidence rules. Claim-only legacy evidence
+  must be re-verified before the run can continue. Using a 2.2 lean gate form in an existing
+  tracker raises that floor before the new form is committed to the journal.
 - `bdr check [--json]` validates state, references, phase replay, readiness claims, repository
   binding, local Git lineage, and journal hashes. A ready state also has to match its final
   fixed-point workspace fingerprint. It validates evidence shape; it does not execute tests or
@@ -185,10 +187,11 @@ the later children refer to objects created earlier in the same atomic mutation.
 - Record slice delivery after FALSIFY:
   `{ "type":"record_delivery", "slice":"S-0001", "kind":"commit", "sha":"SHA"?, "evidence":"E-verification" }`, or
   `{ "type":"record_delivery", "slice":"S-0001", "kind":"no_code_change", "reason":"falsified/superseded", "evidence":"E-verification" }`.
-  Evidence must have `kind:"test"` or `kind:"verification"`, or name the SATURATE gate linked
+  Standalone evidence must have `kind:"test"` or `kind:"verification"` plus a nonempty valid
+  `commands` list whose every exit code is zero, or name the SATURATE gate linked
   through the same slice's unchanged passed FALSIFY attempt. SATURATE evidence is valid only for a
   commit whose aggregate delta from the verified base exactly matches the FALSIFY post-checkpoint;
-  `no_code_change` needs standalone test/verification evidence. The code worktree must be clean.
+  `no_code_change` needs successful standalone test/verification evidence. The code worktree must be clean.
   Commit delivery advances the ordered frontier from the pinned target: every post-target commit
   must be attributed exactly once, and the original PR head is never a delivery. Any later semantic
   mutation makes all prior delivery attestations stale; after the work settles, re-record each
@@ -282,9 +285,11 @@ Supported `RESOLUTION` forms:
   the stopped record.
 
 Referenced evidence is type-checked where authority matters: ownership transfer requires
-`kind:"code_read"`; fixed/split passing evidence requires `test`, `verification`, or the current
-owner slice's SATURATE gate while its unchanged FALSIFY attempt is active or passed; counterfactual evidence requires
-`counterfactual_test`; and higher-risk approval or decision resolution requires `human_approval`.
+`kind:"code_read"`; standalone fixed/split passing evidence requires `test` or `verification` plus
+a nonempty valid `commands` list whose every exit code is zero, or the current
+owner slice's SATURATE gate while its unchanged FALSIFY attempt is active or passed; counterfactual
+evidence requires `counterfactual_test` with nonempty valid commands and `>= 1` nonzero exit code;
+and higher-risk approval or decision resolution requires `human_approval`.
 The agent may not create its own human approval evidence.
 
 ## Phase transitions and gate evidence

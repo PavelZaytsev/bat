@@ -4,7 +4,8 @@ import bat.bdr.BdrSession
 import bat.protocol.BatError
 import bat.worker.oci.*
 
-import java.nio.charset.StandardCharsets
+import java.nio.ByteBuffer
+import java.nio.charset.{CodingErrorAction, StandardCharsets}
 import java.nio.file.attribute.{BasicFileAttributes, PosixFilePermissions}
 import java.nio.file.{
   FileVisitResult,
@@ -18,7 +19,104 @@ import java.security.MessageDigest
 
 import scala.collection.mutable
 
-import zio.{Chunk, Clock, IO, Scope, Semaphore, ZIO}
+import zio.{Chunk, Clock, IO, Scope, Semaphore, UIO, ZIO}
+
+final case class WorkerWorkspaceBootstrap(
+    runId: RunId,
+    baseCommit: GitObjectId,
+    startingHeadCommit: GitObjectId,
+    sourceIdentityDigest: String,
+    workspace: WorkspacePrecondition,
+    imageDigest: String,
+    buildPolicyId: String
+)
+
+final case class WorkerTargetDiff(
+    baseCommit: GitObjectId,
+    startingHeadCommit: GitObjectId,
+    operation: OperationResult,
+    inventoryOperation: OperationResult,
+    changedPaths: Chunk[RepositoryPath]
+)
+
+private object TargetPathInventory:
+  private val MaxPaths = 10000
+
+  def parse(bytes: Chunk[Byte]): Either[WorkerError, Chunk[RepositoryPath]] =
+    try
+      val raw = bytes.toArray
+      if raw.nonEmpty && raw.last != 0.toByte then invalid
+      else
+        val result = Chunk.newBuilder[RepositoryPath]
+        val seen = mutable.HashSet.empty[String]
+        var start = 0
+        var count = 0
+        var index = 0
+        while index < raw.length do
+          if raw(index) == 0.toByte then
+            if index == start then return invalid
+            count += 1
+            if count > MaxPaths then return tooMany
+            val text = StandardCharsets.UTF_8
+              .newDecoder()
+              .onMalformedInput(CodingErrorAction.REPORT)
+              .onUnmappableCharacter(CodingErrorAction.REPORT)
+              .decode(ByteBuffer.wrap(raw, start, index - start))
+              .toString
+            if !seen.add(text) then return invalid
+            RepositoryPath.from(Path.of(text)) match
+              case Left(_)     => return invalid
+              case Right(path) => result += path
+            start = index + 1
+          index += 1
+        Right(result.result())
+    catch case _: Exception => invalid
+
+  private def invalid: Left[WorkerError, Nothing] =
+    Left(
+      WorkerError.SourceRejected(
+        "invalid_target_path_inventory",
+        "target path inventory was malformed"
+      )
+    )
+
+  private def tooMany: Left[WorkerError, Nothing] =
+    Left(
+      WorkerError.SourceRejected(
+        "target_path_limit_exceeded",
+        s"target path inventory exceeds the $MaxPaths path limit"
+      )
+    )
+
+final case class WorkerGitCommit(
+    operation: OperationResult,
+    headCommit: Option[GitObjectId]
+)
+
+final case class WorkerJavaBuild(
+    operation: OperationResult,
+    commandEvidence: Option[zio.json.ast.Json.Obj],
+    commandEvidenceUnavailableReason: Option[String]
+)
+
+private[worker] object WorkerSourceIdentity:
+  def digest(pins: PullRequestPins): String =
+    val fields = Chunk(
+      "bat-source-identity-v1",
+      pins.baseRepository.value,
+      pins.headRepository.value,
+      pins.pullRequestId.value,
+      pins.baseRef.value,
+      pins.baseCommit.value,
+      pins.headRef.value,
+      pins.headCommit.value
+    )
+    MessageDigest
+      .getInstance("SHA-256")
+      .digest(fields.mkString("\u0000").getBytes(StandardCharsets.UTF_8))
+      .iterator
+      .map(byte => f"${byte & 0xff}%02x")
+      .mkString
 
 final case class WorkerStorageLimits private (
     maxSourceBytes: Long,
@@ -595,6 +693,58 @@ final class JavaWorkerSession private (
 ):
   val bdr: BdrSession = guardedBdr(rawBdr)
 
+  def workspaceBootstrap: IO[WorkerError, WorkerWorkspaceBootstrap] =
+    serialized(
+      healthyWorkspaceUnlocked.map(current =>
+        WorkerWorkspaceBootstrap(
+          runId,
+          workspace.pins.baseCommit,
+          workspace.pins.headCommit,
+          WorkerSourceIdentity.digest(workspace.pins),
+          current,
+          config.imageDigest,
+          config.javaPolicy.policyId
+        )
+      )
+    )
+
+  def targetDiff(
+      operationId: OperationId,
+      inventoryOperationId: OperationId
+  ): IO[WorkerError, WorkerTargetDiff] =
+    serialized {
+      for
+        current <- healthyWorkspaceUnlocked
+        inventory <- executePlan(
+          inventoryOperationId,
+          current,
+          GitCommandPolicy.targetPaths(workspace.pins),
+          extraDigest = "",
+          disposable = false,
+          patchInput = None
+        )
+        _ <- requireCompleteTargetOutput(inventory, "target_path_inventory")
+        changedPaths <- ZIO.fromEither(
+          TargetPathInventory.parse(inventory.stdout)
+        )
+        result <- executePlan(
+          operationId,
+          current,
+          GitCommandPolicy.targetDiff(workspace.pins),
+          extraDigest = "",
+          disposable = false,
+          patchInput = None
+        )
+        _ <- requireCompleteTargetOutput(result, "target_diff")
+      yield WorkerTargetDiff(
+        workspace.pins.baseCommit,
+        workspace.pins.headCommit,
+        result,
+        inventory,
+        changedPaths
+      )
+    }
+
   def read(path: RepositoryPath, maxBytes: Int): IO[WorkerError, String] =
     serialized(healthyWorkspaceUnlocked *> reader.read(path, maxBytes))
 
@@ -612,14 +762,28 @@ final class JavaWorkerSession private (
       request: JavaBuildRequest
   ): IO[WorkerError, OperationResult] =
     serialized {
-      val plan = config.javaPolicy.plan(request)
-      executePlan(
-        operationId,
-        expected,
-        plan,
-        extraDigest = request.toString,
-        disposable = true,
-        patchInput = None
+      executeBuild(operationId, expected, request)
+    }
+
+  private[worker] def buildWithEvidence(
+      operationId: OperationId,
+      expected: WorkspacePrecondition,
+      request: JavaBuildRequest
+  ): IO[WorkerError, WorkerJavaBuild] =
+    serialized {
+      for
+        result <- executeBuild(operationId, expected, request)
+        current <- ledger.currentWorkspace
+        evidence <- result.receipt.outcome match
+          case CommandOutcome.Exited(_) =>
+            TrustedEvidenceMaterializer
+              .materialize(result.receipt, current)
+              .map(Some(_))
+          case _ => ZIO.succeed(None)
+      yield WorkerJavaBuild(
+        result,
+        evidence,
+        Option.when(evidence.isEmpty)("process_did_not_exit")
       )
     }
 
@@ -679,18 +843,22 @@ final class JavaWorkerSession private (
       message: String
   ): IO[WorkerError, OperationResult] =
     serialized {
+      executeGitCommit(operationId, expected, message)
+    }
+
+  private[worker] def gitCommitWithHead(
+      operationId: OperationId,
+      expected: WorkspacePrecondition,
+      message: String
+  ): IO[WorkerError, WorkerGitCommit] =
+    serialized {
       for
-        plan <- ZIO.fromEither(GitCommandPolicy.commit(message))
-        _ <- AuthenticatedPrSource.requireFresh(authority, workspace.pins)
-        result <- executePlan(
-          operationId,
-          expected,
-          plan,
-          extraDigest = message,
-          disposable = false,
-          patchInput = None
-        )
-      yield result
+        result <- executeGitCommit(operationId, expected, message)
+        head <- result.receipt.outcome match
+          case CommandOutcome.Exited(0) =>
+            canonicalHead(result.receipt.afterFingerprint).map(Some(_))
+          case _ => ZIO.succeed(None)
+      yield WorkerGitCommit(result, head)
     }
 
   def currentWorkspace: IO[WorkerError, WorkspacePrecondition] =
@@ -720,15 +888,51 @@ final class JavaWorkerSession private (
       yield result
     }
 
-  private[worker] def trustedReceiptSnapshot(
-      operationId: OperationId
-  ): IO[
-    WorkerError,
-    (WorkspacePrecondition, Option[TrustedReceipt])
-  ] =
-    serialized(
-      healthyWorkspaceUnlocked.zip(ledger.lookup(operationId))
-    )
+  /** Resolve all model-supplied receipt references and commit the resulting BDR
+    * mutation while holding the worker's single action permit. This prevents a
+    * worker operation from advancing the workspace between evidence validation
+    * and the BDR revision that consumes it.
+    */
+  private[worker] def applyReceiptBound(
+      operation: zio.json.ast.Json.Obj
+  ): IO[BatError, zio.json.ast.Json.Obj] =
+    applyReceiptBound(operation, ZIO.unit)
+
+  private[worker] def applyReceiptBound(
+      operation: zio.json.ast.Json.Obj,
+      afterMaterialization: UIO[Unit]
+  ): IO[BatError, zio.json.ast.Json.Obj] =
+    serialized {
+      for
+        current <- healthyWorkspaceUnlocked.mapError(bdrFailure)
+        materialized <- ReceiptBoundOperation
+          .materialize(
+            operation,
+            receiptId => trustedEvidenceUnlocked(receiptId, current)
+          )
+          .mapError(bdrFailure)
+        _ <- afterMaterialization
+        result <- rawBdr.apply(materialized)
+      yield result
+    }
+
+  private def trustedEvidenceUnlocked(
+      receiptId: String,
+      current: WorkspacePrecondition
+  ): IO[WorkerError, zio.json.ast.Json.Obj] =
+    for
+      operationId <- ZIO.fromEither(OperationId.from(receiptId))
+      stored <- ledger.lookup(operationId)
+      receipt <- ZIO
+        .fromOption(stored)
+        .orElseFail(
+          WorkerError.LedgerFailure(
+            "unknown_receipt",
+            "receipt ID is not present in this worker run"
+          )
+        )
+      evidence <- TrustedEvidenceMaterializer.materialize(receipt, current)
+    yield evidence
 
   private def healthyWorkspaceUnlocked: IO[WorkerError, WorkspacePrecondition] =
     for
@@ -772,6 +976,98 @@ final class JavaWorkerSession private (
 
   private def serialized[E, A](effect: IO[E, A]): IO[E, A] =
     actionMutex.withPermit(effect)
+
+  private def executeBuild(
+      operationId: OperationId,
+      expected: WorkspacePrecondition,
+      request: JavaBuildRequest
+  ): IO[WorkerError, OperationResult] =
+    val plan = config.javaPolicy.plan(request)
+    executePlan(
+      operationId,
+      expected,
+      plan,
+      extraDigest = request.toString,
+      disposable = true,
+      patchInput = None
+    )
+
+  private def requireCompleteTargetOutput(
+      result: OperationResult,
+      label: String
+  ): IO[WorkerError, Unit] =
+    val receipt = result.receipt
+    receipt.outcome match
+      case CommandOutcome.Exited(0)
+          if receipt.stdoutBytes == receipt.stdoutPreviewBytes.toLong &&
+            receipt.stderrBytes == receipt.stderrPreviewBytes.toLong =>
+        ZIO.unit
+      case CommandOutcome.Exited(0) =>
+        ZIO.fail(
+          WorkerError.SourceRejected(
+            s"${label}_truncated",
+            s"$label exceeded the worker preview bound"
+          )
+        )
+      case _ =>
+        ZIO.fail(
+          WorkerError.SourceRejected(
+            s"${label}_failed",
+            s"$label did not exit successfully"
+          )
+        )
+
+  private def executeGitCommit(
+      operationId: OperationId,
+      expected: WorkspacePrecondition,
+      message: String
+  ): IO[WorkerError, OperationResult] =
+    for
+      plan <- ZIO.fromEither(GitCommandPolicy.commit(message))
+      _ <- AuthenticatedPrSource.requireFresh(authority, workspace.pins)
+      result <- executePlan(
+        operationId,
+        expected,
+        plan,
+        extraDigest = message,
+        disposable = false,
+        patchInput = None
+      )
+    yield result
+
+  private def canonicalHead(
+      expectedFingerprint: WorkspaceFingerprint
+  ): IO[WorkerError, GitObjectId] =
+    for
+      result <- gitRunner.run(
+        GitInvocation(
+          workspace.repository,
+          Chunk("rev-parse", "--verify", "HEAD^{commit}")
+        )
+      )
+      _ <-
+        if result.exitCode == 0 then ZIO.unit
+        else
+          ZIO.fail(
+            WorkerError.SourceRejected(
+              "commit_head_inspection_failed",
+              "Git could not resolve the committed workspace head"
+            )
+          )
+      head <- ZIO.fromEither(
+        GitObjectId.from(result.output.trim, "commit_head")
+      )
+      actual <- WorkspaceFingerprinting.compute(workspace.repository)
+      _ <-
+        if actual == expectedFingerprint then ZIO.unit
+        else
+          ZIO.fail(
+            WorkerError.LedgerFailure(
+              "commit_head_workspace_mismatch",
+              "workspace changed while its committed head was inspected"
+            )
+          )
+    yield head
 
   private def bdrFailure(error: WorkerError): BatError =
     BatError.BdrFailure(error.code, error.safeMessage)
@@ -1017,7 +1313,7 @@ object JavaWorkerSession:
       )
       _ <- AuthenticatedPrSource.requireFresh(authority, pins)
       workspace <- RunWorkspace.seal(allocation)
-      bdr <- bdrLifecycle.initialize(workspace.repository, pins)
+      bdr <- bdrLifecycle.initialize(runId, workspace.repository, pins)
       initialRevision <- ZIO.fromEither(WorkspaceRevision.from(0L))
       initial = WorkspacePrecondition(
         initialRevision,
@@ -1093,7 +1389,7 @@ object JavaWorkerSession:
         workspace.repository,
         workspaceGitRunner
       )
-      bdr <- bdrLifecycle.resume(workspace.repository, workspace.pins)
+      bdr <- bdrLifecycle.resume(runId, workspace.repository, workspace.pins)
       reader <- RepositoryReader.open(workspace.repository)
       actionMutex <- Semaphore.make(1L)
     yield JavaWorkerSession(

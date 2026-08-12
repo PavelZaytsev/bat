@@ -345,6 +345,43 @@ object BdrSessionSpec extends ZIOSpecDefault:
 
         attempt
       },
+      test(
+        "resume binds the complete initialization identity at any revision"
+      ) {
+        for
+          initialization <- ZIO.fromEither(
+            BdrInitialization.make(
+              "0" * 40,
+              "1" * 40,
+              "bat/example-java-six-phase",
+              "BAT-TOY-001",
+              maxFixedPointPasses = 4,
+              maxPhaseAttempts = 5
+            )
+          )
+          expected = TrackerIdentity
+            .from(initialization)
+            .copy(revision = 11L)
+          mismatches = Chunk(
+            expected.copy(repository = "bat/wrong"),
+            expected.copy(baseSha = "2" * 40),
+            expected.copy(headSha = "3" * 40),
+            expected.copy(runId = "BAT-WRONG"),
+            expected.copy(maxFixedPointPasses = 3),
+            expected.copy(maxPhaseAttempts = 3),
+            expected.copy(githubProjection = "outbox")
+          )
+          accepted <- resumeWithIdentity(initialization, expected)
+          rejected <- ZIO.foreach(mismatches)(persisted =>
+            resumeWithIdentity(initialization, persisted)
+          )
+        yield assertTrue(
+          accepted.isRight,
+          rejected.forall(result =>
+            errorCode(result).contains("initialization_identity_mismatch")
+          )
+        )
+      },
       test("accepts a checkpoint only when check, status, and tracker agree") {
         ZIO.scoped {
           for
@@ -917,6 +954,29 @@ object BdrSessionSpec extends ZIOSpecDefault:
       verifier: EngineIdentityVerifier = AcceptingEngineVerifier
   ): IO[BatError, BdrSession] =
     BdrSession.resume(config, runner, verifier)
+
+  private def resumeWithIdentity(
+      initialization: BdrInitialization,
+      persisted: TrackerIdentity
+  ): ZIO[Any, Throwable | BatError, Either[BatError, BdrSession]] =
+    ZIO.scoped {
+      for
+        repository <- temporaryDirectory("bat-bdr-resume-binding-")
+        _ <- writeTrackerText(repository, initializedTrackerJson(persisted))
+        runner <- RecordingRunner.make(
+          fixedSnapshot(persisted.revision, RunState)
+        )
+        config <- makeConfig(repository)
+        result <- BdrSession
+          .resume(
+            config,
+            initialization,
+            runner,
+            AcceptingEngineVerifier
+          )
+          .either
+      yield result
+    }
 
   private def fixedSnapshot(
       revision: Long,

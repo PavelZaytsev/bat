@@ -29,6 +29,8 @@ final class StreamingWireBackend[D <: WireDialect] private (
 
   val capabilities: BackendCapabilities = dialect.capabilities
 
+  private[bat] def telemetrySink: Telemetry = telemetry
+
   protected def generate(
       request: ModelRequest[Context],
       budget: TurnBudget
