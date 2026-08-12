@@ -119,6 +119,11 @@ jobs:
       - name: Run agentic loop tests
         run: scala-cli test --server=false loop
 
+      - name: Validate committed deployment probes
+        run: >-
+          scala-cli --power run --offline --server=false loop
+          --main-class bat.probe.CommittedProbeValidatorApp -- benchmarks/probes
+
       - name: Run the offline six-phase Java canary
         run: >-
           scala-cli --power run --offline --server=false loop

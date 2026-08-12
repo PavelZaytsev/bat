@@ -108,6 +108,11 @@ private[probe] object LoopbackResponsesServer:
         captured,
         nextResponse
       ),
+      Method.POST / "v1" / "chat" / "completions" -> requestHandler(
+        script,
+        captured,
+        nextResponse
+      ),
       Method.POST / "redirect-target" -> requestHandler(
         script,
         captured,

@@ -113,7 +113,8 @@ object GoldenScenario:
   def executeProbeWith(
       backend: Backend,
       telemetry: Telemetry,
-      batCommit: String
+      batCommit: String,
+      reasoningEffort: String = "high"
   ): IO[BatError, BackendResult] =
     executeWithInputs(
       backend,
@@ -123,7 +124,8 @@ object GoldenScenario:
       promptVersion = "bat-gpt-oss-probe-v1",
       bdrCommit = batCommit,
       maxWallTime = 5.minutes,
-      maxTotalTokens = 32L * 1024L
+      maxTotalTokens = 32L * 1024L,
+      reasoningEffort = reasoningEffort
     )
 
   private def executeWithInputs(
@@ -134,11 +136,17 @@ object GoldenScenario:
       promptVersion: String,
       bdrCommit: String,
       maxWallTime: Duration,
-      maxTotalTokens: Long
+      maxTotalTokens: Long,
+      reasoningEffort: String = "high"
   ): IO[BatError, BackendResult] =
     for
       pins <- from(
-        RunPins.make(backend.identity, "high", promptVersion, bdrCommit)
+        RunPins.make(
+          backend.identity,
+          reasoningEffort,
+          promptVersion,
+          bdrCommit
+        )
       )
       developer <- from(DeveloperInput.make(developerText))
       user <- from(UserInput.make(userText))

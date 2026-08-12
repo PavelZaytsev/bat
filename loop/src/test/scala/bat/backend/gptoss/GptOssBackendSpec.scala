@@ -407,6 +407,44 @@ object GptOssBackendSpec extends ZIOSpecDefault:
           }
         )
       },
+      test("keeps rejected provider bodies out of safe failures") {
+        val rejectedBody =
+          s"""{"detail":"$ProviderBodyCanary"}"""
+        for
+          missing <- ProbeDriver.make((_, _) =>
+            ZIO.succeed(statusResponse(Status.NotFound, rejectedBody))
+          )
+          missingBackend <- makeBackend(missing)
+          missingResult <- missingBackend
+            .complete(directRequest, directBudget)
+            .either
+          oversized <- ProbeDriver.make((_, _) =>
+            ZIO.succeed(
+              statusResponse(Status.NotFound, "x" * 4096)
+            )
+          )
+          oversizedBackend <- makeBackend(oversized)
+          oversizedResult <- oversizedBackend
+            .complete(directRequest, directBudget)
+            .either
+        yield assertTrue(
+          missingResult.left.exists {
+            case error: BatError.BackendFailure =>
+              error.code == "gpt_oss_responses_unavailable" &&
+              error.safeMessage.contains("status=404") &&
+              !error.safeMessage.contains(ProviderBodyCanary)
+            case _ => false
+          },
+          !missingResult.toString.contains(ProviderBodyCanary),
+          oversizedResult.left.exists {
+            case error: BatError.BackendFailure =>
+              error.code == "gpt_oss_responses_unavailable" &&
+              error.safeMessage ==
+                "GPT-OSS Responses endpoint rejected the request (status=404)"
+            case _ => false
+          }
+        )
+      },
       test("sanitizes bad content type and malformed provider bodies") {
         for
           badContentType <- ProbeDriver.make((_, _) =>
@@ -1219,6 +1257,13 @@ object GptOssBackendSpec extends ZIOSpecDefault:
       status = status,
       headers = Headers("content-type" -> "text/plain"),
       body = Body.empty
+    )
+
+  private def statusResponse(status: Status, detail: String): Response =
+    Response(
+      status = status,
+      headers = Headers("content-type" -> "application/json"),
+      body = Body.fromString(detail)
     )
 
   private val partialFailureResponse: Response =

@@ -109,7 +109,21 @@ object TelemetryToolName:
 opaque type TelemetryDigest = String
 
 object TelemetryDigest:
+  private val Persisted = "^sha256:[0-9a-f]{64}$".r
   private val Utf8 = StandardCharsets.UTF_8
+
+  private[telemetry] def fromPersisted(
+      value: String,
+      label: String
+  ): Either[TelemetryError, TelemetryDigest] =
+    Option(value)
+      .filter(Persisted.matches)
+      .toRight(
+        TelemetryError.make(
+          "invalid_telemetry_digest",
+          s"persisted $label digest is invalid"
+        )
+      )
 
   private[telemetry] def capture(
       domain: String,
@@ -237,6 +251,36 @@ object TelemetryRunPins:
       pins.bdrCommit
     )
 
+  private[telemetry] def fromPersisted(
+      identityDigest: String,
+      reasoningEffortDigest: String,
+      promptVersionDigest: String,
+      bdrCommit: String
+  ): Either[TelemetryError, TelemetryRunPins] =
+    val Commit = "^(?:[0-9a-f]{40}|[0-9a-f]{64})$".r
+    for
+      identity <- TelemetryDigest.fromPersisted(
+        identityDigest,
+        "backend identity"
+      )
+      effort <- TelemetryDigest.fromPersisted(
+        reasoningEffortDigest,
+        "reasoning effort"
+      )
+      prompt <- TelemetryDigest.fromPersisted(
+        promptVersionDigest,
+        "prompt version"
+      )
+      commit <- Option(bdrCommit)
+        .filter(Commit.matches)
+        .toRight(
+          TelemetryError.make(
+            "invalid_telemetry_commit",
+            "persisted BDR commit is invalid"
+          )
+        )
+    yield TelemetryRunPins(identity, effort, prompt, commit)
+
 /** Why a measurement is absent. Missing values are never represented as zero.
   */
 enum MissingReason(val wire: String):
@@ -323,6 +367,25 @@ object BdrAttribution:
       Option(state.stateDigest).filter(Digest.matches).getOrElse("0" * 64),
       action,
       slice,
+      phase
+    )
+
+  private[telemetry] def fromPersisted(
+      iteration: Int,
+      revision: Long,
+      runState: String,
+      stateDigest: String,
+      action: Measurement[String],
+      sliceId: Measurement[String],
+      phase: Measurement[BdrPhase]
+  ): BdrAttribution =
+    BdrAttribution(
+      iteration,
+      revision,
+      runState,
+      stateDigest,
+      action,
+      sliceId,
       phase
     )
 

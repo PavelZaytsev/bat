@@ -4,6 +4,7 @@ import java.nio.file.Path
 
 import scala.util.control.NonFatal
 
+import bat.backend.gptoss.GptOssConfig
 import bat.transport.Secret
 
 import zio.Chunk
@@ -34,7 +35,10 @@ object ProbeEnvironment:
     "BAT_GPT_OSS_RUN_ID",
     "BAT_GPT_OSS_BAT_COMMIT",
     "BAT_GPT_OSS_OUTPUT",
-    "BAT_GPT_OSS_ALLOW_INSECURE_HTTP"
+    "BAT_GPT_OSS_ALLOW_INSECURE_HTTP",
+    "BAT_GPT_OSS_DIALECT",
+    "BAT_GPT_OSS_REASONING_EFFORT",
+    "BAT_GPT_OSS_MAX_OUTPUT_TOKENS"
   )
 
   def from(
@@ -71,6 +75,15 @@ object ProbeEnvironment:
       allowInsecure <- parseFlag(
         values.get("BAT_GPT_OSS_ALLOW_INSECURE_HTTP")
       )
+      dialect <- parseDialect(values.get("BAT_GPT_OSS_DIALECT"))
+      effort = values
+        .get("BAT_GPT_OSS_REASONING_EFFORT")
+        .map(_.trim)
+        .filter(_.nonEmpty)
+        .getOrElse(LiveGptOssProbeConfig.DefaultReasoningEffort)
+      maxOutput <- parseMaxOutputTokens(
+        values.get("BAT_GPT_OSS_MAX_OUTPUT_TOKENS")
+      )
       config <- LiveGptOssProbeConfig.make(
         endpoint = endpoint,
         credential = credential,
@@ -85,7 +98,10 @@ object ProbeEnvironment:
         runId = runId,
         batCommit = batCommit,
         outputDirectory = output,
-        allowInsecureHttp = allowInsecure
+        allowInsecureHttp = allowInsecure,
+        dialect = dialect,
+        reasoningEffort = effort,
+        maxOutputTokens = maxOutput
       )
       forbidden = Chunk(endpoint, outputText) ++
         values.get("BAT_GPT_OSS_TOKEN").toList
@@ -119,6 +135,46 @@ object ProbeEnvironment:
             ProbeError.make(
               "invalid_probe_credential",
               "live probe credential is invalid"
+            )
+          )
+
+  /** Absent means the Responses dialect, so an existing operator script keeps
+    * qualifying the same wire it qualified before. An unrecognised value is
+    * rejected rather than defaulted, because silently probing a different
+    * dialect than the operator named would corrupt the evidence.
+    */
+  private def parseDialect(
+      value: Option[String]
+  ): Either[ProbeError, ProbeDialect] =
+    value match
+      case None       => Right(ProbeDialect.Responses)
+      case Some(text) =>
+        ProbeDialect
+          .fromWire(text.trim)
+          .toRight(
+            ProbeError.make(
+              "invalid_probe_dialect",
+              "probe dialect must be 'responses' or 'harmony-chat'"
+            )
+          )
+
+  /** Generation grows the KV cache, and exo's placement gate checks weights
+    * only. On a deployment placed with little headroom a long turn can
+    * therefore OOM after a successful placement, so the ceiling is an operator
+    * dial.
+    */
+  private def parseMaxOutputTokens(
+      value: Option[String]
+  ): Either[ProbeError, Long] =
+    value.map(_.trim).filter(_.nonEmpty) match
+      case None       => Right(GptOssConfig.DefaultMaxOutputTokens)
+      case Some(text) =>
+        text.toLongOption
+          .filter(_ > 0L)
+          .toRight(
+            ProbeError.make(
+              "invalid_probe_max_output_tokens",
+              "probe max output tokens must be a positive integer"
             )
           )
 

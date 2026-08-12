@@ -14,12 +14,37 @@ This is deployment evidence, not a general model benchmark. The probe drives BAT
 three-turn, two-tool scenario and records whether that exact model/runtime/protocol combination can
 complete it without violating the controller contract.
 
+## Choosing a dialect
+
+The probe qualifies exactly one wire dialect per run, selected by `BAT_GPT_OSS_DIALECT`:
+
+| value | endpoint | when to use it |
+|---|---|---|
+| `responses` (default) | `POST /v1/responses` over SSE | Hosted or self-served endpoints that emit `response.reasoning_text.*` and replay reasoning items verbatim. |
+| `harmony-chat` | `POST /v1/chat/completions` over SSE | Endpoints that carry the raw analysis channel in a first-class `reasoning_content` field, such as exo. |
+
+Neither dialect is a fallback for the other. A failure on one never re-attempts the other, because
+the point of a probe run is to record which wire a deployment actually satisfies. The selected
+dialect becomes part of the pinned backend identity and of the recorded deployment fingerprint, so
+an artifact always says which wire produced its verdict.
+
+**For exo, select `harmony-chat`.** exo serves both endpoints, but its Responses surface is a
+translation shim that flattens replayed reasoning into ordinary assistant content and emits a
+`response.reasoning_summary_*` vocabulary. Only its Chat Completions surface round-trips raw
+reasoning. See [`docs/adr/0005-wire-dialect-seam.md`](adr/0005-wire-dialect-seam.md) for the
+measured evidence.
+
 ## What the probe requires
 
-The cartridge speaks only the OpenAI **Responses API over SSE** at `/v1/responses`. It does not
-fall back to Chat Completions, follow a redirect to another dialect, or silently reinterpret an
-incompatible response. A server that exposes only a Chat Completions-compatible endpoint is not a
-compatible endpoint for this probe.
+Both dialects require SSE streaming, function calling with exact call identifiers, replayable raw
+reasoning, and terminal usage. Neither follows a redirect to another dialect or silently
+reinterprets an incompatible response.
+
+The `responses` dialect additionally requires the `response.reasoning_text.*` event vocabulary and
+verbatim replay of provider output items. The `harmony-chat` dialect reconstructs the assistant
+message from streamed deltas instead, so it additionally requires that reasoning be non-empty, that
+tool call identity never change mid-stream, that the served model match the pin, and that the stream
+reach the `[DONE]` sentinel. A turn that fails any of those is a failed turn, not a best effort.
 
 GPT-OSS uses the Harmony response format. Across tool calls, implementations must preserve and
 replay the model's reasoning items as opaque continuation state. OpenAI's
@@ -40,8 +65,15 @@ of the pinned weights, serving runtime, Harmony template, quantization, and hard
 cannot accidentally turn the fake check into a paid or cluster-backed run merely by discovering an
 endpoint.
 
-**No real GPT-OSS 20B or 120B deployment has passed this probe in this repository yet.** A checked-in
-fake result must not be presented as live model evidence.
+**One real deployment has now passed this probe.** On 2026-08-11, `openai/gpt-oss-20b` served
+single-node by exo `0.3.70` on an Apple M1 Pro returned `compatible` over the `harmony-chat` dialect:
+three model turns, both pinned tools in the required order, terminal `ready_for_review`, 4482 total
+tokens of which 948 reasoning, 33.8 output tokens per second, 48.6 s wall, mean time to first event
+6.0 s.
+
+That is a transport and protocol result for one model on one topology. It is **not** evidence about
+`gpt-oss-120b`, about distributed placement, or about model quality on real defects. A checked-in fake
+result must still never be presented as live model evidence.
 
 ## Configure a live run
 
@@ -89,6 +121,9 @@ The complete environment surface is:
 | `BAT_GPT_OSS_BAT_COMMIT` | yes | Full lowercase 40-character BAT Git commit. |
 | `BAT_GPT_OSS_OUTPUT` | yes | Absolute, normalized destination that does not exist yet. |
 | `BAT_GPT_OSS_ALLOW_INSECURE_HTTP` | no | `1` permits credential-free HTTP; absent or `0` requires HTTPS. |
+| `BAT_GPT_OSS_DIALECT` | no | `responses` (default) or `harmony-chat`. An unrecognised value is rejected rather than defaulted. |
+| `BAT_GPT_OSS_REASONING_EFFORT` | no | `low`, `medium`, or `high` (default). The dominant cost dial; recorded in the safe trace. |
+| `BAT_GPT_OSS_MAX_OUTPUT_TOKENS` | no | Positive ceiling on generated tokens per turn (default 32768). Lower it on a deployment placed with little memory headroom. |
 
 Provide `BAT_GPT_OSS_TOKEN` through the shell or secret manager only when the endpoint requires it.
 Do not put the token on the Scala command line. Plain HTTP is intended only for a deliberately
@@ -102,6 +137,75 @@ export BAT_GPT_OSS_ALLOW_INSECURE_HTTP='1'
 
 The insecure opt-in never permits a bearer token over HTTP. With a token present, HTTPS remains
 mandatory.
+
+### Example: an exo cluster over plain HTTP
+
+exo serves the OpenAI-compatible API on port `52415` without a credential, so this is the
+credential-free HTTP case. Replace the address, and pin the deployment values from the cluster
+operator rather than guessing them:
+
+```bash
+export BAT_GPT_OSS_LIVE='1'
+export BAT_GPT_OSS_DIALECT='harmony-chat'
+export BAT_GPT_OSS_ENDPOINT='http://10.0.0.1:52415'
+export BAT_GPT_OSS_ALLOW_INSECURE_HTTP='1'
+unset BAT_GPT_OSS_TOKEN
+export BAT_GPT_OSS_MODEL_ID='openai/gpt-oss-20b'
+export BAT_GPT_OSS_RUNTIME='exo'
+export BAT_GPT_OSS_TOPOLOGY='exo_thunderbolt'
+export BAT_GPT_OSS_NODE_COUNT='1'
+```
+
+`BAT_GPT_OSS_MODEL_ID` must be the served identifier exactly as `/v1/models` reports it, because the
+cartridge rejects a response attributed to a different model.
+
+#### exo placement is setup, not bootstrap
+
+A registered model card and a placed instance are different state. `POST /models/add` creates a
+card, which is what `/v1/models` reports; only `POST /place_instance` creates a runner with shard
+assignments. There is no lazy placement on first request — exo's chat path fails closed with
+`404 No instance found for model ...`. So a downloaded, registered, visible model still serves
+nothing while `instances` is empty.
+
+Both cards and instances are in-memory cluster state and **do not survive an exo restart**. Treat
+place-then-verify as part of every run's setup rather than a one-time bootstrap: if placement was
+expected and `instances` is empty, the likely cause is a restart, not a failed POST.
+
+```bash
+# 1. place (single node; multi-node still needs the topology-edge work)
+curl -sS -X POST "$BAT_GPT_OSS_ENDPOINT/place_instance" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model_id\":\"$BAT_GPT_OSS_MODEL_ID\",\"sharding\":\"Pipeline\",\"instance_meta\":\"MlxRing\",\"min_nodes\":1}"
+
+# 2. wait until a runner exists with shards assigned, and absorb the cold load
+until curl -sS "$BAT_GPT_OSS_ENDPOINT/state" \
+  | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("instances") else 1)'
+do sleep 5; done
+```
+
+The readiness poll matters for a second reason: after placement the runner must load the weights —
+roughly 13 GB for the 20b — before it serves anything. The first request can therefore take tens of
+seconds while later ones are fast. Polling until the instance appears moves that cold load outside
+the probe, so a cold start cannot be misread as a deployment failure. If you skip the poll, raise
+the transport's body-idle allowance rather than the retry count; a retry would re-queue work the
+server has already started.
+
+#### Give a reasoning model room to answer
+
+gpt-oss spends its token allowance on the analysis channel first. With a small `max_tokens` it can
+return status `200`, valid framing, and `content: ''` — measured on `gpt-oss-20b` at `max_tokens: 24`:
+`completion_tokens: 24`, of which `reasoning_tokens: 21`, and no visible output. At `max_tokens: 250`
+the same deployment produced 237 tokens of real prose.
+
+That is a budget fact, not a wire fault, and it is the cosmetic-looking failure most likely to waste
+an afternoon. BAT reports it as `harmony_chat_output_budget_exhausted` with the observed
+`reasoning_tokens`, `output_tokens`, and content length, rather than as a protocol violation. Allow at
+least ~150 output tokens per probe turn; the pinned conformance scenario already budgets 32768.
+
+A 404 from the chat path has two common causes — no instance for a downloaded model, or weights that
+are absent. Both fail closed under the same stable reason code. BAT deliberately does not copy the
+provider's response body into an error message because even a printable error can echo source,
+prompts, or credentials. Use exo's deployment state and server logs to distinguish the two causes.
 
 ### Prepare the evidence destination
 
@@ -134,7 +238,7 @@ The application prints only the verdict and a bounded reason code. Exit codes ar
 | `0` | compatible |
 | `2` | incompatible wire protocol or Responses dialect |
 | `3` | nonconformant model behavior in the pinned scenario |
-| `4` | blocked by credentials, rate limits, timeout, or endpoint availability |
+| `4` | blocked by credentials, rate limits, timeout, endpoint availability, filtering, or an inadequate output allowance |
 | `64` | invalid, missing, unsafe, or unarmed configuration |
 | `70` | internal setup or artifact-publication failure |
 
@@ -145,7 +249,7 @@ The application prints only the verdict and a bounded reason code. Exit codes ar
 | `compatible` | The deployment completed the exact three-turn, two-tool audit/apply scenario and reached the expected BDR checkpoint. |
 | `incompatible` | The endpoint could not satisfy BAT's Responses/SSE wire contract. This does not trigger a Chat fallback. |
 | `nonconformant` | The wire protocol worked, but the model stopped early, used the wrong tools/order, exceeded a logical budget, or otherwise failed the scenario contract. |
-| `blocked` | Infrastructure prevented a meaningful result—for example authorization, rate limiting, timeout, or endpoint unavailability. |
+| `blocked` | Deployment, policy, or configuration prevented a meaningful result—for example authorization, rate limiting, timeout, endpoint unavailability, filtering, or an inadequate output allowance. |
 
 A blocked run is not evidence that the model is incompatible, and a fake compatible run is not
 evidence that a live deployment is compatible.

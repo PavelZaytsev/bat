@@ -1,6 +1,7 @@
 package bat.probe
 
 import bat.backend.gptoss.GptOssBackend
+import bat.backend.harmonychat.HarmonyChatBackend
 import bat.conformance.GoldenScenario
 import bat.protocol.{BatError, BudgetKind, RunOutcome}
 import bat.telemetry.{InMemoryTelemetry, TelemetryDocument}
@@ -18,7 +19,7 @@ import zio.{Chunk, Exit, IO, ZIO}
   * channel. Interruption is never converted into a successful artifact.
   */
 object LiveGptOssProbe:
-  private val OperationalFailures = Set(
+  private val BlockedFailures = Set(
     "gpt_oss_rate_limited",
     "gpt_oss_request_timeout",
     "gpt_oss_unauthorized",
@@ -30,7 +31,20 @@ object LiveGptOssProbe:
     "gpt_oss_response_failed",
     "gpt_oss_response_incomplete",
     "gpt_oss_stream_error",
-    "gpt_oss_attempt_interrupted"
+    "gpt_oss_attempt_interrupted",
+    "harmony_chat_rate_limited",
+    "harmony_chat_request_timeout",
+    "harmony_chat_unauthorized",
+    "harmony_chat_endpoint_unavailable",
+    "harmony_chat_open_failed",
+    "harmony_chat_open_timed_out",
+    "harmony_chat_invalid_response",
+    "harmony_chat_body_failed",
+    "harmony_chat_body_timed_out",
+    "harmony_chat_chat_error",
+    "harmony_chat_content_filtered",
+    "harmony_chat_output_budget_exhausted",
+    "harmony_chat_attempt_interrupted"
   )
 
   private val ScenarioNonconformant = "probe_scenario_nonconformant"
@@ -46,10 +60,15 @@ object LiveGptOssProbe:
         "live probe dependencies must not be null"
       )
       telemetry <- InMemoryTelemetry.make
+      // The controller is provider-neutral, so the probe only has to choose
+      // which dialect to construct. It never switches after a failure.
       backend <- ZIO.fromEither(
-        GptOssBackend
-          .make(config.gptOssConfig, http, telemetry)
-          .left
+        (config.backendConfig match
+          case ProbeBackendConfig.Responses(value) =>
+            GptOssBackend.make(value, http, telemetry)
+          case ProbeBackendConfig.HarmonyChat(value) =>
+            HarmonyChatBackend.make(value, http, telemetry)
+        ).left
           .map(_ =>
             ProbeError.make(
               "probe_backend_construction_failed",
@@ -58,7 +77,12 @@ object LiveGptOssProbe:
           )
       )
       exit <- GoldenScenario
-        .executeProbeWith(backend, telemetry, config.batCommit.value)
+        .executeProbeWith(
+          backend,
+          telemetry,
+          config.batCommit.value,
+          config.reasoningEffort
+        )
         .exit
       result <- exit match
         case Exit.Success(completed) =>
@@ -150,7 +174,7 @@ object LiveGptOssProbe:
       case _: BatError.BudgetExceeded =>
         ProbeVerdict.Nonconformant -> ScenarioNonconformant
       case failure: BatError.BackendFailure
-          if OperationalFailures.contains(failure.code) =>
+          if BlockedFailures.contains(failure.code) =>
         ProbeVerdict.Blocked -> failure.code
       case _: BatError.ProtocolViolation | _: BatError.ToolFailure |
           _: BatError.BdrFailure | _: BatError.PrematureFinal =>
@@ -164,7 +188,8 @@ object LiveGptOssProbe:
 
   private def isInternalDefect(error: BatError): Boolean =
     error.code == "backend_adapter_defect" ||
-      error.code == "gpt_oss_attempt_defect"
+      error.code == "gpt_oss_attempt_defect" ||
+      error.code == "harmony_chat_attempt_defect"
 
   private def conforms(result: GoldenScenario.BackendResult): Boolean =
     val loop = result.loopResult
