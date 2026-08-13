@@ -65,14 +65,20 @@ of the pinned weights, serving runtime, Harmony template, quantization, and hard
 cannot accidentally turn the fake check into a paid or cluster-backed run merely by discovering an
 endpoint.
 
-**One real deployment has now passed this probe.** On 2026-08-11, `openai/gpt-oss-20b` served
+**Two real deployments have now passed this probe.** On 2026-08-11, `openai/gpt-oss-20b` served
 single-node by exo `0.3.70` on an Apple M1 Pro returned `compatible` over the `harmony-chat` dialect:
 three model turns, both pinned tools in the required order, terminal `ready_for_review`, 4482 total
-tokens of which 948 reasoning, 33.8 output tokens per second, 48.6 s wall, mean time to first event
+tokens of which 948 reasoning, 33.8 output tokens per second, 48.6 s wall, and mean time to first event
 6.0 s.
 
-That is a transport and protocol result for one model on one topology. It is **not** evidence about
-`gpt-oss-120b`, about distributed placement, or about model quality on real defects. A checked-in fake
+On 2026-08-13, `openai/gpt-oss-120b` served by a three-node exo Pipeline/MLX Ring over Thunderbolt
+passed the same contract at medium reasoning effort: 2270 total tokens of which 182 reasoning, 21.8
+output tokens per second, 89.0 s wall, and mean time to first event 25.7 s. The first turn included a
+65.6-second warm-up delay; the attempt was preserved rather than rerun out of the record.
+
+These are transport and protocol results for two independently pinned deployments. They are **not**
+evidence about model quality on real defects or a controlled 20B-versus-120B comparison. See the
+immutable records in [`../benchmarks/probes/`](../benchmarks/probes/README.md). A checked-in fake
 result must still never be presented as live model evidence.
 
 ## Configure a live run

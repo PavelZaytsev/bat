@@ -23,8 +23,13 @@ object CommittedProbeValidatorSpec extends ZIOSpecDefault:
       test("accepts the exact committed evidence inventory") {
         val result = CommittedProbeValidator.validate(ProbeRoot)
         assertTrue(
-          result.exists(_.runs == 1),
-          result.exists(_.runIds == Set("exo-m1pro-20b-live-002"))
+          result.exists(_.runs == 2),
+          result.exists(
+            _.runIds == Set(
+              "exo-m1pro-20b-live-002",
+              "exo-three-node-120b-live-001"
+            )
+          )
         )
       },
       test("rejects an unindexed orphan entry") {

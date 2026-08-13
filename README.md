@@ -78,8 +78,9 @@ An explicitly armed live conformance probe can exercise the same GPT-OSS Respons
 against a remote 20B or 120B deployment while BAT runs on a laptop or in a container. Ordinary CI
 uses deterministic loopback endpoints and makes no live model call. See
 [`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) for the environment-only command, security
-boundary, current source/container prerequisites, verdicts, and evidence artifacts. A single-node 20B
-exo deployment has passed it; larger and distributed topologies have not been exercised.
+boundary, current source/container prerequisites, verdicts, and evidence artifacts. Both a
+single-node 20B deployment and a three-node 120B exo Pipeline/MLX Ring deployment have passed it.
+These are wire-conformance results, not model-quality comparisons.
 
 Observed controller runs can emit a versioned, payload-free telemetry record that attributes model
 turns, provider attempts, retries, tools, tokens, and elapsed time to validated BDR checkpoints.

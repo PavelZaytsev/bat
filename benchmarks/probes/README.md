@@ -44,6 +44,7 @@ result and is preserved as one.
 | run | model | dialect | topology | verdict |
 |---|---|---|---|---|
 | [`gpt-oss-20b-exo-single-node-001`](gpt-oss-20b-exo-single-node-001/) | `openai/gpt-oss-20b` | `harmony_chat_sse` | single-node exo, Apple M1 Pro | `compatible` |
+| [`gpt-oss-120b-exo-three-node-001`](gpt-oss-120b-exo-three-node-001/) | `openai/gpt-oss-120b` | `harmony_chat_sse` | three-node exo Pipeline/MLX Ring over Thunderbolt | `compatible` |
 
 An earlier attempt against the same endpoint returned `incompatible` with
 `harmony_chat_protocol_violation`. That verdict was a defect in BAT's own decoder, not in the
