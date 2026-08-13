@@ -276,7 +276,7 @@ still stop a run. Ordinary review and CI remain the merge authority.
 
 | file | purpose |
 |---|---|
-| [`docs/bat-for-java-developers.md`](docs/bat-for-java-developers.md) | composition-first architecture guide for Java developers new to Scala and FP |
+| [`docs/bat-for-java-developers.md`](docs/bat-for-java-developers.md) | Java-first guide to honest function contracts, referential transparency, IO/ZIO, composition, and BAT |
 | [`skills/refactor/SKILL.md`](skills/refactor/SKILL.md) | executable BDR workflow |
 | [`skills/refactor/references/protocol.md`](skills/refactor/references/protocol.md) | boundary discovery and the six-phase loop |
 | [`skills/refactor/references/tracker.md`](skills/refactor/references/tracker.md) | state, evidence, transitions, and readiness contracts |
