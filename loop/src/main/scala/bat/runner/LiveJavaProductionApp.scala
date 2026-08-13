@@ -61,7 +61,7 @@ object LiveJavaProductionApp extends ZIOAppDefault:
           identity,
           None,
           sse,
-          maxOutputTokens = 2048,
+          maxOutputTokens = 8192,
           maxAttempts = 2,
           retryDelay = Duration.fromSeconds(1)
         )
