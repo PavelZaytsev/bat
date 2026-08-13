@@ -28,7 +28,7 @@ object ProductionRunnerSpec extends ZIOSpecDefault:
   private val PatchDigest = "5" * 64
   private val EvaluationDigest = "6" * 64
   private val ProductionPromptSha256 =
-    "7bd2b41ad32c9c11c57a67f40a8d7b1606a1d363ff6d4cbade12dc1e140f9fad"
+    "86295c25f98046af49b6a438897cc991b048bab3ff0f7796bd02acb096737811"
 
   def spec =
     suite("provider-neutral production runner")(

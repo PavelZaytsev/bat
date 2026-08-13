@@ -47,32 +47,80 @@ final class ToolRegistry private (
   def validate(call: FunctionCall, mode: RunMode): Either[BatError, Unit] =
     resolve(call, mode).flatMap {
       case tool if tool.definition.strict =>
-        StrictToolSchema.validateValue(
-          tool.definition.parameters,
-          call.arguments
-        )
+        StrictToolSchema
+          .validateValue(
+            tool.definition.parameters,
+            normalizedArguments(tool, call.arguments)
+          )
+          .left
+          .map(error =>
+            BatError.ProtocolViolation(
+              s"tool ${tool.definition.name}: ${error.safeMessage}"
+            )
+          )
       case _ => Right(())
     }
+
+  /** Admit the selected capability before any call in the turn executes.
+    * Argument-shape mistakes are deliberately handled as tool outputs so a
+    * long-running model can repair them without losing durable progress.
+    */
+  def validateSelection(
+      call: FunctionCall,
+      mode: RunMode
+  ): Either[BatError, Unit] =
+    resolve(call, mode).map(_ => ())
 
   def execute(
       call: FunctionCall,
       mode: RunMode
   ): IO[BatError, FunctionOutput] =
-    ZIO.fromEither(validate(call, mode)) *>
-      ZIO.fromEither(resolve(call, mode)).flatMap { tool =>
-        safelyExecute(
-          tool,
-          ToolInvocation(call.callId, call.arguments)
-        ).flatMap {
-          case Left(error) =>
-            val safeOutput = Json.Obj(Chunk("error" -> Json.Str(error.code)))
-            ZIO.fromEither(
-              FunctionOutput.make(call.callId, safeOutput, isError = true)
-            )
-          case Right(output) =>
-            ZIO.fromEither(FunctionOutput.make(call.callId, output))
-        }
-      }
+    ZIO.fromEither(resolve(call, mode)).flatMap { tool =>
+      val arguments = normalizedArguments(tool, call.arguments)
+      validateArguments(tool, arguments) match
+        case Left(error) => invalidArguments(call.callId, error)
+        case Right(_)    =>
+          safelyExecute(
+            tool,
+            ToolInvocation(call.callId, arguments)
+          ).flatMap {
+            case Left(error) =>
+              val safeOutput =
+                Json.Obj(Chunk("error" -> Json.Str(error.code)))
+              ZIO.fromEither(
+                FunctionOutput.make(call.callId, safeOutput, isError = true)
+              )
+            case Right(output) =>
+              ZIO.fromEither(FunctionOutput.make(call.callId, output))
+          }
+    }
+
+  private def validateArguments(
+      tool: Tool,
+      arguments: Json.Obj
+  ): Either[BatError, Unit] =
+    if tool.definition.strict then
+      StrictToolSchema
+        .validateValue(tool.definition.parameters, arguments)
+        .left
+        .map(error =>
+          BatError.ProtocolViolation(
+            s"tool ${tool.definition.name}: ${error.safeMessage}"
+          )
+        )
+    else Right(())
+
+  private def invalidArguments(
+      callId: CallId,
+      error: BatError
+  ): IO[BatError, FunctionOutput] =
+    val safeOutput = Json.Obj(
+      Chunk(
+        "error" -> Json.Str("invalid_tool_arguments"),
+        "message" -> Json.Str(error.safeMessage)
+      )
+    )
+    ZIO.fromEither(FunctionOutput.make(callId, safeOutput, isError = true))
 
   private def safelyExecute(
       tool: Tool,
@@ -127,6 +175,18 @@ final class ToolRegistry private (
       case RunMode.Audit      => tool.authority == ToolAuthority.ReadOnly
       case RunMode.FullWriter => true
 
+  /** GPT-OSS can select a reviewed zero-argument function while carrying stale
+    * arguments from another candidate. Empty-schema tools grant no parameter
+    * authority, so canonicalizing them to `{}` is safe. Every tool with a
+    * declared property remains strictly validated.
+    */
+  private def normalizedArguments(tool: Tool, value: Json.Obj): Json.Obj =
+    if tool.definition.strict && StrictToolSchema.hasNoProperties(
+        tool.definition.parameters
+      )
+    then Json.Obj(Chunk.empty)
+    else value
+
 object ToolRegistry:
   def make(tools: Chunk[Tool]): Either[BatError, ToolRegistry] =
     val duplicates = tools
@@ -179,6 +239,13 @@ private object StrictToolSchema:
 
   def validateValue(schema: Json.Obj, value: Json.Obj): Either[BatError, Unit] =
     validateShape(schema, "$").flatMap(_ => validateAt(schema, value, "$"))
+
+  def hasNoProperties(schema: Json.Obj): Boolean =
+    field(schema, "type").contains(Json.Str("object")) &&
+      field(schema, "properties").exists {
+        case Json.Obj(fields) => fields.isEmpty
+        case _                => false
+      }
 
   private def validateShape(
       schema: Json.Obj,
@@ -327,9 +394,13 @@ private object StrictToolSchema:
       _ <-
         if extra.isEmpty then Right(())
         else
+          val safeNames = extra.toList.sorted.map { name =>
+            if name.matches("[A-Za-z_][A-Za-z0-9_]{0,63}") then name
+            else "<unsafe>"
+          }
           Left(
             BatError.ProtocolViolation(
-              s"tool argument $path contains ${extra.size} unexpected key(s)"
+              s"tool argument $path contains unexpected key(s): ${safeNames.mkString(", ")}"
             )
           )
       _ <- value.fields.foldLeft[Either[BatError, Unit]](Right(())) {

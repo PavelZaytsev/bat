@@ -87,8 +87,36 @@ object JavaPolicySpec extends ZIOSpecDefault:
             "maven_test",
             "maven_verify",
             "gradle_test",
-            "gradle_check"
+            "gradle_check",
+            "javac_test"
           )
+        )
+      },
+      test("renders a closed dependency-free javac main-class action") {
+        val request = unsafe(
+          JavaBuildRequest.make(
+            JavaBuildAction.JavacTest,
+            Some("dev.bat.examples.ingress.IngressGatewayPublicTest")
+          )
+        )
+        val plan = Policy.plan(request)
+        val missingSelector = JavaBuildRequest.make(
+          JavaBuildAction.JavacTest,
+          None
+        )
+
+        assertTrue(
+          plan.kind == WorkerOperationKind.JavacTest,
+          plan.requestIdentity ==
+            "java-build-v1:javac_test:selector=dev.bat.examples.ingress.IngressGatewayPublicTest",
+          plan.argv.head == "/bin/sh",
+          plan.argv(1) == "-eu",
+          plan.argv(2) == "-c",
+          plan.argv(3) == JavaBuildPolicy.JavacTestScript,
+          plan.argv.last ==
+            "dev.bat.examples.ingress.IngressGatewayPublicTest",
+          !plan.argv.exists(_.contains("mvn")),
+          errorCode(missingSelector).contains("invalid_java_build_request")
         )
       },
       test("rejects deploy-like and argument-shaped test selectors") {

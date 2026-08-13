@@ -72,6 +72,18 @@ object RunWorkspace:
   def seal(allocation: Allocation): IO[WorkerError, RunWorkspace] =
     for
       _ <- rejectTargetBdr(allocation.repository)
+      workspace <- sealInitialized(allocation)
+    yield workspace
+
+  /** Seal after the trusted BDR lifecycle has initialized its private tracker.
+    * Callers must reject target-supplied tracker state before initialization.
+    * The post-initialization fingerprint captures any benign Git index refresh
+    * performed by the pinned BDR engine.
+    */
+  private[worker] def sealInitialized(
+      allocation: Allocation
+  ): IO[WorkerError, RunWorkspace] =
+    for
       fingerprint <- WorkspaceFingerprinting.compute(allocation.repository)
       workspace = RunWorkspace(
         allocation.runId,
@@ -114,7 +126,9 @@ object RunWorkspace:
         )
       )
 
-  private def rejectTargetBdr(repository: Path): IO[WorkerError, Unit] =
+  private[worker] def rejectTargetBdr(
+      repository: Path
+  ): IO[WorkerError, Unit] =
     ZIO
       .attemptBlocking {
         val entries = Files.list(repository)

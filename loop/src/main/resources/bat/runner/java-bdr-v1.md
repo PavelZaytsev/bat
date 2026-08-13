@@ -59,11 +59,31 @@ the code requires them; never force unrelated findings into one example slice.
 
 ## 1. Establish the baseline
 
+Discover the build entrypoint before selecting a verification action. Read the changed-path
+inventory and the root build manifest or README:
+
+- use Maven actions only when the relevant root or module has `pom.xml`;
+- use Gradle actions only when the relevant root or module has `build.gradle`, `build.gradle.kts`,
+  or an admitted wrapper-backed Gradle build; and
+- for a dependency-free Java source tree without either build manifest, follow its documented main
+  test entrypoint with `javac_test`. A unique simple class name is accepted, but prefer the fully
+  qualified class name from its package declaration.
+
+The absence of a Maven or Gradle manifest is not itself an environment block. Do not declare the
+baseline unusable until the repository's documented reviewed build path has been inspected and
+attempted. For a multi-module repository, keep focused verification in the affected module and use
+the broadest reviewed root action only for the baseline and final fixed-point gate.
+
 Run one reviewed broad or public verification action, then apply:
 
 ```json
 {"type":"set_baseline","baseline":{"usable":true,"commands":[{"receipt_id":"<baseline-receipt>"}]}}
 ```
+
+Every successful `worker_java_build` response contains a top-level `receipt_id`, `outcome`, and
+`exit_code`. When `outcome` is `exited` and `exit_code` is `0`, copy that exact returned
+`receipt_id` into `set_baseline` immediately. Do not rerun the same baseline merely to obtain a
+receipt, and do not claim the receipt is unavailable when it is present in the tool response.
 
 ## 2. Discover and assign boundary work
 

@@ -9,6 +9,7 @@ enum JavaBuildAction(val wire: String):
   case MavenVerify extends JavaBuildAction("maven_verify")
   case GradleTest extends JavaBuildAction("gradle_test")
   case GradleCheck extends JavaBuildAction("gradle_check")
+  case JavacTest extends JavaBuildAction("javac_test")
 
 final case class JavaBuildRequest private (
     action: JavaBuildAction,
@@ -31,8 +32,11 @@ object JavaBuildRequest:
     then invalid("test selector must be one Java class or class#method name")
     else if testSelector.nonEmpty &&
       action != JavaBuildAction.MavenTest &&
-      action != JavaBuildAction.GradleTest
+      action != JavaBuildAction.GradleTest &&
+      action != JavaBuildAction.JavacTest
     then invalid("test selectors are allowed only for focused test actions")
+    else if action == JavaBuildAction.JavacTest && testSelector.isEmpty then
+      invalid("the javac test action requires one main-class selector")
     else Right(JavaBuildRequest(action, testSelector))
 
   private def invalid(message: String): Left[WorkerError, Nothing] =
@@ -114,6 +118,20 @@ final case class JavaBuildPolicy private (
           ),
           buildIdentity(request)
         )
+      case JavaBuildAction.JavacTest =>
+        JavaCommandPlan(
+          WorkerOperationKind.JavacTest,
+          policyId,
+          Chunk(
+            "/bin/sh",
+            "-eu",
+            "-c",
+            JavaBuildPolicy.JavacTestScript,
+            "bat-javac-test",
+            request.testSelector.get
+          ),
+          buildIdentity(request)
+        )
 
   private def buildIdentity(request: JavaBuildRequest): String =
     val scope =
@@ -121,6 +139,18 @@ final case class JavaBuildPolicy private (
     s"java-build-v1:${request.action.wire}:$scope"
 
 object JavaBuildPolicy:
+  private[worker] val JavacTestScript =
+    "classes=\"$(mktemp -d)\"; " +
+      "find src/main/java src/test/java -name '*.java' -print0 | " +
+      "sort -z | xargs -0 /usr/bin/javac --release 17 -d \"$classes\"; " +
+      "main=\"$1\"; " +
+      "case \"$main\" in *.*) ;; *) " +
+      "matches=\"$(find src/main/java src/test/java -name \"$main.java\" -type f)\"; " +
+      "[ \"$(printf '%s\\n' \"$matches\" | sed '/^$/d' | wc -l | tr -d ' ')\" = 1 ]; " +
+      "package=\"$(sed -n 's/^[[:space:]]*package[[:space:]]\\{1,\\}\\([A-Za-z0-9_.]*\\)[[:space:]]*;.*/\\1/p' \"$matches\" | head -1)\"; " +
+      "if [ -n \"$package\" ]; then main=\"$package.$main\"; fi ;; esac; " +
+      "exec /usr/bin/java -cp \"$classes\" \"$main\""
+
   def make(
       policyId: String,
       mavenExecutable: String,

@@ -50,7 +50,6 @@ object OciSandboxSpec extends ZIOSpecDefault:
           expected = Chunk(
             Runtime.toString,
             "run",
-            "--rm",
             s"--name=${OciSandbox.runtimeResourceName(config, request)}",
             "--log-driver=none",
             "--init",

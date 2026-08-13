@@ -190,6 +190,63 @@ object AgenticLoopSpec extends ZIOSpecDefault:
           executions.isEmpty
         )
       },
+      test("invalid strict arguments are recoverable tool feedback") {
+        val invalid = obj("""{"a":1}""")
+        val valid = obj("""{"a":1,"b":"repaired"}""")
+        val turns = Chunk(
+          toolTurn(
+            context("invalid-argument-context"),
+            Chunk(call("invalid-argument-1", "echo", invalid)),
+            usage(1L)
+          ),
+          toolTurn(
+            context("repaired-argument-context"),
+            Chunk(call("invalid-argument-2", "echo", valid)),
+            usage(1L)
+          ),
+          completed(usage = usage(1L))
+        )
+        for
+          backend <- ScriptedBackend.make(turns)
+          bdr <- FakeBdr.make(
+            activeState(),
+            checkpoints = Chunk(Ready42)
+          )
+          tool <- RecordingTool.constant(EchoDefinition, Json.Bool(true))
+          result <- AgenticLoop.run(
+            makeRunSpec(
+              budgets(iterations = 3, toolCalls = 2, totalTokens = 3L)
+            ),
+            backend,
+            registry(tool),
+            bdr
+          )
+          requests <- backend.requests.get
+          executions <- tool.executions.get
+          feedback = requests(1).inputs.collectFirst {
+            case InputEvent.ToolOutput(output) => output
+          }
+          error = feedback.flatMap(output =>
+            output.output match
+              case value: Json.Obj => field(value, "error")
+              case _               => None
+          )
+          message = feedback.flatMap(output =>
+            output.output match
+              case value: Json.Obj => field(value, "message")
+              case _               => None
+          )
+        yield assertTrue(
+          result.outcome == RunOutcome.ReadyForReview,
+          result.toolCalls == 2,
+          executions == Chunk(valid),
+          feedback.exists(_.isError),
+          error.contains(Json.Str("invalid_tool_arguments")),
+          message.contains(
+            Json.Str("tool echo: tool argument $ is missing: b")
+          )
+        )
+      },
       test("same call ID and canonical arguments replay without re-execution") {
         val firstArguments = obj("""{"a":1,"b":"one"}""")
         val reorderedArguments = obj("""{"b":"one","a":1}""")

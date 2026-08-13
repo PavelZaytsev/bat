@@ -485,9 +485,14 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
                 Chunk("workspace_revision" -> Json.Num(BigDecimal(0)))
               )
             )
-            malformedResult <- registry
-              .execute(malformed, RunMode.FullWriter)
-              .either
+            malformedValidation = registry.validate(
+              malformed,
+              RunMode.FullWriter
+            )
+            malformedResult <- registry.execute(
+              malformed,
+              RunMode.FullWriter
+            )
             traversal = functionCall(
               "traversal-read",
               "worker_read_file",
@@ -503,8 +508,10 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
             requests <- sandbox.requests
             traversalJson = objectOutput(traversalResult)
           yield assertTrue(
-            malformedResult.left.toOption.exists(
-              _.code == "protocol_violation"
+            malformedValidation.isLeft,
+            malformedResult.isError,
+            stringField(objectOutput(malformedResult), "error").contains(
+              "invalid_tool_arguments"
             ),
             traversalResult.isError,
             stringField(traversalJson, "error").contains(

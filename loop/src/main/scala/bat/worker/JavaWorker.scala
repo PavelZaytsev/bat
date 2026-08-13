@@ -1312,8 +1312,9 @@ object JavaWorkerSession:
         workspaceGitRunner
       )
       _ <- AuthenticatedPrSource.requireFresh(authority, pins)
-      workspace <- RunWorkspace.seal(allocation)
-      bdr <- bdrLifecycle.initialize(runId, workspace.repository, pins)
+      _ <- RunWorkspace.rejectTargetBdr(allocation.repository)
+      bdr <- bdrLifecycle.initialize(runId, allocation.repository, pins)
+      workspace <- RunWorkspace.sealInitialized(allocation)
       initialRevision <- ZIO.fromEither(WorkspaceRevision.from(0L))
       initial = WorkspacePrecondition(
         initialRevision,

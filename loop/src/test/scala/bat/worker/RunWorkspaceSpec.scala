@@ -101,6 +101,44 @@ object RunWorkspaceSpec extends ZIOSpecDefault:
           )
         }
       },
+      test("seals the workspace after trusted BDR initialization") {
+        ZIO.scoped {
+          for
+            roots <- workspaceRoots
+            (controlRoot, workspaceRoot, _) = roots
+            id = runId("run-trusted-bdr")
+            allocation <- RunWorkspace.allocate(
+              controlRoot,
+              workspaceRoot,
+              id,
+              Pins
+            )
+            _ <- createSyntheticRepository(allocation.repository, "source")
+            _ <- RunWorkspace.rejectTargetBdr(allocation.repository)
+            _ <- ZIO.attemptBlocking {
+              val bdr = Files.createDirectories(
+                allocation.repository.resolve(".bdr")
+              )
+              val _ = Files.writeString(
+                bdr.resolve("progress.yaml"),
+                "trusted tracker"
+              )
+              val _ = Files.writeString(
+                allocation.repository.resolve(".git").resolve("index"),
+                "trusted-engine-refreshed-index",
+                StandardCharsets.US_ASCII,
+                StandardOpenOption.TRUNCATE_EXISTING
+              )
+            }
+            sealedWorkspace <- RunWorkspace.sealInitialized(allocation)
+            resumed <- RunWorkspace.resume(controlRoot, workspaceRoot, id)
+            current <- WorkspaceFingerprinting.compute(allocation.repository)
+          yield assertTrue(
+            sealedWorkspace.initialFingerprint == current,
+            resumed == sealedWorkspace
+          )
+        }
+      },
       test("detects manifest truncation on resume") {
         ZIO.scoped {
           for
