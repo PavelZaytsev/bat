@@ -491,7 +491,8 @@ object TrustedEvidenceMaterializer:
     WorkerOperationKind.MavenTest,
     WorkerOperationKind.MavenVerify,
     WorkerOperationKind.GradleTest,
-    WorkerOperationKind.GradleCheck
+    WorkerOperationKind.GradleCheck,
+    WorkerOperationKind.JavacTest
   )
 
   private[worker] def materialize(

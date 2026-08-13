@@ -382,6 +382,56 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
           )
         }
       },
+      test(
+        "deterministically records the first successful reviewed baseline"
+      ) {
+        ZIO.scoped {
+          for
+            captured <- Ref.make(Chunk.empty[Json.Obj])
+            sandbox <- RecordingSandbox.make
+            fixture <- openSession(
+              emptyGit,
+              sandbox,
+              repository => recordingApplyBdr(repository, captured)
+            )
+            current <- fixture.session.currentWorkspace
+            registry <- fromBat(
+              ToolRegistry.make(WorkerTools.all(fixture.session))
+            )
+            output <- registry.execute(
+              functionCall(
+                "java-baseline",
+                "worker_java_build",
+                merge(
+                  workspaceArguments(current),
+                  obj(
+                    "action" -> Json.Str("javac_test"),
+                    "test_selector" -> Json.Str("MainTest")
+                  )
+                )
+              ),
+              RunMode.FullWriter
+            )
+            applied <- captured.get
+            json = objectOutput(output)
+            baseline = applied.headOption.flatMap(objectField(_, "baseline"))
+            commands = baseline.flatMap(arrayField(_, "commands"))
+          yield assertTrue(
+            boolField(json, "baseline_auto_recorded").contains(true),
+            objectField(json, "baseline_transition").nonEmpty,
+            applied.size == 1,
+            baseline.flatMap(boolField(_, "usable")).contains(true),
+            commands.exists(_.size == 1),
+            commands.flatMap(_.headOption).exists {
+              case value: Json.Obj =>
+                stringField(value, "command").contains(
+                  "java-build-v1:javac_test:selector=MainTest"
+                ) && numberField(value, "exit_code").contains(0L)
+              case _ => false
+            }
+          )
+        }
+      },
       test("preserves a timed-out build result without inventing evidence") {
         ZIO.scoped {
           val stdout = Chunk.fromArray(
@@ -1260,6 +1310,12 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
 
   private def objectField(value: Json.Obj, name: String): Option[Json.Obj] =
     field(value, name).collect { case result: Json.Obj => result }
+
+  private def arrayField(
+      value: Json.Obj,
+      name: String
+  ): Option[Chunk[Json]] =
+    field(value, name).collect { case Json.Arr(values) => values }
 
   private def stringArrayField(
       value: Json.Obj,

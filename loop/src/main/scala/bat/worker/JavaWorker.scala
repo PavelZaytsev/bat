@@ -20,6 +20,7 @@ import java.security.MessageDigest
 import scala.collection.mutable
 
 import zio.{Chunk, Clock, IO, Scope, Semaphore, UIO, ZIO}
+import zio.json.ast.Json
 
 final case class WorkerWorkspaceBootstrap(
     runId: RunId,
@@ -915,6 +916,75 @@ final class JavaWorkerSession private (
         result <- rawBdr.apply(materialized)
       yield result
     }
+
+  /** Consume a successful reviewed build receipt when the tracker is waiting
+    * for its baseline. This transition is deterministic controller bookkeeping,
+    * not a model-authored refactoring decision, and prevents capable models
+    * from wasting turns rediscovering an already proven build entry point.
+    */
+  private[worker] def recordBaselineIfRequired(
+      receipt: TrustedReceipt
+  ): IO[WorkerError, Option[Json.Obj]] =
+    val broadEnough = Set(
+      WorkerOperationKind.MavenVerify,
+      WorkerOperationKind.GradleCheck,
+      WorkerOperationKind.JavacTest
+    ).contains(receipt.operationKind)
+    receipt.outcome match
+      case CommandOutcome.Exited(0) if !broadEnough => ZIO.none
+      case CommandOutcome.Exited(0)                 =>
+        serialized {
+          for
+            current <- healthyWorkspaceUnlocked
+            state <- rawBdr.checkpoint.mapError(error =>
+              WorkerError.LedgerFailure(error.code, error.safeMessage)
+            )
+            action = state.nextAction.fields.collectFirst {
+              case ("action", Json.Str(value)) => value
+            }
+            result <-
+              if action.exists(Set("record_baseline", "set_baseline")) then
+                val operation = Json.Obj(
+                  Chunk(
+                    "type" -> Json.Str("set_baseline"),
+                    "baseline" -> Json.Obj(
+                      Chunk(
+                        "usable" -> Json.Bool(true),
+                        "commands" -> Json.Arr(
+                          Chunk(
+                            Json.Obj(
+                              Chunk(
+                                "receipt_id" -> Json.Str(
+                                  receipt.operationId.value
+                                )
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+                ReceiptBoundOperation
+                  .materialize(
+                    operation,
+                    receiptId => trustedEvidenceUnlocked(receiptId, current)
+                  )
+                  .flatMap(materialized =>
+                    rawBdr
+                      .apply(materialized)
+                      .mapError(error =>
+                        WorkerError.LedgerFailure(
+                          error.code,
+                          error.safeMessage
+                        )
+                      )
+                  )
+                  .map(Some(_))
+              else ZIO.none
+          yield result
+        }
+      case _ => ZIO.none
 
   private def trustedEvidenceUnlocked(
       receiptId: String,

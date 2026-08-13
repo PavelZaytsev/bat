@@ -217,9 +217,14 @@ object WorkerTools:
             expected,
             request
           )
+          baseline <- session.recordBaselineIfRequired(
+            result.operation.receipt
+          )
         yield receiptJson(
           result.operation,
           Chunk(
+            "baseline_auto_recorded" -> Json.Bool(baseline.nonEmpty),
+            "baseline_transition" -> baseline.getOrElse(Json.Null),
             "command_evidence" -> result.commandEvidence
               .getOrElse(Json.Null),
             "command_evidence_unavailable_reason" -> result.commandEvidenceUnavailableReason
