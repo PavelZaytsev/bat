@@ -366,8 +366,59 @@ ambiguous success    → honest algebraic data type
 implicit side effect → controlled effect boundary
 ```
 
-The current BDR engine is Python and the BAT controller is Scala 3/ZIO. Composition is the design
-discipline; no particular target language owns it.
+The current BDR engine is Python and the BAT controller is Scala 3/ZIO. The controller invokes the
+engine through a versioned JSON command boundary. That preserved the already successful BDR
+implementation while BAT's runtime was being built, but it is a migration boundary rather than the
+desired final architecture.
+
+The planned replacement is tracked in
+[#20](https://github.com/PavelZaytsev/bat/issues/20). It should not turn every BDR rule into an
+effectful ZIO operation. The clean target has a pure functional core surrounded by a ZIO shell:
+
+```text
+                    pure Scala 3 core
+TrackerState × Operation ───────────────→ Either[ValidationError, Transition]
+                            │
+                            ├─ derive next action
+                            ├─ determine readiness
+                            └─ produce canonical journal event
+
+                         ZIO effect boundary
+load tracker → lock → apply pure transition → atomically persist → verify → unlock
+```
+
+The pure core should contain immutable BDR domain values, operation ADTs, validators, the state
+reducer, phase gates, readiness, and next-action derivation. Given the same validated state and
+operation, it must always produce the same transition or validation error. That makes the
+methodology itself referentially transparent and easy to test exhaustively.
+
+ZIO should own the things that are genuinely effectful: filesystem access, canonical serialization,
+hash-chained journal persistence, locks, crash recovery, Git identity, clocks, and the CLI/runtime
+boundary. The resulting engine service can be read as:
+
+```scala
+trait BdrEngine:
+  def load(repository: Repository): IO[BdrStoreError, TrackerState]
+
+  def apply(
+      repository: Repository,
+      expectedRevision: Revision,
+      operation: BdrOperation
+  ): IO[BdrEngineError, Transition]
+```
+
+Internally, `apply` composes effectful loading and persistence around a pure reducer. BAT can then
+use this service in-process instead of spawning Python, while a thin Scala `bdr` CLI interprets the
+same service for skills and humans.
+
+Migration must be differential, not a rewrite based on memory: freeze the Python engine as a
+compatibility oracle, run the same states and operations through both engines, compare snapshots,
+journal events, hashes, errors, and exit codes, and switch BAT only after parity. Then the Python
+engine and tooling can be removed.
+
+Composition is the design discipline; no particular target language owns it. Moving BDR to a pure
+Scala core plus a ZIO shell simply lets the implementation embody the same honest-boundary model
+that the methodology asks target programs to adopt.
 
 ## 6. One slice is one missing information-flow edge
 
