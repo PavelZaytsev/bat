@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
 
 import zio.*
 
@@ -587,14 +588,22 @@ private[oci] object JdkOciProcessRunner extends OciProcessRunner:
             var attempt = 0
             var absent = false
             while attempt < 120 && !absent do
-              absent = !listed(spec, cleanup)
-              if !absent then
-                val _ = runCleanupCommand(
-                  spec,
-                  cleanup.removeArgv,
-                  captureOutput = false
-                )
-                absent = !listed(spec, cleanup)
+              observeAbsent(spec, cleanup) match
+                case Some(true)  => absent = true
+                case Some(false) =>
+                  // Docker Desktop may finish removing the container after
+                  // the client-side command times out. Always re-observe the
+                  // exact name before treating that timeout as a cleanup
+                  // failure.
+                  try
+                    val _ = runCleanupCommand(
+                      spec,
+                      cleanup.removeArgv,
+                      captureOutput = false
+                    )
+                  catch case NonFatal(_) => ()
+                  absent = observeAbsent(spec, cleanup).contains(true)
+                case None => ()
               if !absent then Thread.sleep(250L)
               attempt += 1
             if !absent then
@@ -606,6 +615,13 @@ private[oci] object JdkOciProcessRunner extends OciProcessRunner:
               "OCI runtime resource absence could not be confirmed"
             )
           )
+
+  private def observeAbsent(
+      spec: OciProcessSpec,
+      cleanup: OciRuntimeCleanup
+  ): Option[Boolean] =
+    try Some(!listed(spec, cleanup))
+    catch case NonFatal(_) => None
 
   private def listed(
       spec: OciProcessSpec,
