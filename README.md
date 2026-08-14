@@ -242,11 +242,11 @@ The hardware-independent GPT-OSS Responses and Harmony Chat adapters and the sha
 HTTP/SSE transport are implemented and conformance-tested against deterministic in-process fake
 endpoints and exo-shaped payloads in ordinary CI.
 
-One live deployment has passed the conformance probe: `gpt-oss-20b` served single-node by exo on an
-Apple M1 Pro, over the Harmony Chat dialect, reaching the terminal BDR checkpoint through both pinned
-tools. That is a transport and protocol result for one model on one topology — not evidence about
-`gpt-oss-120b`, distributed placement, or model quality on real defects. Claude Messages, Kimi Chat,
-cost telemetry, trusted publishing, and PR automation remain future work.
+Two live deployments have passed the conformance probe over Harmony Chat: `gpt-oss-20b` on one Apple
+M1 Pro and `gpt-oss-120b` on a three-node exo Pipeline/MLX Ring cluster. Both reached the terminal BDR
+checkpoint through the two pinned tools. These are transport and protocol results, not evidence of
+model quality on real Java defects. Claude Messages, Kimi Chat, trusted publishing, and PR
+automation remain future work.
 
 ## Safety and authority
 
@@ -284,6 +284,7 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native memory, lifetime, and concurrency guidance |
 | [`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) | opt-in live GPT-OSS conformance and evidence capture |
 | [`docs/exo-efficiency.md`](docs/exo-efficiency.md) | measured throughput, prefix-cache behaviour, and the 120B readiness checklist |
+| [`docs/hardware-requirements/`](docs/hardware-requirements/) | measured hardware journey, exo scaling, and model-selection hypotheses |
 | [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
 | [`docs/quickstart.md`](docs/quickstart.md) | executable six-phase Java canary and provider portability contract |
 | [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | BAT controller and BDR methodology responsibility boundary |
@@ -297,9 +298,9 @@ BAT and BDR are alpha. The workflow is promising and the state engine is designe
 but the method has not yet been independently validated across multiple domains or organizations.
 The isolated worker, provider-neutral backend harness, and the hardware-independent GPT-OSS Responses
 and Harmony Chat adapters are implemented as controller modules. The Responses adapter is
-fake-endpoint tested only; the Harmony Chat adapter has additionally passed one live single-node
-`gpt-oss-20b` exo deployment. Neither has been exercised on a distributed or 120B deployment, and
-neither has been evaluated on real defects. The production-runner core now joins either GPT-OSS
+fake-endpoint tested only; Harmony Chat has passed live on single-node `gpt-oss-20b` and distributed
+three-node `gpt-oss-120b` exo deployments. Neither model has been evaluated on real defects. The
+production-runner core now joins either GPT-OSS
 dialect to the isolated Java worker, but it is still an embedding API rather than a public launcher:
 deployment configuration, a reviewed worker image/dependency snapshot, and a sealed evaluator
 implementation remain integration inputs. The maintained six-phase canary still uses trusted local

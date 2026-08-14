@@ -1,7 +1,7 @@
 # Making BAT efficient on exo
 
 Measured notes for getting usable throughput out of an exo-served GPT-OSS deployment, and for what
-changes when a larger model or a third node arrives.
+changes when a larger model is distributed.
 
 Everything marked *measured* came from a real run. Everything marked *hypothesis* did not, and should
 be confirmed before anyone builds on it. Where a claim here was previously wrong, the correction is
@@ -89,15 +89,18 @@ Lower effort is not free. BDR's diagnostic phases are exactly where reasoning ea
 useful experiment is not "always low" but "which phases tolerate low". BAT pins effort per run today,
 so that experiment needs per-phase effort, which does not exist yet.
 
-## What changes with 120b and a third node
+## What changes when 120b is distributed
 
-**Capacity, not speed.** Pipeline parallelism splits layers and runs stages sequentially, so every
-token traverses every node. exo's own measurements say a model that fits on one machine gets *slower*
-when distributed. A third node makes `gpt-oss-120b` possible; it does not make it fast.
+**Capacity is not speed.** Pipeline parallelism splits layers into sequential stages, so every token
+traverses every participating node. Additional nodes add memory, but also transfers and
+synchronization. The three-node proof made `gpt-oss-120b` fit on the available Macs; whether a fourth
+or fifth Pipeline node improves or reduces token rate remains a benchmark question.
 
-**Memory is the gate.** `gpt-oss-120b` needs about 65.2 GB. Sharding does not split the download —
-`resolve_allow_patterns` returns `["*"]` unconditionally — so every node stores the full 61 GB, and
-the memory check uses `ramAvailable`, not `ramTotal`.
+**Memory is the gate.** The pinned exo card declares 70,652,212,224 bytes, about 65.80 GiB, for
+placement. This excludes operating-system, runtime, Metal, and KV-cache headroom. Sharding does not
+split the download — `resolve_allow_patterns` returns `["*"]` unconditionally — so plan for a
+complete model-repository cache on every node. The placement check uses `ramAvailable`, not
+`ramTotal`.
 
 **Prefill gets worse before it gets better.** A larger model prefills more slowly per token, so a
 cache miss hurts 120b more than it hurts 20b. Since the cache is effectively single-conversation,
@@ -116,15 +119,16 @@ the KV cache, which grows with context and generation. The `gpt-oss-120b` card a
 `contextLength: 131072`, so a deployment can place successfully, spend eight minutes loading, and
 then OOM on a long first prompt.
 
-Two consequences for a first 120b attempt.
+Two consequences for the first long-context 120b Java attempt.
 
-**Cap generation.** `BAT_GPT_OSS_MAX_OUTPUT_TOKENS` bounds tokens per turn; set it to something small
-like 1024 for a first run rather than the 32768 default.
+**Cap generation deliberately.** `BAT_GPT_OSS_MAX_OUTPUT_TOKENS` bounds tokens per turn. Use the
+smallest ceiling that lets the maintained canary complete instead of accepting unbounded KV growth.
 
 **The conformance probe is the right first exercise, precisely because it is small.** The pinned
-two-tool scenario ran at 3456 input and 1026 output tokens — roughly 3.5k of context against an
-advertised 131k. It is about as far from an OOM as a real request gets, so it tests weights, ring,
-and wire without also testing the memory ceiling. Save long-context work for after it passes.
+two-tool 20b scenario reported 3456 cumulative input tokens and 1026 output tokens across three
+turns. It is far from a realistic long-context repository investigation, so it tests weights, ring,
+and wire without also testing the memory ceiling. That sequencing has now passed on the three-node
+120b deployment; the long-running Java canary is the next boundary.
 
 **An accepted request is not a served request.** A two-node instance observed on 2026-08-11 accepted
 a chat completion and then emitted only SSE `: keep-alive` comments for 190 seconds with no tokens and

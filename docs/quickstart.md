@@ -85,10 +85,10 @@ the bug.
 The GPT-OSS adapter will reuse this exact subject, BDR contract, cadence, and evaluator next, but it
 must execute model-authored Java through BAT's OCI-isolated Java worker—not through the trusted local
 toy harness. A 20b deployment is sufficient to kill wire/Harmony/tool-continuation defects cheaply;
-120b then measures inference quality. The rented 120b deployment and the Thunderbolt-connected exo
-cluster must record the same BAT commit, toy revision, base/head pins, deployment fingerprint,
-trace, verification cadence, and evaluator outcome. Only then should a run be promoted into
-benchmark evidence.
+120b then measures inference quality. Any 120b deployment, including the measured
+Thunderbolt-connected exo cluster, must record the same BAT commit, toy revision, base/head pins,
+deployment fingerprint, trace, verification cadence, and evaluator outcome. Only then should a run
+be promoted into benchmark evidence.
 
 The maintained canary lives under [`examples/java-six-phase/`](../examples/java-six-phase/). It is
 separate from the immutable records under `benchmarks/pilot/` by design.
