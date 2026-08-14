@@ -1,14 +1,14 @@
 package bat.runner
 
 import bat.backend.harmonychat.HarmonyChatConfig
+import bat.backend.wire.WireReplayPolicy
 import bat.protocol.*
 import bat.telemetry.*
 import bat.transport.*
 import bat.worker.*
 import bat.worker.oci.*
 
-import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path, StandardOpenOption}
+import java.nio.file.{Files, LinkOption, Path}
 
 import zio.http.Client
 import zio.{Chunk, Duration, Scope, ZIO, ZIOAppDefault}
@@ -38,19 +38,34 @@ object LiveJavaProductionApp extends ZIOAppDefault:
     )
 
   private[runner] def execute: ZIO[Any, BatError, String] =
-    for
-      environment <- readEnvironment
-      loaded <- ZIO.fromEither(LiveJavaEnvironment.from(environment))
-      attempt <- ZIO.scoped(runPrepared(loaded))
-      decision <- publish(loaded.outputDirectory, loaded.runId, attempt)
-      _ <- attempt match
-        case LiveJavaAttempt.Failed(error, _) => ZIO.fail(error)
-        case _                                => ZIO.unit
-    yield decision
+    readEnvironment.flatMap(environment =>
+      executeWith(environment, runPrepared)
+    )
+
+  private[runner] def executeWith(
+      environment: Map[String, String],
+      runner: LiveJavaEnvironment => ZIO[
+        Scope,
+        BatError,
+        LiveJavaPreparedAttempt
+      ]
+  ): ZIO[Any, BatError, String] =
+    ZIO
+      .fail(BatError.ProtocolViolation("live Java executor is invalid"))
+      .when(environment == null || runner == null) *>
+      (for
+        loaded <- ZIO.fromEither(LiveJavaEnvironment.from(environment))
+        verified <- LiveJavaPreflight.verify(loaded)
+        prepared <- ZIO.scoped(runner(verified))
+        decision <- publish(verified, prepared.store, prepared.attempt)
+        _ <- prepared.attempt match
+          case LiveJavaAttempt.Failed(error, _) => ZIO.fail(error)
+          case _                                => ZIO.unit
+      yield decision)
 
   private def runPrepared(
       loaded: LiveJavaEnvironment
-  ): ZIO[Scope, BatError, LiveJavaAttempt] =
+  ): ZIO[Scope, BatError, LiveJavaPreparedAttempt] =
     for
       identity <- lift(
         HarmonyChatConfig.identity(loaded.modelId, loaded.modelRevision)
@@ -62,15 +77,16 @@ object LiveJavaProductionApp extends ZIOAppDefault:
           None,
           sse,
           maxOutputTokens = 8192,
-          maxAttempts = 2,
-          retryDelay = Duration.fromSeconds(1)
+          maxAttempts = 8,
+          retryDelay = Duration.fromSeconds(10),
+          replayPolicy = WireReplayPolicy.RetryQualifiedSelfHosted
         )
       )
       transport <- lift(
         TransportConfig.make(
           loaded.endpoint,
           Duration.fromSeconds(30),
-          Duration.fromSeconds(45 * 60),
+          Duration.fromSeconds(5 * 60),
           maxRequestBytes = 16L * 1024 * 1024,
           maxResponseHeaderBytes = 64L * 1024
         )
@@ -78,17 +94,17 @@ object LiveJavaProductionApp extends ZIOAppDefault:
       deployment <- lift(
         DeploymentFingerprint.make(
           identity,
-          Measurement.Observed("exo"),
+          Measurement.Observed(loaded.runtime),
           Measurement.Observed(loaded.runtimeRevision),
           "harmony_chat_sse",
-          Measurement.Observed("gpt_oss_harmony"),
-          Measurement.Observed("mxfp4"),
-          Measurement.Observed("mlx_ring"),
-          Measurement.Observed(3L)
+          Measurement.Observed(loaded.templateRevision),
+          Measurement.Observed(loaded.quantization),
+          Measurement.Observed(loaded.topology),
+          Measurement.Observed(loaded.nodeCount)
         )
       )
       runId <- lift(TelemetryRunId.from(loaded.runId))
-      budgets <- lift(
+      originalBudgets <- lift(
         BudgetLimits.make(
           maxIterations = 128,
           maxToolCalls = 384,
@@ -96,16 +112,9 @@ object LiveJavaProductionApp extends ZIOAppDefault:
           maxTotalTokens = 8_000_000L
         )
       )
-      production <- lift(
-        ProductionRunConfig.make(
-          runId,
-          deployment,
-          "high",
-          loaded.batCommit,
-          budgets
-        )
-      )
-      gitConfig <- lift(GitRunnerConfig.make(Path.of("/usr/bin/git")))
+      binding <- lift(loaded.bindingSha256)
+      oracleSha256 <- lift(loaded.verifiedOracleSha256)
+      gitConfig <- lift(GitRunnerConfig.make(loaded.gitBinary))
       git = GitRunner.live(gitConfig)
       pins <- lift(
         PullRequestPins.make(
@@ -140,11 +149,11 @@ object LiveJavaProductionApp extends ZIOAppDefault:
       )
       sandboxConfig <- lift(
         OciSandboxConfig.make(
-          Path.of("/usr/local/bin/docker"),
+          loaded.ociRuntime,
           image,
           loaded.batRoot,
-          uid = 1000,
-          gid = 1000
+          uid = loaded.uid,
+          gid = loaded.gid
         )
       )
       sandbox = OciSandbox.live(sandboxConfig)
@@ -185,13 +194,14 @@ object LiveJavaProductionApp extends ZIOAppDefault:
         loaded.batRoot,
         Path.of("bin", "bdr"),
         Duration.fromSeconds(2 * 60),
-        "bat-gpt-oss-120b",
+        "bat-live-java",
         loaded.batCommit
       )
       openSession =
         if loaded.resume then
           JavaWorkerSession.resume(
             workerRunId,
+            loaded.attemptId,
             authority,
             git,
             sandbox,
@@ -201,6 +211,7 @@ object LiveJavaProductionApp extends ZIOAppDefault:
         else
           JavaWorkerSession.start(
             workerRunId,
+            loaded.attemptId,
             baseRepository,
             pullRequestId,
             loaded.sourceRepository,
@@ -213,16 +224,39 @@ object LiveJavaProductionApp extends ZIOAppDefault:
           )
       worker = WorkerFactory.java(openSession)
       evaluator <- lift(
-        OciJavaEvaluator.make(
+        OciJavaEvaluator.makePinned(
           sandbox,
           loaded.sourceRepository,
+          PinnedGitSource.live(git),
+          git,
+          pins,
           loaded.privateRoot.resolve("evaluator"),
           limits,
           loaded.profile,
-          "issue-25-v1"
+          oracleSha256,
+          loaded.evaluatorRevision
         )
       )
-      telemetry <- InMemoryTelemetry.make
+      store <- LiveJavaAttemptStore.prepare(
+        loaded.outputDirectory,
+        loaded.batRoot,
+        runId,
+        loaded.attemptId,
+        binding,
+        loaded.previousAttempt
+      )
+      budgets <- lift(store.remaining(originalBudgets))
+      production <- lift(
+        ProductionRunConfig.make(
+          runId,
+          deployment,
+          loaded.reasoningEffort,
+          loaded.batCommit,
+          budgets,
+          resumeAttempt = loaded.resume
+        )
+      )
+      telemetry <- store.telemetry
       result <- ZIO
         .serviceWithZIO[StreamingHttp](http =>
           ProductionRunner.runObserved(
@@ -255,11 +289,11 @@ object LiveJavaProductionApp extends ZIOAppDefault:
               // boundary was never established. Preserve the original error.
               ZIO.fail(error)
           }
-    yield attempt
+    yield LiveJavaPreparedAttempt(store, attempt)
 
   private def publish(
-      outputDirectory: Path,
-      runId: String,
+      loaded: LiveJavaEnvironment,
+      store: LiveJavaAttemptStore,
       attempt: LiveJavaAttempt
   ): ZIO[Any, BatError, String] =
     val (decision, reasonCode, evidence, evidenceDigest, telemetry) =
@@ -294,49 +328,42 @@ object LiveJavaProductionApp extends ZIOAppDefault:
           ("failed", Some(error.code), None, None, document)
     for
       telemetryJson <- lift(telemetry.canonicalJson)
+      oracleSha256 <- lift(loaded.verifiedOracleSha256)
+      telemetryDigest <- lift(
+        StrictJson.sha256(telemetry.json, "live Java telemetry")
+      )
       resultJson <- lift(
         StrictJson.canonical(
           Json.Obj(
             Chunk(
               "schema" -> Json.Str("bat.dev/live-java-result"),
               "version" -> Json.Num(1),
-              "run_id" -> Json.Str(runId),
+              "run_id" -> Json.Str(loaded.runId),
+              "attempt_id" -> Json.Str(store.attemptId.value),
+              "case" -> Json.Str(loaded.caseName),
+              "evaluator_revision" -> Json.Str(loaded.evaluatorRevision),
+              "oracle_sha256" -> Json.Str(oracleSha256),
               "decision" -> Json.Str(decision),
               "reason_code" -> reasonCode.fold[Json](Json.Null)(Json.Str(_)),
               "evidence_sha256" -> evidenceDigest
-                .fold[Json](Json.Null)(Json.Str(_))
+                .fold[Json](Json.Null)(Json.Str(_)),
+              "telemetry_sha256" -> Json.Str(telemetryDigest)
             )
           ),
           "live Java result"
         )
       )
-      _ <- ZIO
-        .attemptBlocking {
-          Files.createDirectories(outputDirectory)
-          evidence.foreach(value =>
-            Files.writeString(
-              outputDirectory.resolve("evidence.json"),
-              value + "\n",
-              StandardCharsets.UTF_8,
-              StandardOpenOption.CREATE_NEW
-            )
-          )
-          Files.writeString(
-            outputDirectory.resolve("telemetry.json"),
-            telemetryJson + "\n",
-            StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE_NEW
-          )
-          Files.writeString(
-            outputDirectory.resolve("result.json"),
-            resultJson + "\n",
-            StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE_NEW
-          )
-        }
-        .mapError(_ =>
-          BatError.ProtocolViolation("live evidence publication failed")
-        )
+      documents = Chunk(
+        Some("result.json" -> resultJson),
+        evidence.map("evidence.json" -> _),
+        Some("telemetry.json" -> telemetryJson)
+      ).flatten
+      _ <- store.publish(
+        decision,
+        telemetry.records,
+        documents,
+        loaded.forbiddenArtifactValues
+      )
     yield decision
 
   private def readEnvironment: ZIO[Any, BatError, Map[String, String]] =
@@ -356,17 +383,30 @@ object LiveJavaProductionApp extends ZIOAppDefault:
       )
     )
 
-private enum LiveJavaAttempt:
+private[runner] enum LiveJavaAttempt:
   case Completed(result: ProductionRunResult)
   case Failed(error: BatError, telemetry: TelemetryDocument)
 
-private final case class LiveJavaEnvironment(
+private[runner] final case class LiveJavaPreparedAttempt(
+    store: LiveJavaAttemptStore,
+    attempt: LiveJavaAttempt
+)
+
+private[runner] final case class LiveJavaEnvironment(
     endpoint: String,
     modelId: String,
     modelRevision: String,
+    runtime: String,
     runtimeRevision: String,
+    templateRevision: String,
+    quantization: String,
+    topology: String,
+    nodeCount: Long,
+    reasoningEffort: String,
     image: String,
     resume: Boolean,
+    attemptId: AttemptId,
+    previousAttempt: Option[AttemptId],
     runId: String,
     repositoryId: String,
     baseCommit: String,
@@ -376,19 +416,88 @@ private final case class LiveJavaEnvironment(
     sourceRepository: Path,
     privateRoot: Path,
     outputDirectory: Path,
-    profile: JavaEvaluationProfile
-)
+    gitBinary: Path,
+    ociRuntime: Path,
+    uid: Int,
+    gid: Int,
+    profile: JavaEvaluationProfile,
+    oracleSha256: Option[String]
+):
+  override def toString: String =
+    "LiveJavaEnvironment(endpoint=<redacted>, paths=<redacted>, payload=<redacted>)"
 
-private object LiveJavaEnvironment:
+  def oraclePath: Path = profile match
+    case JavaEvaluationProfile.Javac(path, _, _) => path
+    case JavaEvaluationProfile.Maven(path, _, _) => path
+
+  def caseName: String = profile match
+    case _: JavaEvaluationProfile.Javac => "canary"
+    case _: JavaEvaluationProfile.Maven => "apache"
+
+  def evaluatorRevision: String = s"issue-25-$caseName-v1"
+
+  def verifiedOracleSha256: Either[BatError, String] =
+    oracleSha256.toRight(
+      BatError.ProtocolViolation("live Java oracle was not verified")
+    )
+
+  def forbiddenArtifactValues: Chunk[String] =
+    Chunk(
+      endpoint,
+      batRoot.toString,
+      sourceRepository.toString,
+      privateRoot.toString,
+      outputDirectory.toString,
+      oraclePath.toString
+    )
+
+  def bindingSha256: Either[BatError, String] =
+    verifiedOracleSha256.flatMap(oracle =>
+      StrictJson.sha256(
+        Json.Obj(
+          Chunk(
+            "endpoint" -> Json.Str(endpoint),
+            "model_id" -> Json.Str(modelId),
+            "model_revision" -> Json.Str(modelRevision),
+            "runtime" -> Json.Str(runtime),
+            "runtime_revision" -> Json.Str(runtimeRevision),
+            "template_revision" -> Json.Str(templateRevision),
+            "quantization" -> Json.Str(quantization),
+            "topology" -> Json.Str(topology),
+            "node_count" -> Json.Num(nodeCount),
+            "reasoning_effort" -> Json.Str(reasoningEffort),
+            "image" -> Json.Str(image),
+            "repository_id" -> Json.Str(repositoryId),
+            "base_commit" -> Json.Str(baseCommit),
+            "head_commit" -> Json.Str(headCommit),
+            "bat_commit" -> Json.Str(batCommit),
+            "case" -> Json.Str(caseName),
+            "evaluator_revision" -> Json.Str(evaluatorRevision),
+            "oracle_sha256" -> Json.Str(oracle)
+          )
+        ),
+        "live Java attempt binding"
+      )
+    )
+
+private[runner] object LiveJavaEnvironment:
   val Keys = Chunk(
     "BAT_LIVE_ARM",
     "BAT_LIVE_CASE",
     "BAT_LIVE_ENDPOINT",
     "BAT_LIVE_MODEL",
     "BAT_LIVE_MODEL_REVISION",
+    "BAT_LIVE_RUNTIME",
     "BAT_LIVE_RUNTIME_REVISION",
+    "BAT_LIVE_TEMPLATE_REVISION",
+    "BAT_LIVE_QUANTIZATION",
+    "BAT_LIVE_TOPOLOGY",
+    "BAT_LIVE_NODE_COUNT",
+    "BAT_LIVE_REASONING_EFFORT",
     "BAT_LIVE_IMAGE",
     "BAT_LIVE_RESUME",
+    "BAT_LIVE_ATTEMPT_ID",
+    "BAT_LIVE_PREVIOUS_ATTEMPT_ID",
     "BAT_LIVE_RUN_ID",
     "BAT_LIVE_REPOSITORY_ID",
     "BAT_LIVE_BASE_COMMIT",
@@ -398,7 +507,11 @@ private object LiveJavaEnvironment:
     "BAT_LIVE_SOURCE",
     "BAT_LIVE_PRIVATE_ROOT",
     "BAT_LIVE_OUTPUT",
-    "BAT_LIVE_ORACLE"
+    "BAT_LIVE_ORACLE",
+    "BAT_LIVE_GIT",
+    "BAT_LIVE_OCI_RUNTIME",
+    "BAT_LIVE_UID",
+    "BAT_LIVE_GID"
   )
 
   def from(values: Map[String, String]): Either[BatError, LiveJavaEnvironment] =
@@ -419,6 +532,27 @@ private object LiveJavaEnvironment:
           BatError.ProtocolViolation(s"invalid live path: $key")
         )
       }
+    def positiveLong(key: String): Either[BatError, Long] =
+      required(key).flatMap(text =>
+        text.toLongOption
+          .filter(_ > 0L)
+          .toRight(BatError.ProtocolViolation(s"invalid live number: $key"))
+      )
+    def nonnegativeInt(key: String): Either[BatError, Int] =
+      required(key).flatMap(text =>
+        text.toIntOption
+          .filter(_ >= 0)
+          .toRight(BatError.ProtocolViolation(s"invalid live number: $key"))
+      )
+    def optionalAttempt(key: String): Either[BatError, Option[AttemptId]] =
+      values.get(key).map(_.trim).filter(_.nonEmpty) match
+        case None        => Right(None)
+        case Some(value) =>
+          AttemptId
+            .from(value)
+            .left
+            .map(_ => BatError.ProtocolViolation("invalid live attempt ID"))
+            .map(Some(_))
     for
       arm <- required("BAT_LIVE_ARM")
       _ <- Either.cond(
@@ -449,7 +583,13 @@ private object LiveJavaEnvironment:
       endpoint <- required("BAT_LIVE_ENDPOINT")
       model <- required("BAT_LIVE_MODEL")
       revision <- required("BAT_LIVE_MODEL_REVISION")
+      runtimeName <- required("BAT_LIVE_RUNTIME")
       runtime <- required("BAT_LIVE_RUNTIME_REVISION")
+      template <- required("BAT_LIVE_TEMPLATE_REVISION")
+      quantization <- required("BAT_LIVE_QUANTIZATION")
+      topology <- required("BAT_LIVE_TOPOLOGY")
+      nodes <- positiveLong("BAT_LIVE_NODE_COUNT")
+      effort <- required("BAT_LIVE_REASONING_EFFORT")
       image <- required("BAT_LIVE_IMAGE")
       resumeText <- required("BAT_LIVE_RESUME")
       resume <- resumeText match
@@ -457,6 +597,19 @@ private object LiveJavaEnvironment:
         case "false" => Right(false)
         case _       =>
           Left(BatError.ProtocolViolation("live resume flag is invalid"))
+      attemptText <- required("BAT_LIVE_ATTEMPT_ID")
+      attempt <- AttemptId
+        .from(attemptText)
+        .left
+        .map(_ => BatError.ProtocolViolation("invalid live attempt ID"))
+      previous <- optionalAttempt("BAT_LIVE_PREVIOUS_ATTEMPT_ID")
+      _ <- Either.cond(
+        (resume && previous.nonEmpty) || (!resume && previous.isEmpty),
+        (),
+        BatError.ProtocolViolation(
+          "live resume requires exactly one previous attempt"
+        )
+      )
       runId <- required("BAT_LIVE_RUN_ID")
       repository <- required("BAT_LIVE_REPOSITORY_ID")
       base <- required("BAT_LIVE_BASE_COMMIT")
@@ -466,13 +619,25 @@ private object LiveJavaEnvironment:
       source <- absolute("BAT_LIVE_SOURCE")
       privateRoot <- absolute("BAT_LIVE_PRIVATE_ROOT")
       output <- absolute("BAT_LIVE_OUTPUT")
+      git <- absolute("BAT_LIVE_GIT")
+      oci <- absolute("BAT_LIVE_OCI_RUNTIME")
+      uid <- nonnegativeInt("BAT_LIVE_UID")
+      gid <- nonnegativeInt("BAT_LIVE_GID")
     yield LiveJavaEnvironment(
       endpoint,
       model,
       revision,
+      runtimeName,
       runtime,
+      template,
+      quantization,
+      topology,
+      nodes,
+      effort,
       image,
       resume,
+      attempt,
+      previous,
       runId,
       repository,
       base,
@@ -482,5 +647,104 @@ private object LiveJavaEnvironment:
       source,
       privateRoot,
       output,
-      profile
+      git,
+      oci,
+      uid,
+      gid,
+      profile,
+      None
     )
+
+private[runner] object LiveJavaPreflight:
+  def verify(
+      value: LiveJavaEnvironment
+  ): ZIO[Any, BatError, LiveJavaEnvironment] =
+    for
+      _ <- ZIO
+        .attemptBlocking {
+          if value == null then throw IllegalArgumentException("missing config")
+          val bat = realDirectory(value.batRoot)
+          val source = realDirectory(value.sourceRepository)
+          val privateRoot = realDirectory(value.privateRoot)
+          val output = realDirectory(value.outputDirectory)
+          val oracle = value.oraclePath.toRealPath()
+          val git = realExecutable(value.gitBinary)
+          val oci = realExecutable(value.ociRuntime)
+          if git == oci then throw IllegalArgumentException("binary alias")
+          if !output.startsWith(privateRoot) || output == privateRoot then
+            throw IllegalArgumentException("output boundary")
+          val disjoint = Chunk(
+            bat -> source,
+            bat -> privateRoot,
+            source -> privateRoot,
+            source -> oracle,
+            privateRoot -> oracle
+          )
+          if disjoint.exists { case (left, right) => overlaps(left, right) }
+          then throw IllegalArgumentException("path overlap")
+          if Files.isSymbolicLink(value.oraclePath) ||
+            (!Files.isRegularFile(oracle, LinkOption.NOFOLLOW_LINKS) &&
+              !Files.isDirectory(oracle, LinkOption.NOFOLLOW_LINKS))
+          then throw IllegalArgumentException("oracle boundary")
+          ()
+        }
+        .mapError(_ =>
+          BatError.ProtocolViolation("live Java preflight boundary is invalid")
+        )
+      oracle <- JavaEvaluationOracleInspection.inspect(value.profile)
+      _ <- verifyBatCheckout(value)
+    yield value.copy(oracleSha256 = Some(oracle.sha256))
+
+  private def verifyBatCheckout(
+      value: LiveJavaEnvironment
+  ): ZIO[Any, BatError, Unit] =
+    for
+      config <- ZIO
+        .fromEither(GitRunnerConfig.make(value.gitBinary))
+        .mapError(_ => invalidCheckout)
+      runner = GitRunner.live(config)
+      status <- runner
+        .run(
+          GitInvocation(
+            value.batRoot,
+            Chunk("status", "--porcelain=v1", "--untracked-files=all")
+          )
+        )
+        .mapError(_ => invalidCheckout)
+      head <- runner
+        .run(
+          GitInvocation(
+            value.batRoot,
+            Chunk("rev-parse", "--verify", "HEAD^{commit}")
+          )
+        )
+        .mapError(_ => invalidCheckout)
+      _ <- ZIO
+        .fail(invalidCheckout)
+        .unless(
+          status.exitCode == 0 && status.output.trim.isEmpty &&
+            head.exitCode == 0 && head.output.trim == value.batCommit
+        )
+    yield ()
+
+  private def invalidCheckout: BatError =
+    BatError.ProtocolViolation(
+      "live Java BAT checkout is not the clean pinned commit"
+    )
+
+  private def realDirectory(path: Path): Path =
+    val real = path.toRealPath()
+    if Files.isSymbolicLink(path) ||
+      !Files.isDirectory(real, LinkOption.NOFOLLOW_LINKS)
+    then throw IllegalArgumentException("directory boundary")
+    real
+
+  private def realExecutable(path: Path): Path =
+    val real = path.toRealPath()
+    if !Files.isRegularFile(real, LinkOption.NOFOLLOW_LINKS) ||
+      !Files.isExecutable(real)
+    then throw IllegalArgumentException("executable boundary")
+    real
+
+  private def overlaps(left: Path, right: Path): Boolean =
+    left.startsWith(right) || right.startsWith(left)

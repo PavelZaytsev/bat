@@ -128,6 +128,39 @@ object ProductionRunnerSpec extends ZIOSpecDefault:
             )
         )
       },
+      test("starts a resumed run from durable state in a fresh model context") {
+        for
+          lifecycle <- Ref.make(Chunk.empty[String])
+          requests <- Ref.make(Chunk.empty[ModelRequest[TestContext]])
+          sinks <- Ref.make(Chunk.empty[Telemetry])
+          handoffs <- Ref.make(0)
+          identity = backendIdentity("backend-resume", "model-resume")
+          _ <- ProductionRunner.run(
+            config(identity, "runner-resume-attempt", resume = true),
+            completingFactory(identity, requests, sinks, lifecycle),
+            workerFactory(
+              readyState,
+              safeTools,
+              handoffs,
+              lifecycle,
+              "runner-resume-attempt"
+            ),
+            passingEvaluator(lifecycle)
+          )
+          user = requests.get.map(
+            _.head.inputs.collectFirst { case InputEvent.User(value) =>
+              value.text
+            }
+          )
+          text <- user
+        yield assertTrue(
+          text.exists(_.contains("fresh model context")),
+          text.exists(_.contains("persisted BDR tracker")),
+          text.exists(_.contains("worker_workspace and bdr_audit_summary")),
+          text.exists(_.contains("Do not recreate completed evidence")),
+          !text.exists(_.contains("Begin by reading worker_target_diff."))
+        )
+      },
       test("uses real BDR tools and rejects every toy tool before inference") {
         for
           goodLifecycle <- Ref.make(Chunk.empty[String])
@@ -956,7 +989,8 @@ object ProductionRunnerSpec extends ZIOSpecDefault:
 
   private def config(
       identity: BackendIdentity,
-      runId: String
+      runId: String,
+      resume: Boolean = false
   ): ProductionRunConfig =
     unsafe(
       ProductionRunConfig.make(
@@ -966,7 +1000,8 @@ object ProductionRunnerSpec extends ZIOSpecDefault:
         bdrCommit = Commit,
         budgets = unsafe(
           BudgetLimits.make(4, 8, 30.seconds, maxTotalTokens = 1000L)
-        )
+        ),
+        resumeAttempt = resume
       )
     )
 

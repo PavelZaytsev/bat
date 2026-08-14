@@ -1,12 +1,14 @@
 # Handoff — production-runner integration
 
-A self-contained brief for the remaining deployment integration after the provider-neutral runner
-core. Advances #25 Phase 2 without claiming the six-phase worker acceptance is complete.
+A self-contained brief for the production-runner boundary. PR #31 now supplies the live launcher,
+closed canary action, restart-aware attempts, and pinned OCI evaluator described here, but does not
+claim the six-phase live acceptance until a retained field run exists. Operators should use
+[`docs/live-java-acceptance.md`](../live-java-acceptance.md).
 
-**You do not need a model endpoint, a GPU, or the exo cluster to finish the offline composition.**
-The runner, worker discovery surface, receipt-bound BDR bridge, and typed GPT-OSS backend factories
-exist. The remaining work is a production-compatible canary/build cartridge and a concrete sealed
-evaluator; current tests use an injected evaluator double and do not claim OCI evaluator coverage.
+**You do not need a model endpoint, a GPU, or the exo cluster to verify the offline composition.**
+The runner, worker discovery surface, receipt-bound BDR bridge, typed GPT-OSS backend factories,
+closed dependency-free canary action, and pinned evaluator are covered by ordinary tests. The
+remaining proof is a real maintained canary attempt against an operator-pinned deployment.
 
 ## Outcome
 
@@ -19,16 +21,16 @@ Backend (any dialect)
   -> AgenticLoop + shared telemetry sink
   -> real BdrTools + isolated Java worker tools
   -> ready-for-review handoff
-  -> injected trusted evaluator (concrete OCI implementation still required)
+  -> pinned networkless OCI evaluator
 ```
 
 ## Why this is the critical path
 
 `bat.quickstart.ToyQuickstart` wires a *scripted* backend to *toy* tools.
 `bat.probe.LiveGptOssProbe` wires a *real* backend to *stub* tools. `bat.runner.ProductionRunner`
-now supplies the diagonal composition for a real backend and real Java-worker tools. It deliberately
-does not manufacture a project build cartridge, worker image, application config loader, or sealed
-evaluator implementation.
+supplies the diagonal composition for a real backend and real Java-worker tools. The issue-25 live
+profile adds one reviewed worker image/configuration and evaluator; project-specific build
+cartridges remain separate trusted integrations.
 
 ## Read first
 
@@ -54,6 +56,9 @@ evaluator implementation.
 | OCI sandbox | `loop/src/main/scala/bat/worker/oci/OciSandbox.scala` |
 | backend seam | `loop/src/main/scala/bat/backend/wire/WireDialect.scala` |
 | production composition | `loop/src/main/scala/bat/runner/ProductionRunner.scala` |
+| restart-aware live launcher | `loop/src/main/scala/bat/runner/LiveJavaProductionApp.scala` |
+| durable attempt checkpoint/publication | `loop/src/main/scala/bat/runner/LiveJavaAttemptStore.scala` |
+| pinned networkless evaluator | `loop/src/main/scala/bat/runner/OciJavaEvaluator.scala` |
 | versioned actor contract | `loop/src/main/resources/bat/runner/java-bdr-v1.md` |
 | end-to-end six-phase example | `loop/src/main/scala/bat/quickstart/ToyScenario.scala` |
 | telemetry sink | `loop/src/main/scala/bat/telemetry/Telemetry.scala` |
@@ -143,7 +148,7 @@ scala-cli test --server=false loop
 
 - [x] A runner composes a typed GPT-OSS backend factory, `AgenticLoop`, real `BdrTools`, the isolated
       Java worker, one telemetry sink, receipt-bound handoff evidence, and a trusted evaluator seam.
-- [ ] A concrete sealed OCI evaluator implementation binds its report to the handed-off commit and
+- [x] A concrete sealed OCI evaluator implementation binds its report to the handed-off commit and
       patch digest.
 - [ ] A production-worker scripted actor drives the six-phase canary to a terminal BDR state, with
       the sealed evaluator passing on the delivered commit and **no provider call**. It must not use
@@ -160,7 +165,7 @@ scala-cli test --server=false loop
 
 ## Explicit non-goals
 
-- No live model run, no cluster work, no 120b.
+- No claim that the live canary or 120B Java quality is proven before a retained attempt bundle.
 - No Bazel support. The worker currently exposes only the reviewed offline Maven/Gradle path;
   project-specific build systems, images, targets, and dependency snapshots belong to a separate
   integration task.

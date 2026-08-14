@@ -184,6 +184,7 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
             expectedId = OperationId
               .derive(
                 fixture.session.runId,
+                fixture.session.attemptId,
                 "provider-call-42",
                 "worker_git_status"
               )

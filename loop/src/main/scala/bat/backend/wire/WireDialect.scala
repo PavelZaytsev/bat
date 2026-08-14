@@ -9,9 +9,12 @@ import zio.Duration
 
 /** Classification of a provider status that is not `200`.
   *
-  * `retryable` is a statement about replay safety, not about hope. Only a
-  * status that proves the request was never admitted may be retried, because
-  * replaying an admitted POST duplicates unreported inference spend.
+  * `retryable` is a statement about the selected replay policy, not about hope.
+  * The fail-closed policy retries only a status that proves the request was
+  * never admitted. An explicitly opted-in, self-hosted deployment may also
+  * accept duplicate inference spend while recovering a model process; neither
+  * policy can duplicate a BAT tool effect because retries precede turn
+  * completion.
   */
 final case class WireStatus(code: String, retryable: Boolean)
 
@@ -64,6 +67,41 @@ object WireRetryPolicy:
       value.toNanos <= Long.MaxValue / multiplier
     catch case NonFatal(_) => false
 
+/** Replay policy for one immutable, prepared model turn.
+  *
+  * The shared backend does not expose a turn to the controller until the
+  * response is complete, so no BAT tool effect can occur while one of these
+  * retries is in progress. `RetryTransientFailures` is therefore suitable for a
+  * self-hosted endpoint whose process may disappear and return during a run: it
+  * may duplicate provider inference, but it cannot duplicate a tool effect.
+  * Hosted providers remain fail-closed unless their dialect explicitly opts in.
+  */
+enum WireReplayPolicy:
+  case FailClosed
+  case RetryTransientFailures
+
+  /** Adds `404` recovery for a fixed Chat path that the trusted supervisor
+    * already qualified. This is not permission to discover or fall back to a
+    * different provider dialect.
+    */
+  case RetryQualifiedSelfHosted
+
+  private[backend] def retries(error: TransportError): Boolean =
+    retriesTransients && (error match
+      case TransportError.OpenFailed | TransportError.OpenTimedOut |
+          TransportError.BodyFailed | TransportError.BodyTimedOut =>
+        true
+      case _ => false)
+
+  private[backend] def retriesStatus(code: Int): Boolean =
+    (retriesTransients &&
+      (code == 408 || (code >= 500 && code <= 599))) ||
+      (this == RetryQualifiedSelfHosted && code == 404)
+
+  private def retriesTransients: Boolean = this match
+    case FailClosed                                        => false
+    case RetryTransientFailures | RetryQualifiedSelfHosted => true
+
 /** One provider wire dialect.
   *
   * [[StreamingWireBackend]] owns sockets, SSE framing, retry, timing, and
@@ -103,6 +141,11 @@ trait WireDialect:
 
   def retryPolicy: WireRetryPolicy
 
+  /** Fail closed by default. A dialect may opt into replay only when its
+    * deployment contract accepts duplicate inference before turn completion.
+    */
+  def replayPolicy: WireReplayPolicy = WireReplayPolicy.FailClosed
+
   /** Dialect ceiling on generated tokens for one turn. The backend narrows this
     * with the remaining run budget before calling [[beginTurn]].
     */
@@ -135,13 +178,24 @@ trait WireDialect:
   def statusFailure(code: Int): WireStatus =
     if code == 429 then WireStatus(s"${errorPrefix}_rate_limited", true)
     else if code == 408 then
-      WireStatus(s"${errorPrefix}_request_timeout", false)
+      WireStatus(
+        s"${errorPrefix}_request_timeout",
+        replayPolicy.retriesStatus(code)
+      )
     else if code == 401 || code == 403 then
       WireStatus(s"${errorPrefix}_unauthorized", false)
-    else if code == 404 || code == 405 then
+    else if code == 404 then
+      WireStatus(
+        s"${errorPrefix}_endpoint_unavailable",
+        replayPolicy.retriesStatus(code)
+      )
+    else if code == 405 then
       WireStatus(s"${errorPrefix}_endpoint_unavailable", false)
     else if code >= 500 then
-      WireStatus(s"${errorPrefix}_endpoint_unavailable", false)
+      WireStatus(
+        s"${errorPrefix}_endpoint_unavailable",
+        replayPolicy.retriesStatus(code)
+      )
     else WireStatus(s"${errorPrefix}_http_status", false)
 
   /** Stable failure used whenever the endpoint violated the pinned dialect. */

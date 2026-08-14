@@ -274,7 +274,12 @@ object WorkerTools:
       session: JavaWorkerSession,
       toolName: String
   ): OperationId =
-    OperationId.derive(session.runId, invocation.callId.value, toolName)
+    OperationId.derive(
+      session.runId,
+      session.attemptId,
+      invocation.callId.value,
+      toolName
+    )
 
   private def receiptJson(
       result: OperationResult,
@@ -457,7 +462,7 @@ object WorkerTools:
 
     val JavaBuild = definition(
       "worker_java_build",
-      "Run one structured offline Maven or Gradle action in a disposable isolated copy.",
+      "Run one structured offline Maven, Gradle, or dependency-free javac test action in a disposable isolated copy.",
       writerProperties(
         "action" -> enumSchema(JavaBuildAction.values.map(_.wire)*),
         "test_selector" -> stringSchema

@@ -124,6 +124,35 @@ object RunId:
 
   extension (self: RunId) def value: String = self
 
+/** Identifies one controller attempt within a logical worker run.
+  *
+  * A restarted controller must use a fresh attempt ID. This keeps provider call
+  * IDs, which may restart from the same values, in a distinct durable operation
+  * namespace while the logical [[RunId]] and workspace remain unchanged.
+  */
+opaque type AttemptId = String
+
+object AttemptId:
+  private val LegacyValue = "legacy"
+
+  def from(value: String): Either[WorkerError, AttemptId] =
+    WorkerValidation
+      .id(value, "attempt_id")
+      .flatMap(candidate =>
+        Either.cond(
+          candidate != LegacyValue,
+          candidate,
+          WorkerError.InvalidInput(
+            "invalid_attempt_id",
+            "attempt_id uses a reserved compatibility namespace"
+          )
+        )
+      )
+
+  extension (self: AttemptId) def value: String = self
+
+  private[worker] val Legacy: AttemptId = LegacyValue
+
 opaque type RepositoryId = String
 
 object RepositoryId:
@@ -148,15 +177,37 @@ object OperationId:
 
   extension (self: OperationId) def value: String = self
 
+  /** Compatibility namespace for callers that do not manage controller
+    * attempts. Restart-aware controllers must call the overload that accepts an
+    * explicit [[AttemptId]].
+    */
   def derive(runId: RunId, callId: String, toolName: String): OperationId =
-    val payload =
+    digest(
       s"bat-worker-operation-v1\n${runId.value}\n$callId\n$toolName"
-    val digest = java.security.MessageDigest
+    )
+
+  def derive(
+      runId: RunId,
+      attemptId: AttemptId,
+      callId: String,
+      toolName: String
+  ): OperationId =
+    if attemptId == AttemptId.Legacy then derive(runId, callId, toolName)
+    else
+      digest(
+        s"bat-worker-operation-v2\n${runId.value}\n${attemptId.value}\n$callId\n$toolName"
+      )
+
+  private def digest(payload: String): OperationId =
+    val value = java.security.MessageDigest
       .getInstance("SHA-256")
       .digest(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8))
       .map(byte => f"${byte & 0xff}%02x")
       .mkString
-    digest
+    from(value).fold(
+      error => throw new IllegalStateException(error.safeMessage),
+      identity
+    )
 
 opaque type GitObjectId = String
 

@@ -682,6 +682,7 @@ object WorkspaceProvisioner:
 
 final class JavaWorkerSession private (
     val runId: RunId,
+    val attemptId: AttemptId,
     val workspace: RunWorkspace,
     rawBdr: BdrSession,
     authority: PullRequestAuthority,
@@ -1339,8 +1340,39 @@ object JavaWorkerSession:
   private val EmptyDigest =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
+  /** Compatibility overload for callers with no controller restart model.
+    * Restart-aware controllers must use the explicit-attempt overload.
+    */
   def start(
       runId: RunId,
+      baseRepository: RepositoryId,
+      pullRequestId: PullRequestId,
+      sourceRepository: Path,
+      authority: PullRequestAuthority,
+      sourceVerifier: PinnedGitSource,
+      workspaceGitRunner: GitRunner,
+      sandbox: OciSandbox,
+      bdrLifecycle: WorkerBdrLifecycle,
+      config: WorkerRuntimeConfig
+  ): ZIO[Scope, WorkerError, JavaWorkerSession] =
+    start(
+      runId,
+      AttemptId.Legacy,
+      baseRepository,
+      pullRequestId,
+      sourceRepository,
+      authority,
+      sourceVerifier,
+      workspaceGitRunner,
+      sandbox,
+      bdrLifecycle,
+      config
+    )
+
+  /** Opens a new logical run in an explicit controller-attempt namespace. */
+  def start(
+      runId: RunId,
+      attemptId: AttemptId,
       baseRepository: RepositoryId,
       pullRequestId: PullRequestId,
       sourceRepository: Path,
@@ -1395,6 +1427,7 @@ object JavaWorkerSession:
       actionMutex <- Semaphore.make(1L)
     yield JavaWorkerSession(
       runId,
+      attemptId,
       workspace,
       bdr,
       authority,
@@ -1406,8 +1439,33 @@ object JavaWorkerSession:
       actionMutex
     )
 
+  /** Compatibility overload for callers with no controller restart model.
+    * Restart-aware controllers must use the explicit-attempt overload.
+    */
   def resume(
       runId: RunId,
+      authority: PullRequestAuthority,
+      workspaceGitRunner: GitRunner,
+      sandbox: OciSandbox,
+      bdrLifecycle: WorkerBdrLifecycle,
+      config: WorkerRuntimeConfig
+  ): ZIO[Scope, WorkerError, JavaWorkerSession] =
+    resume(
+      runId,
+      AttemptId.Legacy,
+      authority,
+      workspaceGitRunner,
+      sandbox,
+      bdrLifecycle,
+      config
+    )
+
+  /** Resumes a logical run in a fresh or previously persisted controller
+    * attempt namespace. A controller restart must supply a new attempt ID.
+    */
+  def resume(
+      runId: RunId,
+      attemptId: AttemptId,
       authority: PullRequestAuthority,
       workspaceGitRunner: GitRunner,
       sandbox: OciSandbox,
@@ -1465,6 +1523,7 @@ object JavaWorkerSession:
       actionMutex <- Semaphore.make(1L)
     yield JavaWorkerSession(
       runId,
+      attemptId,
       workspace,
       bdr,
       authority,

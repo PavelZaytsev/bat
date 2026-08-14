@@ -102,6 +102,10 @@ final class StreamingWireBackend[D <: WireDialect] private (
       attribution: BdrAttribution,
       attempt: Int
   ): IO[BatError, ModelTurn[Context]] =
+    // Every attempt receives the same canonical body, headers, and immutable
+    // dialect seed. A model turn is returned only after framing and dialect
+    // validation finish, which keeps this replay boundary strictly before any
+    // controller-owned tool effect.
     executeAttempt(prepared, attribution, attempt).catchSome {
       case failure: BatError.BackendFailure
           if failure.retryable && attempt < dialect.retryPolicy.maxAttempts =>
@@ -222,9 +226,9 @@ final class StreamingWireBackend[D <: WireDialect] private (
               s"${dialect.errorPrefix}_attempt_interrupted"
             else s"${dialect.errorPrefix}_attempt_defect"
           )
-        // Only 429 proves this request was not admitted. A generic status or
-        // 5xx can arrive after inference began, so classifying it as rejected
-        // would overstate replay safety.
+        // Only 429 proves this request was not admitted. An opted-in
+        // self-hosted replay after a transport failure, timeout, or 5xx may
+        // duplicate inference, so it remains Failed rather than Rejected.
         val rejected = code == s"${dialect.errorPrefix}_rate_limited"
         val classified =
           if rejected then ProviderAttemptOutcome.Rejected
@@ -322,7 +326,7 @@ final class StreamingWireBackend[D <: WireDialect] private (
     BatError.BackendFailure(
       errorCode = s"${dialect.errorPrefix}_${error.code}",
       safeMessage = s"${dialect.dialectLabel} HTTP transport failed",
-      retryable = false
+      retryable = dialect.replayPolicy.retries(error)
     )
 
   private def mapSseError(error: SseError): BatError =

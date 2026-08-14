@@ -91,17 +91,74 @@ object WorkerModelSpec extends ZIOSpecDefault:
       ) {
         val runOne = unsafe(RunId.from("run-one"))
         val runTwo = unsafe(RunId.from("run-two"))
-        val first = OperationId.derive(runOne, "call_ABC:42", "apply_patch")
-        val replay = OperationId.derive(runOne, "call_ABC:42", "apply_patch")
-        val otherRun = OperationId.derive(runTwo, "call_ABC:42", "apply_patch")
-        val otherTool = OperationId.derive(runOne, "call_ABC:42", "git_commit")
+        val attemptOne = unsafe(AttemptId.from("attempt-1"))
+        val attemptTwo = unsafe(AttemptId.from("attempt-2"))
+        val first = OperationId.derive(
+          runOne,
+          attemptOne,
+          "call_ABC:42",
+          "apply_patch"
+        )
+        val replay = OperationId.derive(
+          runOne,
+          attemptOne,
+          "call_ABC:42",
+          "apply_patch"
+        )
+        val otherAttempt = OperationId.derive(
+          runOne,
+          attemptTwo,
+          "call_ABC:42",
+          "apply_patch"
+        )
+        val otherRun = OperationId.derive(
+          runTwo,
+          attemptOne,
+          "call_ABC:42",
+          "apply_patch"
+        )
+        val otherTool = OperationId.derive(
+          runOne,
+          attemptOne,
+          "call_ABC:42",
+          "git_commit"
+        )
+        val legacy = OperationId.derive(
+          runOne,
+          "call_ABC:42",
+          "apply_patch"
+        )
+        val explicitLegacy = OperationId.derive(
+          runOne,
+          AttemptId.Legacy,
+          "call_ABC:42",
+          "apply_patch"
+        )
 
         assertTrue(
           first == replay,
+          first != otherAttempt,
           first != otherRun,
           first != otherTool,
+          legacy == explicitLegacy,
+          first != legacy,
           first.value.matches("[0-9a-f]{64}"),
           OperationId.from(first.value).contains(first)
+        )
+      },
+      test("validates bounded controller attempt identities") {
+        val valid = AttemptId.from("restart-002")
+        val uppercase = AttemptId.from("Restart-002")
+        val path = AttemptId.from("../../restart")
+        val oversized = AttemptId.from("a" * 65)
+        val reserved = AttemptId.from("legacy")
+
+        assertTrue(
+          valid.toOption.exists(_.value == "restart-002"),
+          errorCode(uppercase).contains("invalid_attempt_id"),
+          errorCode(path).contains("invalid_attempt_id"),
+          errorCode(oversized).contains("invalid_attempt_id"),
+          errorCode(reserved).contains("invalid_attempt_id")
         )
       },
       test("operation binding validates policy and optional image digests") {

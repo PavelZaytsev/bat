@@ -126,7 +126,8 @@ final case class ProductionRunConfig private (
     reasoningEffort: String,
     bdrCommit: String,
     budgets: BudgetLimits,
-    requiredCapabilities: Set[Capability] = Set(Capability.Streaming)
+    requiredCapabilities: Set[Capability] = Set(Capability.Streaming),
+    resumeAttempt: Boolean = false
 )
 
 object ProductionRunConfig:
@@ -145,7 +146,8 @@ object ProductionRunConfig:
       reasoningEffort: String,
       bdrCommit: String,
       budgets: BudgetLimits,
-      requiredCapabilities: Set[Capability] = Set(Capability.Streaming)
+      requiredCapabilities: Set[Capability] = Set(Capability.Streaming),
+      resumeAttempt: Boolean = false
   ): Either[BatError, ProductionRunConfig] =
     val effort = Option(reasoningEffort).map(_.trim).getOrElse("")
     val runIdText =
@@ -178,7 +180,8 @@ object ProductionRunConfig:
           effort,
           bdrCommit,
           budgets,
-          requiredCapabilities
+          requiredCapabilities,
+          resumeAttempt
         )
       )
 
@@ -786,7 +789,7 @@ object ProductionRunner:
         )
       )
       developer <- ZIO.fromEither(DeveloperInput.make(prompt.text))
-      user <- ZIO.fromEither(bootstrapUser(bootstrap))
+      user <- ZIO.fromEither(bootstrapUser(bootstrap, config.resumeAttempt))
       spec = RunSpec.make(
         RunMode.FullWriter,
         pins,
@@ -820,16 +823,27 @@ object ProductionRunner:
     yield ActorResult(loop, handoff, contract, bootstrap)
 
   private def bootstrapUser(
-      value: WorkerBootstrap
+      value: WorkerBootstrap,
+      resumeAttempt: Boolean
   ): Either[BatError, UserInput] =
+    val opening =
+      if resumeAttempt then
+        """Continue the existing pinned Java BAT run from its durable state.
+          |This is a fresh model context: prior reasoning and tool-call IDs are unavailable.
+          |Treat the persisted BDR tracker, worker workspace, and completed receipts as the only authority.
+          |First read worker_workspace and bdr_audit_summary, then follow the current BDR next action.
+          |Do not recreate completed evidence or mutations; read worker_target_diff only when the current action needs the original change.""".stripMargin
+      else
+        """Analyze and repair the pinned Java pull-request change through all six BDR phases.
+          |Begin by reading worker_target_diff.""".stripMargin
     UserInput.make(
-      s"""Analyze and repair the pinned Java pull-request change through all six BDR phases.
+      s"""$opening
          |Trusted starting values (refresh with worker_workspace after any mutation):
          |base_commit=${value.baseCommit}
          |starting_head_commit=${value.startingHeadCommit}
          |workspace_revision=${value.workspaceRevision}
          |workspace_fingerprint=${value.workspaceFingerprint}
-         |Begin by reading worker_target_diff. Stop only at a validated BDR handoff.""".stripMargin
+         |Stop only at a validated BDR handoff.""".stripMargin
     )
 
 private final case class JavaBdrPrompt(
