@@ -1,0 +1,92 @@
+agent:
+  system_template: |
+    You are participating in a controlled model-capability experiment.
+
+    The Java repository is at /workspace/repo. The complete, original BDRv1 materials are at
+    /workspace/bdr. Read the materials completely, in the order specified by their README, and use
+    BDRv1 as the methodology. Do not substitute another software-engineering workflow or compress
+    BDR into a new protocol. Its phases are evidence checkpoints: move forward, rewind, repartition,
+    or revisit earlier evidence whenever the work requires it.
+
+    Work autonomously. The product repository is read-only in this planning experiment. The only
+    durable file you may change is /workspace/bdr/slices_progress.yaml. /workspace/scratch is
+    writable but disposable and may hold build output or temporary probes. Treat code, command
+    output, and measured behavior as evidence. Do not claim that a command or test ran unless it
+    actually ran. A green tracker check proves only the rules it contains, not the semantics.
+
+    You have one tool named bash. Shell calls run independently, so include an explicit working
+    directory in each command when needed. Use the tool repeatedly for as long as the investigation
+    needs; there is no requirement to move monotonically or finish in a fixed number of turns.
+
+    When the requested work is genuinely complete, include the requested final report in your
+    response and call bash exactly with:
+      echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+
+    The final report must state: (1) K, I, k_kind, authority, consumer, and code evidence for each
+    finding; (2) the partition by K and what would falsify it; (3) the value or ownership structure
+    that should carry K; (4) the next justified phase action, including any rewind, split, or
+    transfer; (5) the honest tracker changes and what slices.py can and cannot prove; and (6) every
+    unresolved foreign fact or judgment and its cheapest resolution.
+
+  instance_template: |
+    {{task}}
+
+  step_limit: 0
+  wall_time_limit_seconds: 28800
+  cost_limit: 0
+  max_consecutive_format_errors: 5
+
+environment:
+  environment_class: docker
+  image: bdrv1-stage1-java:20260815
+  cwd: /workspace
+  timeout: 300
+  container_timeout: 9h
+  run_args:
+    - --rm
+    - --network=none
+    - --mount=type=bind,source=/private/tmp/bdrv1-stage1-base,target=/workspace,readonly
+    - --mount=type=bind,source=/private/tmp/bdrv1-stage1-qwen/slices_progress.yaml,target=/workspace/bdr/slices_progress.yaml
+    - --mount=type=bind,source=/private/tmp/bdrv1-stage1-qwen/scratch,target=/workspace/scratch
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    GIT_PAGER: cat
+
+model:
+  model_class: litellm
+  model_name: hosted_vllm/bdr-candidate
+  cost_tracking: ignore_errors
+  observation_template: |
+    {%- if output.output | length < 30000 -%}
+    {
+      "returncode": {{ output.returncode }},
+      "output": {{ output.output | tojson }}
+      {%- if output.exception_info %}, "exception_info": {{ output.exception_info | tojson }}{% endif %}
+    }
+    {%- else -%}
+    {
+      "returncode": {{ output.returncode }},
+      "output_head": {{ output.output[:15000] | tojson }},
+      "output_tail": {{ output.output[-15000:] | tojson }},
+      "elided_chars": {{ output.output | length - 30000 }},
+      "warning": "Output was elided; read the missing range explicitly."
+      {%- if output.exception_info %}, "exception_info": {{ output.exception_info | tojson }}{% endif %}
+    }
+    {%- endif %}
+  format_error_template: |
+    Tool-call validation failed:
+    <error>{{ error }}</error>
+    Continue the same investigation. Call the bash tool with JSON arguments of the form:
+      {"command": "your command"}
+    If the task is complete, call only:
+      {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}
+  model_kwargs:
+    api_base: http://127.0.0.1:8000/v1
+    api_key: EMPTY
+    drop_params: false
+    max_tokens: 32768
+    parallel_tool_calls: false
+    reasoning_effort: medium
+    stream: false
+    temperature: 0.2
