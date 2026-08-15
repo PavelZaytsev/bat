@@ -224,7 +224,7 @@ private[runner] final class LiveJavaAttemptStore private (
         },
         "live attempt document name is invalid"
       )
-      _ <- ZIO.foreachDiscard(documents) { case (_, contents) =>
+      parsedDocuments <- ZIO.foreach(documents) { case (_, contents) =>
         ZIO.fromEither(StrictJson.parse(contents, "live attempt document"))
       }
       payload = documents.map(_._2).mkString("\n")
@@ -240,7 +240,10 @@ private[runner] final class LiveJavaAttemptStore private (
       )
       _ <- fail(
         !forbidden.exists(payload.contains) &&
-          !encodedForbidden.exists(payload.contains),
+          !encodedForbidden.exists(payload.contains) &&
+          !parsedDocuments.exists(
+            LiveJavaAttemptStore.containsForbidden(_, forbidden)
+          ),
         "live attempt publication failed the redaction check"
       )
       documentDigests = documents.map { case (name, contents) =>
@@ -277,13 +280,7 @@ private[runner] final class LiveJavaAttemptStore private (
       _ <- beforeCommit
       _ <- (ZIO
         .attemptBlocking {
-          if Files.exists(destination, LinkOption.NOFOLLOW_LINKS) then
-            throw IllegalStateException("destination exists")
-          val _ = Files.move(
-            staging,
-            destination,
-            StandardCopyOption.ATOMIC_MOVE
-          )
+          val _ = Files.move(staging, destination)
           LiveJavaAttemptStore.syncDirectory(destination.getParent)
         }
         .mapError(_ => publicationFailed) *> published.set(
@@ -531,9 +528,11 @@ private[runner] object LiveJavaAttemptStore:
   ): Either[BatError, Unit] =
     val staging = root.resolve(s".${attemptId.value}.in-progress")
     val destination = root.resolve(attemptId.value)
-    if !Files.exists(staging, LinkOption.NOFOLLOW_LINKS) ||
-      Files.exists(destination, LinkOption.NOFOLLOW_LINKS)
-    then Right(())
+    val stagingExists = Files.exists(staging, LinkOption.NOFOLLOW_LINKS)
+    val destinationExists = Files.exists(destination, LinkOption.NOFOLLOW_LINKS)
+    if stagingExists && destinationExists then
+      invalid("previous live attempt publication collided with output")
+    else if !stagingExists || destinationExists then Right(())
     else
       fileStep("previous live attempt publication is unavailable") {
         val checkpoint = staging.resolve("checkpoint.json")
@@ -573,11 +572,7 @@ private[runner] object LiveJavaAttemptStore:
                   }
               then throw IllegalStateException("incomplete staged publication")
               syncDirectory(staging)
-              val _ = Files.move(
-                staging,
-                destination,
-                StandardCopyOption.ATOMIC_MOVE
-              )
+              val _ = Files.move(staging, destination)
               syncDirectory(destination.getParent)
             }
           case _ => Right(())
@@ -932,6 +927,20 @@ private[runner] object LiveJavaAttemptStore:
 
   private def hex(bytes: Array[Byte]): String =
     bytes.iterator.map(byte => f"${byte & 0xff}%02x").mkString
+
+  private def containsForbidden(
+      value: Json,
+      forbidden: Chunk[String]
+  ): Boolean =
+    value match
+      case Json.Str(text)   => forbidden.exists(text.contains)
+      case Json.Obj(fields) =>
+        fields.exists { case (name, child) =>
+          forbidden.exists(name.contains) || containsForbidden(child, forbidden)
+        }
+      case Json.Arr(elements) =>
+        elements.exists(containsForbidden(_, forbidden))
+      case _ => false
 
   private def decodePublicationDigests(
       value: Json.Obj

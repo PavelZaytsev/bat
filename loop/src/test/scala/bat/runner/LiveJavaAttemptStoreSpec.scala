@@ -320,6 +320,67 @@ object LiveJavaAttemptStoreSpec extends ZIOSpecDefault:
           second.priorUsage.toolCalls == 0
         )
       },
+      test("never replaces a destination created at the publication race") {
+        for
+          fixture <- fixtureDirectory("bat-live-attempt-publish-race-")
+          runId = unsafe(TelemetryRunId.from("live-publication-race"))
+          attemptId = unsafe(AttemptId.from("attempt-001"))
+          store <- LiveJavaAttemptStore.prepare(
+            fixture.output,
+            fixture.project,
+            runId,
+            attemptId,
+            Binding,
+            None
+          )
+          telemetry <- store.telemetry
+          _ <- telemetry.emit(
+            TelemetryEvent.BdrCheckpoint(attribution(1, 3L))
+          )
+          records <- telemetry.records
+          destination = fixture.output.resolve("attempt-001")
+          raced <- store
+            .publishWithBeforeCommit(
+              "failed",
+              records,
+              Chunk(
+                "result.json" -> "{\"decision\":\"failed\"}",
+                "telemetry.json" -> "{\"records\":1}"
+              ),
+              Chunk.empty,
+              ZIO
+                .attemptBlocking(Files.createDirectory(destination))
+                .mapError(_ =>
+                  BatError.ProtocolViolation("test race setup failed")
+                )
+                .unit
+            )
+            .either
+          destinationEntries <- ZIO.attemptBlocking {
+            val stream = Files.list(destination)
+            try stream.count()
+            finally stream.close()
+          }
+          staging <- exists(
+            fixture.output.resolve(".attempt-001.in-progress")
+          )
+          next <- LiveJavaAttemptStore
+            .prepare(
+              fixture.output,
+              fixture.project,
+              runId,
+              unsafe(AttemptId.from("attempt-002")),
+              Binding,
+              Some(attemptId)
+            )
+            .either
+        yield assertTrue(
+          raced.left.exists(_.code == "protocol_violation"),
+          destinationEntries == 0L,
+          staging,
+          next.left.exists(_.code == "protocol_violation")
+        )
+      },
       test("rejects a corrupted terminal staging bundle during recovery") {
         for
           fixture <- fixtureDirectory("bat-live-attempt-corrupt-recovery-")
@@ -418,6 +479,17 @@ object LiveJavaAttemptStoreSpec extends ZIOSpecDefault:
               Chunk("seed line one\nseed line two")
             )
             .either
+          alternateEncodingLeak <- first
+            .publish(
+              "ready",
+              records,
+              Chunk(
+                "result.json" ->
+                  "{\"value\":\"https:\\/\\/private.invalid\"}"
+              ),
+              Chunk("https://private.invalid")
+            )
+            .either
           _ <- first.publish(
             "ready",
             records,
@@ -438,6 +510,7 @@ object LiveJavaAttemptStoreSpec extends ZIOSpecDefault:
         yield assertTrue(
           leak.left.exists(_.code == "protocol_violation"),
           encodedLeak.left.exists(_.code == "protocol_violation"),
+          alternateEncodingLeak.left.exists(_.code == "protocol_violation"),
           resume.left.exists(_.code == "protocol_violation")
         )
       }
