@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
 
 import zio.*
 
@@ -63,7 +64,6 @@ object OciSandbox:
     val containerName = runtimeResourceName(config, request)
     val fixedArguments = Chunk(
       "run",
-      "--rm",
       s"--name=$containerName",
       "--log-driver=none",
       "--init",
@@ -140,6 +140,8 @@ object OciSandbox:
 
   private[oci] val StagedWorkspaceScript =
     "mkdir -p /bat/run/repository /bat/run/cache/maven /bat/run/cache/gradle; " +
+      "if [ -d /opt/bat/cache/maven ]; then cp -R /opt/bat/cache/maven/. /bat/run/cache/maven/; fi; " +
+      "if [ -d /opt/bat/cache/gradle ]; then cp -R /opt/bat/cache/gradle/. /bat/run/cache/gradle/; fi; " +
       "cd /bat/source; " +
       "/bin/tar --exclude=./.git --exclude=./.bdr -cf /bat/run/source.tar .; " +
       "cd /bat/run/repository; " +
@@ -585,16 +587,24 @@ private[oci] object JdkOciProcessRunner extends OciProcessRunner:
           .attemptBlockingInterrupt {
             var attempt = 0
             var absent = false
-            while attempt < 3 && !absent do
-              absent = !listed(spec, cleanup)
-              if !absent then
-                val _ = runCleanupCommand(
-                  spec,
-                  cleanup.removeArgv,
-                  captureOutput = false
-                )
-                absent = !listed(spec, cleanup)
-              if !absent then Thread.sleep(100L)
+            while attempt < 120 && !absent do
+              observeAbsent(spec, cleanup) match
+                case Some(true)  => absent = true
+                case Some(false) =>
+                  // Docker Desktop may finish removing the container after
+                  // the client-side command times out. Always re-observe the
+                  // exact name before treating that timeout as a cleanup
+                  // failure.
+                  try
+                    val _ = runCleanupCommand(
+                      spec,
+                      cleanup.removeArgv,
+                      captureOutput = false
+                    )
+                  catch case NonFatal(_) => ()
+                  absent = observeAbsent(spec, cleanup).contains(true)
+                case None => ()
+              if !absent then Thread.sleep(250L)
               attempt += 1
             if !absent then
               throw new IllegalStateException("runtime resource remains")
@@ -605,6 +615,13 @@ private[oci] object JdkOciProcessRunner extends OciProcessRunner:
               "OCI runtime resource absence could not be confirmed"
             )
           )
+
+  private def observeAbsent(
+      spec: OciProcessSpec,
+      cleanup: OciRuntimeCleanup
+  ): Option[Boolean] =
+    try Some(!listed(spec, cleanup))
+    catch case NonFatal(_) => None
 
   private def listed(
       spec: OciProcessSpec,

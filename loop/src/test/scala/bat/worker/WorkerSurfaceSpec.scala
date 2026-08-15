@@ -184,6 +184,7 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
             expectedId = OperationId
               .derive(
                 fixture.session.runId,
+                fixture.session.attemptId,
                 "provider-call-42",
                 "worker_git_status"
               )
@@ -195,6 +196,236 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
             boolField(replayJson, "replayed").contains(true),
             requests.size == 1,
             requests.head.operationId == expectedId
+          )
+        }
+      },
+      test("classifies a rejected patch without duplicating bounded output") {
+        ZIO.scoped {
+          val diagnostic = Chunk.fromArray(
+            "patch did not apply\n".getBytes(StandardCharsets.UTF_8)
+          )
+          for
+            sandbox <- RecordingSandbox.makeWith(request =>
+              RecordingSandbox.result(
+                request,
+                Chunk.empty,
+                diagnostic,
+                OciRunOutcome.Exited(128)
+              )
+            )
+            fixture <- openSession(emptyGit, sandbox)
+            current <- fixture.session.currentWorkspace
+            registry <- fromBat(
+              ToolRegistry.make(WorkerTools.all(fixture.session))
+            )
+            output <- registry.execute(
+              functionCall(
+                "rejected-patch",
+                "worker_apply_patch",
+                merge(
+                  workspaceArguments(current),
+                  obj("patch" -> Json.Str(FinalPatch))
+                )
+              ),
+              RunMode.FullWriter
+            )
+            json = objectOutput(output)
+            failure = objectField(json, "failure")
+          yield assertTrue(
+            stringField(json, "outcome").contains("exited"),
+            numberField(json, "exit_code").contains(128L),
+            stringField(json, "stderr_preview")
+              .contains("patch did not apply\n"),
+            field(json, "stderr_preview_base64").contains(Json.Null),
+            failure.flatMap(stringField(_, "stage")).contains("patch"),
+            failure
+              .flatMap(stringField(_, "code"))
+              .contains(
+                "patch_rejected"
+              ),
+            failure.flatMap(numberField(_, "exit_code")).contains(128L)
+          )
+        }
+      },
+      test(
+        "exposes an argument-free trusted seed tool only when provisioned"
+      ) {
+        ZIO.scoped {
+          for
+            fixture <- openSession(emptyGit)
+            seed = trustedSeed(FinalPatch)
+            tools = WorkerTools.all(fixture.session, Some(seed))
+            tool = tools.find(
+              _.definition.name == "worker_apply_seed_patch"
+            )
+          yield assertTrue(
+            tools.size == WorkerTools.all(fixture.session).size + 1,
+            tool.exists(_.authority == ToolAuthority.Writer),
+            tool.exists(value =>
+              propertyNames(value.definition.parameters) == Set(
+                "workspace_revision",
+                "workspace_fingerprint"
+              )
+            ),
+            tool.exists(value =>
+              requiredNames(value.definition.parameters) == Set(
+                "workspace_revision",
+                "workspace_fingerprint"
+              )
+            ),
+            !tool.exists(
+              _.definition.parameters.toString.contains(FinalPatch)
+            )
+          )
+        }
+      },
+      test(
+        "applies the revision-zero seed once and replays its redacted receipt"
+      ) {
+        ZIO.scoped {
+          val emitted = "seed-command-output-must-not-persist"
+          for
+            sandbox <- SeedMutationSandbox.make(emitted)
+            fixture <- openSession(
+              emptyGit,
+              sandbox,
+              activeExposeBdr
+            )
+            seed = trustedSeed(FinalPatch)
+            current <- fixture.session.currentWorkspace
+            registry <- fromBat(
+              ToolRegistry.make(
+                WorkerTools.all(fixture.session, Some(seed))
+              )
+            )
+            first <- registry.execute(
+              functionCall(
+                "seed-provider-call-1",
+                "worker_apply_seed_patch",
+                workspaceArguments(current)
+              ),
+              RunMode.FullWriter
+            )
+            replay <- registry.execute(
+              functionCall(
+                "seed-provider-call-2",
+                "worker_apply_seed_patch",
+                workspaceArguments(current)
+              ),
+              RunMode.FullWriter
+            )
+            updated <- fixture.session.currentWorkspace
+            changedBinding <- registry.execute(
+              functionCall(
+                "seed-provider-call-3",
+                "worker_apply_seed_patch",
+                workspaceArguments(updated)
+              ),
+              RunMode.FullWriter
+            )
+            requests <- sandbox.requests
+            observed <- sandbox.observedPatch
+            control <- controlContents(
+              fixture.session.workspace.controlDirectory
+            )
+            firstJson = objectOutput(first)
+            replayJson = objectOutput(replay)
+            expectedId = OperationId
+              .derive(
+                fixture.session.runId,
+                fixture.session.attemptId,
+                "trusted-seed-patch-v1",
+                "worker_apply_seed_patch"
+              )
+              .value
+            receipt <- fixture.session.receipt(
+              unsafeWorker(OperationId.from(expectedId))
+            )
+          yield assertTrue(
+            requests.size == 1,
+            requests.head.operationId == expectedId,
+            observed.contains(FinalPatch),
+            stringField(firstJson, "receipt_id").contains(expectedId),
+            boolField(firstJson, "replayed").contains(false),
+            numberField(firstJson, "workspace_revision").contains(1L),
+            stringField(firstJson, "seed_patch_sha256").contains(
+              seed.sha256.value
+            ),
+            field(firstJson, "failure").contains(Json.Null),
+            field(firstJson, "stdout_preview").isEmpty,
+            field(firstJson, "stderr_preview").isEmpty,
+            boolField(replayJson, "replayed").contains(true),
+            numberField(replayJson, "workspace_revision").contains(1L),
+            errorOutput(changedBinding).contains("operation_id_conflict"),
+            receipt.exists(_.operationId.value == expectedId),
+            !control.contains(FinalPatch),
+            !control.contains(emitted)
+          )
+        }
+      },
+      test(
+        "rejects seed execution outside active EXPOSE or after prior mutation"
+      ) {
+        ZIO.scoped {
+          for
+            inactiveSandbox <- SeedMutationSandbox.make("inactive")
+            inactive <- openSession(
+              emptyGit,
+              inactiveSandbox,
+              fakeBdr
+            )
+            seed = trustedSeed(FinalPatch)
+            inactiveCurrent <- inactive.session.currentWorkspace
+            inactiveRegistry <- fromBat(
+              ToolRegistry.make(
+                WorkerTools.all(inactive.session, Some(seed))
+              )
+            )
+            inactiveResult <- inactiveRegistry.execute(
+              functionCall(
+                "seed-inactive",
+                "worker_apply_seed_patch",
+                workspaceArguments(inactiveCurrent)
+              ),
+              RunMode.FullWriter
+            )
+            inactiveRequests <- inactiveSandbox.requests
+            mutatedSandbox <- SeedMutationSandbox.make("prior-mutation")
+            mutated <- openSession(
+              emptyGit,
+              mutatedSandbox,
+              activeExposeBdr
+            )
+            before <- mutated.session.currentWorkspace
+            mutationId <- ZIO.fromEither(
+              OperationId.from("ordinary-prior-mutation")
+            )
+            _ <- mutated.session.applyPatch(
+              mutationId,
+              before,
+              FinalPatch
+            )
+            after <- mutated.session.currentWorkspace
+            mutatedRegistry <- fromBat(
+              ToolRegistry.make(
+                WorkerTools.all(mutated.session, Some(seed))
+              )
+            )
+            mutatedResult <- mutatedRegistry.execute(
+              functionCall(
+                "seed-after-mutation",
+                "worker_apply_seed_patch",
+                workspaceArguments(after)
+              ),
+              RunMode.FullWriter
+            )
+            mutatedRequests <- mutatedSandbox.requests
+          yield assertTrue(
+            errorOutput(inactiveResult).contains("seed_patch_not_admissible"),
+            inactiveRequests.isEmpty,
+            after.revision.value == 1L,
+            errorOutput(mutatedResult).contains("seed_patch_not_admissible"),
+            mutatedRequests.size == 1
           )
         }
       },
@@ -255,11 +486,9 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
               Pins.headCommit.value
             ),
             stringField(diffJson, "stdout_preview").contains(targetDiff),
-            stringField(diffJson, "stdout_preview_base64").contains(
-              Base64.getEncoder.encodeToString(
-                targetDiff.getBytes(StandardCharsets.UTF_8)
-              )
-            ),
+            field(diffJson, "stdout_preview_base64").contains(Json.Null),
+            field(diffJson, "stderr_preview_base64").contains(Json.Null),
+            field(diffJson, "failure").contains(Json.Null),
             boolField(diffJson, "stdout_preview_truncated").contains(false),
             boolField(diffJson, "stderr_preview_truncated").contains(false),
             boolField(diffJson, "changed_paths_complete").contains(true),
@@ -365,10 +594,12 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
             evidence = objectField(json, "command_evidence")
           yield assertTrue(
             stringField(json, "stdout_preview").contains("Tests passed\n"),
+            field(json, "stdout_preview_base64").contains(Json.Null),
             field(json, "stderr_preview").contains(Json.Null),
             stringField(json, "stderr_preview_base64").contains(
               Base64.getEncoder.encodeToString(stderr.toArray)
             ),
+            field(json, "failure").contains(Json.Null),
             evidence
               .flatMap(stringField(_, "command"))
               .contains(
@@ -379,6 +610,56 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
             field(json, "command_evidence_unavailable_reason").contains(
               Json.Null
             )
+          )
+        }
+      },
+      test(
+        "deterministically records the first successful reviewed baseline"
+      ) {
+        ZIO.scoped {
+          for
+            captured <- Ref.make(Chunk.empty[Json.Obj])
+            sandbox <- RecordingSandbox.make
+            fixture <- openSession(
+              emptyGit,
+              sandbox,
+              repository => recordingApplyBdr(repository, captured)
+            )
+            current <- fixture.session.currentWorkspace
+            registry <- fromBat(
+              ToolRegistry.make(WorkerTools.all(fixture.session))
+            )
+            output <- registry.execute(
+              functionCall(
+                "java-baseline",
+                "worker_java_build",
+                merge(
+                  workspaceArguments(current),
+                  obj(
+                    "action" -> Json.Str("javac_test"),
+                    "test_selector" -> Json.Str("MainTest")
+                  )
+                )
+              ),
+              RunMode.FullWriter
+            )
+            applied <- captured.get
+            json = objectOutput(output)
+            baseline = applied.headOption.flatMap(objectField(_, "baseline"))
+            commands = baseline.flatMap(arrayField(_, "commands"))
+          yield assertTrue(
+            boolField(json, "baseline_auto_recorded").contains(true),
+            objectField(json, "baseline_transition").nonEmpty,
+            applied.size == 1,
+            baseline.flatMap(boolField(_, "usable")).contains(true),
+            commands.exists(_.size == 1),
+            commands.flatMap(_.headOption).exists {
+              case value: Json.Obj =>
+                stringField(value, "command").contains(
+                  "java-build-v1:javac_test:selector=MainTest"
+                ) && numberField(value, "exit_code").contains(0L)
+              case _ => false
+            }
           )
         }
       },
@@ -420,6 +701,16 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
             stringField(json, "outcome").contains("timed_out"),
             field(json, "exit_code").contains(Json.Null),
             stringField(json, "stdout_preview").contains("partial output\n"),
+            field(json, "stdout_preview_base64").contains(Json.Null),
+            objectField(json, "failure")
+              .flatMap(stringField(_, "stage"))
+              .contains("maven_test"),
+            objectField(json, "failure")
+              .flatMap(stringField(_, "code"))
+              .contains("command_timed_out"),
+            objectField(json, "failure")
+              .flatMap(field(_, "exit_code"))
+              .contains(Json.Null),
             field(json, "command_evidence").contains(Json.Null),
             stringField(
               json,
@@ -485,9 +776,14 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
                 Chunk("workspace_revision" -> Json.Num(BigDecimal(0)))
               )
             )
-            malformedResult <- registry
-              .execute(malformed, RunMode.FullWriter)
-              .either
+            malformedValidation = registry.validate(
+              malformed,
+              RunMode.FullWriter
+            )
+            malformedResult <- registry.execute(
+              malformed,
+              RunMode.FullWriter
+            )
             traversal = functionCall(
               "traversal-read",
               "worker_read_file",
@@ -503,8 +799,10 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
             requests <- sandbox.requests
             traversalJson = objectOutput(traversalResult)
           yield assertTrue(
-            malformedResult.left.toOption.exists(
-              _.code == "protocol_violation"
+            malformedValidation.isLeft,
+            malformedResult.isError,
+            stringField(objectOutput(malformedResult), "error").contains(
+              "invalid_tool_arguments"
             ),
             traversalResult.isError,
             stringField(traversalJson, "error").contains(
@@ -830,6 +1128,7 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
       id <- ZIO.fromEither(
         RunId.from(s"surface-${java.util.UUID.randomUUID()}".take(48))
       )
+      attemptId <- ZIO.fromEither(AttemptId.from("attempt-001"))
       allocation <- RunWorkspace.allocate(control, workspaces, id, Pins)
       _ <- createSyntheticRepository(allocation.repository)
       workspace <- RunWorkspace.seal(allocation)
@@ -839,6 +1138,7 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
       lifecycle = fixedBdr(bdr)
       session <- JavaWorkerSession.resume(
         id,
+        attemptId,
         authority,
         resumeSafeGit(git),
         sandbox,
@@ -941,6 +1241,18 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
       repository,
       "executing",
       obj("action" -> Json.Str("begin_phase"))
+    )
+
+  private def activeExposeBdr(repository: Path): BdrSession =
+    fixedStateBdr(
+      repository,
+      "executing",
+      obj(
+        "action" -> Json.Str("finish_or_recover_phase"),
+        "phase" -> Json.Str("expose"),
+        "slice" -> Json.Str("S-0001"),
+        "pre_checkpoint" -> Json.Str("CP-0001")
+      )
     )
 
   private def terminalBdr(repository: Path): BdrSession =
@@ -1150,6 +1462,64 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
           )
         )
 
+  private final class SeedMutationSandbox private (
+      requestsRef: Ref[Chunk[OciRunRequest]],
+      patchRef: Ref[Option[String]],
+      emitted: String
+  ) extends OciSandbox:
+    val image: PinnedImage = unsafeOci(
+      PinnedImage.from("ghcr.io/bat/java-worker@sha256:" + ("a" * 64))
+    )
+
+    def requests: UIO[Chunk[OciRunRequest]] = requestsRef.get
+    def observedPatch: UIO[Option[String]] = patchRef.get
+
+    def cleanup(operationId: String): IO[OciFailure, Unit] = ZIO.unit
+
+    def run(request: OciRunRequest): IO[OciFailure, OciRunResult] =
+      for
+        observed <- ZIO
+          .attemptBlocking {
+            val input = request.mounts
+              .find(_.destination.value == "/bat/input")
+              .map(_.source.resolve("change.patch"))
+              .getOrElse(
+                throw new IllegalStateException("seed input mount missing")
+              )
+            val repository = request.mounts
+              .find(_.destination.value == "/bat/repository")
+              .map(_.source)
+              .getOrElse(
+                throw new IllegalStateException("repository mount missing")
+              )
+            val patch = Files.readString(input, StandardCharsets.UTF_8)
+            val _ = Files.writeString(
+              repository.resolve("src").resolve("Main.java"),
+              "after\n",
+              StandardCharsets.UTF_8,
+              StandardOpenOption.TRUNCATE_EXISTING,
+              StandardOpenOption.WRITE
+            )
+            patch
+          }
+          .mapError(_ =>
+            OciFailure.ProcessFailure(
+              "synthetic_seed_failed",
+              "synthetic seed execution failed"
+            )
+          )
+        _ <- patchRef.set(Some(observed))
+        _ <- requestsRef.update(_ :+ request)
+        bytes = Chunk.fromArray(emitted.getBytes(StandardCharsets.UTF_8))
+      yield RecordingSandbox.result(request, bytes, bytes)
+
+  private object SeedMutationSandbox:
+    def make(emitted: String): UIO[SeedMutationSandbox] =
+      for
+        requests <- Ref.make(Chunk.empty[OciRunRequest])
+        patch <- Ref.make(Option.empty[String])
+      yield new SeedMutationSandbox(requests, patch, emitted)
+
   private final class RecordingGit private (
       ref: Ref[Chunk[GitInvocation]],
       response: GitInvocation => GitResult
@@ -1219,6 +1589,28 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
       .when(output.isError)(objectOutput(output))
       .flatMap(stringField(_, "error"))
 
+  private def trustedSeed(patch: String): TrustedSeedPatch =
+    val bytes = patch.getBytes(StandardCharsets.UTF_8)
+    unsafeWorker(TrustedSeedPatch.fromBytes(bytes, sha256(bytes)))
+
+  private def controlContents(root: Path): Task[String] =
+    ZIO.attemptBlocking {
+      val stream = Files.walk(root)
+      try
+        stream
+          .iterator()
+          .asScala
+          .filter(Files.isRegularFile(_))
+          .map(path =>
+            String(
+              Files.readAllBytes(path),
+              StandardCharsets.ISO_8859_1
+            )
+          )
+          .mkString("\n")
+      finally stream.close()
+    }
+
   private def propertyNames(schema: Json.Obj): Set[String] =
     properties(schema).fields.map(_._1).toSet
 
@@ -1254,6 +1646,12 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
   private def objectField(value: Json.Obj, name: String): Option[Json.Obj] =
     field(value, name).collect { case result: Json.Obj => result }
 
+  private def arrayField(
+      value: Json.Obj,
+      name: String
+  ): Option[Chunk[Json]] =
+    field(value, name).collect { case Json.Arr(values) => values }
+
   private def stringArrayField(
       value: Json.Obj,
       name: String
@@ -1288,28 +1686,43 @@ object WorkerSurfaceSpec extends ZIOSpecDefault:
 
   private def createSyntheticRepository(repository: Path): Task[Unit] =
     ZIO.attemptBlocking {
-      val git = Files.createDirectories(repository.resolve(".git"))
       val src = Files.createDirectories(repository.resolve("src"))
-      val _ = Files.writeString(
-        git.resolve("HEAD"),
-        Head + "\n",
-        StandardCharsets.US_ASCII
-      )
-      val _ = Files.writeString(
-        git.resolve("config"),
-        "[core]\n\trepositoryformatversion = 0\n",
-        StandardCharsets.US_ASCII
-      )
-      val _ = Files.write(
-        git.resolve("index"),
-        "synthetic-index-v1".getBytes(StandardCharsets.US_ASCII)
-      )
       val _ = Files.writeString(
         src.resolve("Main.java"),
         "before\n",
         StandardCharsets.UTF_8
       )
+      val _ = runFixtureGit(repository, "init")
+      val _ = runFixtureGit(repository, "add", "src/Main.java")
+      val _ = Files.writeString(
+        repository.resolve(".git").resolve("HEAD"),
+        Head + "\n",
+        StandardCharsets.US_ASCII
+      )
     }
+
+  private def runFixtureGit(repository: Path, arguments: String*): String =
+    val command = fixtureGit.toString +: arguments.toList
+    val builder = ProcessBuilder(command*)
+      .directory(repository.toFile)
+      .redirectErrorStream(true)
+    builder.environment().put("GIT_CONFIG_NOSYSTEM", "1")
+    builder.environment().put("GIT_CONFIG_GLOBAL", "/dev/null")
+    val process = builder.start()
+    process.getOutputStream.close()
+    val output = String(
+      process.getInputStream.readAllBytes(),
+      StandardCharsets.UTF_8
+    )
+    if process.waitFor() != 0 then
+      throw new IllegalStateException(s"Git fixture failed: $output")
+    output
+
+  private def fixtureGit: Path =
+    List("/usr/bin/git", "/opt/homebrew/bin/git")
+      .map(Path.of(_))
+      .find(path => Files.isRegularFile(path) && Files.isExecutable(path))
+      .getOrElse(throw new IllegalStateException("Git executable not found"))
 
   private def privateFile(path: Path): Boolean =
     if !Files.isRegularFile(path) then false

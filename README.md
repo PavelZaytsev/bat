@@ -242,11 +242,11 @@ The hardware-independent GPT-OSS Responses and Harmony Chat adapters and the sha
 HTTP/SSE transport are implemented and conformance-tested against deterministic in-process fake
 endpoints and exo-shaped payloads in ordinary CI.
 
-One live deployment has passed the conformance probe: `gpt-oss-20b` served single-node by exo on an
-Apple M1 Pro, over the Harmony Chat dialect, reaching the terminal BDR checkpoint through both pinned
-tools. That is a transport and protocol result for one model on one topology — not evidence about
-`gpt-oss-120b`, distributed placement, or model quality on real defects. Claude Messages, Kimi Chat,
-cost telemetry, trusted publishing, and PR automation remain future work.
+Two live deployments have passed the conformance probe over the Harmony Chat dialect: a single-node
+`gpt-oss-20b` deployment and a three-node Pipeline/MLX Ring `gpt-oss-120b` deployment. Both reached
+the terminal BDR checkpoint through both pinned tools. These are transport and continuation results,
+not evidence about model quality on real Java defects. Claude Messages, Kimi Chat, cost telemetry,
+trusted publishing, and PR automation remain future work.
 
 ## Safety and authority
 
@@ -283,6 +283,8 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`skills/refactor/references/autonomy.md`](skills/refactor/references/autonomy.md) | authority, safety, and interruption policy |
 | [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native memory, lifetime, and concurrency guidance |
 | [`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) | opt-in live GPT-OSS conformance and evidence capture |
+| [`docs/live-java-acceptance.md`](docs/live-java-acceptance.md) | supervised restart-aware GPT-OSS Java worker and evaluator acceptance run |
+| [`docs/experiments/java-six-phase-120b-20260814.md`](docs/experiments/java-six-phase-120b-20260814.md) | sanitized postmortem of the first GPT-OSS-120B live Java attempt lineage |
 | [`docs/exo-efficiency.md`](docs/exo-efficiency.md) | measured throughput, prefix-cache behaviour, and the 120B readiness checklist |
 | [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
 | [`docs/quickstart.md`](docs/quickstart.md) | executable six-phase Java canary and provider portability contract |
@@ -297,16 +299,15 @@ BAT and BDR are alpha. The workflow is promising and the state engine is designe
 but the method has not yet been independently validated across multiple domains or organizations.
 The isolated worker, provider-neutral backend harness, and the hardware-independent GPT-OSS Responses
 and Harmony Chat adapters are implemented as controller modules. The Responses adapter is
-fake-endpoint tested only; the Harmony Chat adapter has additionally passed one live single-node
-`gpt-oss-20b` exo deployment. Neither has been exercised on a distributed or 120B deployment, and
-neither has been evaluated on real defects. The production-runner core now joins either GPT-OSS
-dialect to the isolated Java worker, but it is still an embedding API rather than a public launcher:
-deployment configuration, a reviewed worker image/dependency snapshot, and a sealed evaluator
-implementation remain integration inputs. The maintained six-phase canary still uses trusted local
-`javac` tools and is not yet a production-worker acceptance run. Provider transports and production
-worker orchestration are not wired into the public host adapters. The telemetry foundation is
-in-process and hardware-independent; durable experiment storage belongs to the embedding
-application.
+fake-endpoint tested only; the Harmony Chat adapter has additionally passed live single-node 20B and
+distributed three-node 120B exo deployments. Neither result evaluates a real Java repair. The
+production runner now has an explicitly armed, restart-aware live Java acceptance launcher, a
+digest-pinned worker-image contract, and a sealed OCI evaluator for the maintained canary. The first
+live Java experiment reached EXPOSE and produced an authenticated red test, but did not complete: a
+BAT v1 workspace fingerprint treated a harmless Git stat-cache refresh as a source mutation. The
+sanitized postmortem and deterministic v2 recovery fixes are linked above; a fresh post-fix canary
+remains the next proof point. Provider transports and production worker orchestration are not wired
+into the public host adapters.
 
 Start with a supervised pilot, inspect the audit trail, and retain ordinary code review and CI as
 the final merge authority.

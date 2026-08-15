@@ -106,6 +106,55 @@ object WorkerLedgerSpec extends ZIOSpecDefault:
           )
         }
       },
+      test(
+        "isolates reused provider call IDs across controller attempts"
+      ) {
+        ZIO.scoped {
+          for
+            control <- temporaryDirectory
+            run = runId("run-attempt-isolation")
+            firstAttempt = unsafe(AttemptId.from("attempt-1"))
+            resumedAttempt = unsafe(AttemptId.from("attempt-2"))
+            firstId = OperationId.derive(
+              run,
+              firstAttempt,
+              "provider-call-1",
+              "worker_git_status"
+            )
+            resumedId = OperationId.derive(
+              run,
+              resumedAttempt,
+              "provider-call-1",
+              "worker_git_status"
+            )
+            ledger <- WorkerLedger.open(control, run, Initial)
+            executions <- Ref.make(Chunk.empty[String])
+            first <- ledger.execute(
+              readOperation(firstId.value, Initial, request = "a")
+            )(
+              executions
+                .update(_ :+ "first")
+                .as(completed(Initial.fingerprint, "first"))
+            )
+            resumed <- ledger.execute(
+              readOperation(resumedId.value, Initial, request = "b")
+            )(
+              executions
+                .update(_ :+ "resumed")
+                .as(completed(Initial.fingerprint, "resumed"))
+            )
+            observed <- executions.get
+          yield assertTrue(
+            firstId != resumedId,
+            !first.replayed,
+            !resumed.replayed,
+            first.receipt.operationId == firstId,
+            resumed.receipt.operationId == resumedId,
+            utf8(resumed.stdout) == "resumed",
+            observed == Chunk("first", "resumed")
+          )
+        }
+      },
       test("rejects stale workspace revisions before executing an effect") {
         ZIO.scoped {
           for

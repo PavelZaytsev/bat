@@ -16,12 +16,23 @@ import zio.json.ast.Json
 
 object WorkerTools:
   def all(session: JavaWorkerSession): Chunk[Tool] =
-    Chunk(
+    all(session, None)
+
+  def all(
+      session: JavaWorkerSession,
+      seedPatch: Option[TrustedSeedPatch]
+  ): Chunk[Tool] =
+    val prefix = Chunk[Tool](
       WorkspaceTool(session),
       TargetDiffTool(session),
       ReadFileTool(session),
       SearchTool(session),
-      ApplyPatchTool(session),
+      ApplyPatchTool(session)
+    )
+    val recovery = Option(seedPatch).flatten
+      .map(seed => Chunk[Tool](ApplySeedPatchTool(session, seed)))
+      .getOrElse(Chunk.empty)
+    prefix ++ recovery ++ Chunk[Tool](
       GitStatusTool(session),
       GitDiffTool(session),
       GitCommitTool(session),
@@ -51,6 +62,20 @@ object WorkerTools:
             )
           )
         }
+      }
+
+  private final case class ApplySeedPatchTool(
+      session: JavaWorkerSession,
+      seedPatch: TrustedSeedPatch
+  ) extends Tool:
+    val definition: ToolDefinition = Definitions.ApplySeedPatch
+
+    def execute(invocation: ToolInvocation): IO[ToolError, Json] =
+      worker {
+        for
+          expected <- expectedWorkspace(invocation)
+          result <- session.applySeedPatch(expected, seedPatch)
+        yield seedReceiptJson(result, seedPatch)
       }
 
   private final case class TargetDiffTool(session: JavaWorkerSession)
@@ -217,9 +242,14 @@ object WorkerTools:
             expected,
             request
           )
+          baseline <- session.recordBaselineIfRequired(
+            result.operation.receipt
+          )
         yield receiptJson(
           result.operation,
           Chunk(
+            "baseline_auto_recorded" -> Json.Bool(baseline.nonEmpty),
+            "baseline_transition" -> baseline.getOrElse(Json.Null),
             "command_evidence" -> result.commandEvidence
               .getOrElse(Json.Null),
             "command_evidence_unavailable_reason" -> result.commandEvidenceUnavailableReason
@@ -269,13 +299,20 @@ object WorkerTools:
       session: JavaWorkerSession,
       toolName: String
   ): OperationId =
-    OperationId.derive(session.runId, invocation.callId.value, toolName)
+    OperationId.derive(
+      session.runId,
+      session.attemptId,
+      invocation.callId.value,
+      toolName
+    )
 
   private def receiptJson(
       result: OperationResult,
       additional: Chunk[(String, Json)] = Chunk.empty
   ): Json.Obj =
     val receipt = result.receipt
+    val stdoutPreview = utf8(result.stdout)
+    val stderrPreview = utf8(result.stderr)
     val exitCode = receipt.outcome match
       case CommandOutcome.Exited(code) => number(code.toLong)
       case _                           => Json.Null
@@ -295,14 +332,47 @@ object WorkerTools:
         "stderr_preview_truncated" -> Json.Bool(
           receipt.stderrBytes > receipt.stderrPreviewBytes.toLong
         ),
-        "stdout_preview" -> utf8(result.stdout),
-        "stderr_preview" -> utf8(result.stderr),
-        "stdout_preview_base64" -> Json.Str(base64(result.stdout)),
-        "stderr_preview_base64" -> Json.Str(base64(result.stderr)),
+        "stdout_preview" -> stdoutPreview,
+        "stderr_preview" -> stderrPreview,
+        "stdout_preview_base64" -> binaryFallback(
+          stdoutPreview,
+          result.stdout
+        ),
+        "stderr_preview_base64" -> binaryFallback(
+          stderrPreview,
+          result.stderr
+        ),
+        "failure" -> commandFailure(receipt),
         "workspace_revision" -> number(receipt.afterRevision.value),
         "workspace_fingerprint" -> Json.Str(receipt.afterFingerprint.value)
       ) ++ additional
     Json.Obj(fields)
+
+  /** A seed receipt intentionally carries no command previews or source
+    * location. The private ledger still authenticates the bounded outcome.
+    */
+  private def seedReceiptJson(
+      result: OperationResult,
+      seedPatch: TrustedSeedPatch
+  ): Json.Obj =
+    val receipt = result.receipt
+    val exitCode = receipt.outcome match
+      case CommandOutcome.Exited(code) => number(code.toLong)
+      case _                           => Json.Null
+    Json.Obj(
+      Chunk(
+        "receipt_id" -> Json.Str(receipt.operationId.value),
+        "replayed" -> Json.Bool(result.replayed),
+        "outcome" -> Json.Str(outcomeWire(receipt.outcome)),
+        "exit_code" -> exitCode,
+        "failure" -> commandFailure(receipt),
+        "seed_patch_sha256" -> Json.Str(seedPatch.sha256.value),
+        "workspace_revision" -> number(receipt.afterRevision.value),
+        "workspace_fingerprint" -> Json.Str(
+          receipt.afterFingerprint.value
+        )
+      )
+    )
 
   private def outcomeWire(outcome: CommandOutcome): String = outcome match
     case CommandOutcome.Exited(_)   => "exited"
@@ -312,6 +382,57 @@ object WorkerTools:
 
   private def base64(bytes: Chunk[Byte]): String =
     Base64.getEncoder.encodeToString(bytes.toArray)
+
+  /** UTF-8 and base64 are mutually exclusive so ordinary compiler output is not
+    * copied into the next model context twice. Binary output retains the
+    * bounded authenticated fallback.
+    */
+  private def binaryFallback(
+      decoded: Json,
+      bytes: Chunk[Byte]
+  ): Json =
+    decoded match
+      case Json.Null => Json.Str(base64(bytes))
+      case _         => Json.Null
+
+  /** Stable actor-facing failure classification. This deliberately contains no
+    * provider/command text; bounded previews remain separate and telemetry
+    * records only the tool's stable error outcome.
+    */
+  private def commandFailure(receipt: TrustedReceipt): Json =
+    val code = receipt.outcome match
+      case CommandOutcome.Exited(0) => None
+      case CommandOutcome.Exited(_)
+          if receipt.operationKind == WorkerOperationKind.Patch =>
+        Some("patch_rejected")
+      case CommandOutcome.Exited(_)
+          if verificationKind(receipt.operationKind) =>
+        Some("verification_nonzero_exit")
+      case CommandOutcome.Exited(_)   => Some("command_nonzero_exit")
+      case CommandOutcome.TimedOut    => Some("command_timed_out")
+      case CommandOutcome.OutputLimit => Some("command_output_limit")
+      case CommandOutcome.StartFailed => Some("command_start_failed")
+    code
+      .map(value =>
+        Json.Obj(
+          Chunk(
+            "stage" -> Json.Str(receipt.operationKind.wire),
+            "code" -> Json.Str(value),
+            "exit_code" -> (receipt.outcome match
+              case CommandOutcome.Exited(exit) => number(exit.toLong)
+              case _                           => Json.Null)
+          )
+        )
+      )
+      .getOrElse(Json.Null)
+
+  private def verificationKind(kind: WorkerOperationKind): Boolean =
+    kind match
+      case WorkerOperationKind.MavenTest | WorkerOperationKind.MavenVerify |
+          WorkerOperationKind.GradleTest | WorkerOperationKind.GradleCheck |
+          WorkerOperationKind.JavacTest =>
+        true
+      case _ => false
 
   private def utf8(bytes: Chunk[Byte]): Json =
     Try(
@@ -432,6 +553,12 @@ object WorkerTools:
       writerProperties("patch" -> stringSchema)
     )
 
+    val ApplySeedPatch = definition(
+      "worker_apply_seed_patch",
+      "Apply the operator-authenticated one-shot recovery patch during the active EXPOSE phase.",
+      writerProperties()
+    )
+
     val GitStatus = definition(
       "worker_git_status",
       "Read bounded porcelain Git status in the isolated worker.",
@@ -452,7 +579,7 @@ object WorkerTools:
 
     val JavaBuild = definition(
       "worker_java_build",
-      "Run one structured offline Maven or Gradle action in a disposable isolated copy.",
+      "Run one structured offline Maven, Gradle, or dependency-free javac test action in a disposable isolated copy.",
       writerProperties(
         "action" -> enumSchema(JavaBuildAction.values.map(_.wire)*),
         "test_selector" -> stringSchema

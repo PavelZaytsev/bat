@@ -1,0 +1,10 @@
+FROM maven:3.9.11-amazoncorretto-25-alpine@sha256:b5e9c10dadd7e7d72dcea243a68da419bfb7ec780aa50fe796fb5423c0faf1f5
+
+RUN apk add --no-cache git && \
+    mkdir -p /opt/bat/cache/maven /opt/bat/cache/gradle && \
+    chmod -R a+rX /opt/bat/cache
+
+ENTRYPOINT []
+
+LABEL org.opencontainers.image.title="BAT dependency-free Java canary worker" \
+      org.opencontainers.image.description="Java 25 worker for BAT's dependency-free Java 17 acceptance fixture"

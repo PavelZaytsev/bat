@@ -439,7 +439,7 @@ object AgenticLoop:
           (result, call) =>
             for
               prepared <- result
-              _ <- tools.validate(call, mode)
+              _ <- tools.validateSelection(call, mode)
               digest <- StrictJson.sha256(call.arguments, "function arguments")
               cached <- ledger.get(call.callId) match
                 case None => Right(None)
@@ -515,7 +515,17 @@ object AgenticLoop:
                 )
               )
               output <- restoreExit(execution)
-              _ <- restoreExit(afterExit)
+              _ <- afterExit match
+                case Exit.Failure(_) if output.isError =>
+                  ZIO.fail(
+                    BatError.ToolFailure(
+                      item.call.name,
+                      functionOutputError(output).getOrElse(
+                        "tool_reported_error"
+                      )
+                    )
+                  )
+                case _ => restoreExit(afterExit)
               recorded = ExecutedCall(item.call.name, item.digest, output)
             yield (
               outputs :+ output,
@@ -616,6 +626,12 @@ object AgenticLoop:
     exit match
       case Exit.Success(value) => ZIO.succeed(value)
       case Exit.Failure(cause) => ZIO.refailCause(cause)
+
+  private def functionOutputError(output: FunctionOutput): Option[String] =
+    output.output match
+      case value: Json.Obj =>
+        stringField(value, "error").filter(_.matches("[a-z][a-z0-9_-]{0,63}"))
+      case _ => None
 
   private val TerminalStates = Set(
     "verification_pending",

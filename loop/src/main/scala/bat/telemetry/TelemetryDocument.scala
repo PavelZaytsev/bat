@@ -11,6 +11,23 @@ final case class TelemetryRecord(sequence: Long, event: TelemetryEvent):
   override def toString: String =
     s"TelemetryRecord(sequence=$sequence, event=<redacted>)"
 
+object TelemetryRecord:
+  /** Payload-free persisted representation used by append/checkpoint
+    * interpreters before a terminal [[TelemetryDocument]] can exist.
+    */
+  def json(value: TelemetryRecord): Json.Obj = TelemetryJson.record(value)
+
+  def canonicalJson(value: TelemetryRecord): Either[TelemetryError, String] =
+    StrictJson
+      .canonical(json(value), "BAT telemetry record")
+      .left
+      .map(_ =>
+        TelemetryError.make(
+          "telemetry_encoding_failed",
+          "telemetry record could not be encoded"
+        )
+      )
+
 final case class PhaseSummary(
     phase: Measurement[BdrPhase],
     modelTurns: Int,
@@ -872,7 +889,7 @@ object TelemetryDocument:
       TelemetryError.make("invalid_telemetry_document", message)
     )
 
-private object TelemetryJson:
+private[telemetry] object TelemetryJson:
   def document(value: TelemetryDocument): Json.Obj =
     obj(
       "schema" -> Json.Str(TelemetryDocument.Schema),
@@ -929,7 +946,7 @@ private object TelemetryJson:
       "tokens" -> tokens(value.tokens)
     )
 
-  private def record(value: TelemetryRecord): Json.Obj =
+  private[telemetry] def record(value: TelemetryRecord): Json.Obj =
     obj(
       "sequence" -> number(value.sequence),
       "event" -> event(value.event)

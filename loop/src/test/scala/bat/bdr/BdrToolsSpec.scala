@@ -154,6 +154,42 @@ object BdrToolsSpec extends ZIOSpecDefault:
           completionCalls == 1
         )
       },
+      test("canonicalizes stale arguments only for zero-argument tools") {
+        for
+          bdr <- RecordingBdr.make()
+          registry <- ZIO.fromEither(ToolRegistry.make(BdrTools.all(bdr)))
+          audit <- registry.execute(
+            call(
+              "audit-stale",
+              "bdr_audit_summary",
+              obj(
+                "text" -> Json.Str("stale"),
+                "max_matches" -> Json.Num(10)
+              )
+            ),
+            RunMode.FullWriter
+          )
+          staleCall = call(
+            "apply-stale",
+            "bdr_apply",
+            obj(
+              "operation_json" -> Json.Str("{}"),
+              "text" -> Json.Str("must remain rejected")
+            )
+          )
+          validation = registry.validate(staleCall, RunMode.FullWriter)
+          nonEmpty <- registry.execute(staleCall, RunMode.FullWriter)
+          audits <- bdr.audits
+          applies <- bdr.applies
+        yield assertTrue(
+          !audit.isError,
+          audits == 1,
+          validation.isLeft,
+          nonEmpty.isError,
+          errorCode(nonEmpty).contains("invalid_tool_arguments"),
+          applies.isEmpty
+        )
+      },
       test("collapses engine failures to stable codes without leaking text") {
         for
           bdr <- RecordingBdr.make(fail = true)

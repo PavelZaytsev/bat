@@ -21,12 +21,13 @@ final class HarmonyChatConfig private (
     val maxOutputTokens: Long,
     val maxAttempts: Int,
     val retryDelay: Duration,
+    val replayPolicy: WireReplayPolicy,
     val sseLimits: SseLimits,
     val chatLimits: HarmonyChatLimits,
     private[harmonychat] val target: RequestTarget
 ):
   override def toString: String =
-    s"HarmonyChatConfig(identity=$identity, credential=<redacted>, maxOutputTokens=$maxOutputTokens, maxAttempts=$maxAttempts, retryDelay=$retryDelay, sseLimits=$sseLimits, chatLimits=$chatLimits, dialect=harmony-chat)"
+    s"HarmonyChatConfig(identity=$identity, credential=<redacted>, maxOutputTokens=$maxOutputTokens, maxAttempts=$maxAttempts, retryDelay=$retryDelay, replayPolicy=$replayPolicy, sseLimits=$sseLimits, chatLimits=$chatLimits, dialect=harmony-chat)"
 
 object HarmonyChatConfig:
   val BackendName = "gpt-oss-harmony-chat"
@@ -51,7 +52,8 @@ object HarmonyChatConfig:
       chatLimits: HarmonyChatLimits = HarmonyChatLimits.default,
       maxOutputTokens: Long = DefaultMaxOutputTokens,
       maxAttempts: Int = DefaultMaxAttempts,
-      retryDelay: Duration = DefaultRetryDelay
+      retryDelay: Duration = DefaultRetryDelay,
+      replayPolicy: WireReplayPolicy = WireReplayPolicy.FailClosed
   ): Either[BatError, HarmonyChatConfig] =
     for
       _ <- Either.cond(
@@ -65,9 +67,11 @@ object HarmonyChatConfig:
         violation("Harmony Chat credential option must not be null")
       )
       _ <- Either.cond(
-        sseLimits != null && chatLimits != null,
+        sseLimits != null && chatLimits != null && replayPolicy != null,
         (),
-        violation("Harmony Chat stream limits must not be null")
+        violation(
+          "Harmony Chat stream limits and replay policy must not be null"
+        )
       )
       _ <- Either.cond(
         maxOutputTokens > 0 && maxOutputTokens <= MaxOutputTokens,
@@ -89,6 +93,7 @@ object HarmonyChatConfig:
       maxOutputTokens,
       maxAttempts,
       retryDelay,
+      replayPolicy,
       sseLimits,
       chatLimits,
       target
@@ -126,6 +131,7 @@ final class HarmonyChatDialect private (
   val credential: Option[Secret] = config.credential
   val sseLimits: SseLimits = config.sseLimits
   val maxOutputTokens: Long = config.maxOutputTokens
+  override val replayPolicy: WireReplayPolicy = config.replayPolicy
 
   def beginTurn(
       request: ModelRequest[HarmonyChatContext],
@@ -158,18 +164,32 @@ final class HarmonyChatDialect private (
   ): Either[BatError, ModelTurn[HarmonyChatContext]] =
     stream.finish.left.map(mapDialectError)
 
-  /** A 404/405 here means the endpoint does not serve Chat Completions at all,
-    * which is a different operator fact from a transient outage.
+  /** `405` proves that this endpoint does not serve Chat Completions. `404` is
+    * also fail-closed by default, but exo uses it for a temporarily absent
+    * instance after restart; only the already-qualified self-hosted policy may
+    * retry that status, and it never changes the pinned path.
     */
   override def statusFailure(code: Int): WireStatus =
     if code == 429 then WireStatus("harmony_chat_rate_limited", true)
-    else if code == 408 then WireStatus("harmony_chat_request_timeout", false)
+    else if code == 408 then
+      WireStatus(
+        "harmony_chat_request_timeout",
+        replayPolicy.retriesStatus(code)
+      )
     else if code == 401 || code == 403 then
       WireStatus("harmony_chat_unauthorized", false)
-    else if code == 404 || code == 405 then
+    else if code == 404 then
+      WireStatus(
+        "harmony_chat_completions_unavailable",
+        replayPolicy.retriesStatus(code)
+      )
+    else if code == 405 then
       WireStatus("harmony_chat_completions_unavailable", false)
     else if code >= 500 then
-      WireStatus("harmony_chat_endpoint_unavailable", false)
+      WireStatus(
+        "harmony_chat_endpoint_unavailable",
+        replayPolicy.retriesStatus(code)
+      )
     else WireStatus("harmony_chat_http_status", false)
 
   override def toString: String =
@@ -190,6 +210,14 @@ final class HarmonyChatDialect private (
 
   private def mapDialectError(error: BatError): BatError =
     error match
+      case failure: BatError.BackendFailure
+          if failure.code == "harmony_chat_chat_error" &&
+            config.replayPolicy.retriesInBandProviderError =>
+        BatError.BackendFailure(
+          errorCode = failure.code,
+          safeMessage = "Harmony Chat response failed",
+          retryable = true
+        )
       case failure: BatError.BackendFailure => failure
       case _: BatError.BudgetExceeded       => error
       case _                                => protocolFailure

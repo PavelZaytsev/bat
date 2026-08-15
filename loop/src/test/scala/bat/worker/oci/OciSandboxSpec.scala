@@ -1,7 +1,10 @@
 package bat.worker.oci
 
-import java.nio.file.Path
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Path}
 import java.security.MessageDigest
+
+import scala.jdk.CollectionConverters.*
 
 import zio.*
 import zio.test.*
@@ -50,7 +53,6 @@ object OciSandboxSpec extends ZIOSpecDefault:
           expected = Chunk(
             Runtime.toString,
             "run",
-            "--rm",
             s"--name=${OciSandbox.runtimeResourceName(config, request)}",
             "--log-driver=none",
             "--init",
@@ -188,6 +190,49 @@ object OciSandboxSpec extends ZIOSpecDefault:
           )
         )
       },
+      test(
+        "re-observes exact absence after a timed-out runtime removal"
+      ) {
+        ZIO.scoped {
+          for
+            directory <- ZIO.acquireRelease(
+              ZIO.attemptBlocking(Files.createTempDirectory("bat-cleanup-"))
+            )(path => deleteTree(path).orDie)
+            runtime = directory.resolve("runtime")
+            state = directory.resolve("resource")
+            image <- fromEither(
+              PinnedImage.from(s"ghcr.io/bat/java-worker@sha256:$Digest")
+            )
+            config <- fromEither(
+              OciSandboxConfig.make(runtime, image, directory, 10001, 10002)
+            )
+            name = OciSandbox.runtimeResourceName(config, "slow-cleanup")
+            script =
+              s"""#!/bin/sh
+                 |state='${state.toString}'
+                 |case "$$1:$$2" in
+                 |  container:ls)
+                 |    if [ -f "$$state" ]; then /bin/cat "$$state"; fi
+                 |    ;;
+                 |  rm:--force)
+                 |    /bin/rm -f "$$state"
+                 |    /bin/sleep 6
+                 |    ;;
+                 |esac
+                 |""".stripMargin
+            _ <- ZIO.attemptBlocking {
+              Files.writeString(runtime, script, StandardCharsets.UTF_8)
+              if !runtime.toFile.setExecutable(true, true) then
+                throw new IllegalStateException(
+                  "test runtime is not executable"
+                )
+              Files.writeString(state, name, StandardCharsets.UTF_8)
+            }
+            result <- OciSandbox.live(config).cleanup("slow-cleanup").either
+            remains <- ZIO.attemptBlocking(Files.exists(state))
+          yield assertTrue(result.isRight, !remains)
+        }
+      } @@ TestAspect.timeout(15.seconds),
       test("stages a read-only source in a bounded writable tmpfs") {
         for
           image <- fromEither(
@@ -416,6 +461,13 @@ object OciSandboxSpec extends ZIOSpecDefault:
 
   private def fromEither[A](value: Either[OciFailure, A]): IO[OciFailure, A] =
     ZIO.fromEither(value)
+
+  private def deleteTree(path: Path): Task[Unit] =
+    ZIO.attemptBlocking {
+      val stream = Files.walk(path)
+      try stream.iterator().asScala.toList.reverse.foreach(Files.deleteIfExists)
+      finally stream.close()
+    }
 
   private final class RecordingRunner(ref: Ref[Chunk[OciProcessSpec]])
       extends OciProcessRunner:

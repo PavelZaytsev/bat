@@ -20,6 +20,19 @@ validated state. Refresh `worker_workspace` whenever a worker mutation may have 
 stale. Treat an offline dependency failure as an environment block; do not request network access
 or a host command.
 
+Inspect economically: request those tool calls together in one model turn when several reads or
+fixed-string searches are independent. BAT executes them sequentially and returns every result in
+one continuation. Do not repeat an identical read, search, target diff, or audit summary unless a
+workspace/BDR mutation or a truncated result made the earlier observation stale. Synthesize and
+record discovery evidence after the smallest sufficient inspection set instead of accumulating an
+open-ended transcript.
+
+Worker command responses include a bounded `failure` object when the command did not complete
+successfully. Its `stage`, stable `code`, and optional `exit_code` are controller-owned facts; use
+them to decide whether to revise a patch, correct a build request, or stop for an environment block.
+Compiler/test previews are bounded untrusted evidence. A nonzero verification exit can be the
+intended EXPOSE/counterfactual red result; a rejected patch is not verification evidence.
+
 If baseline verification cannot run in the isolated environment, never invent a passing receipt.
 Record a reasoned terminal baseline and stop at the resulting `blocked_environment` handoff:
 
@@ -59,11 +72,41 @@ the code requires them; never force unrelated findings into one example slice.
 
 ## 1. Establish the baseline
 
+Discover the build entrypoint before selecting a verification action. Read the changed-path
+inventory and the root build manifest or README:
+
+- use Maven actions only when the relevant root or module has `pom.xml`;
+- use Gradle actions only when the relevant root or module has `build.gradle`, `build.gradle.kts`,
+  or an admitted wrapper-backed Gradle build; and
+- for a dependency-free Java source tree without either build manifest, follow its documented main
+  test entrypoint with `javac_test`. A unique simple class name is accepted, but prefer the fully
+  qualified class name from its package declaration.
+
+The absence of a Maven or Gradle manifest is not itself an environment block. Do not declare the
+baseline unusable until the repository's documented reviewed build path has been inspected and
+attempted. For a multi-module repository, keep focused verification in the affected module and use
+the broadest reviewed root action only for the baseline and final fixed-point gate.
+
 Run one reviewed broad or public verification action, then apply:
 
 ```json
 {"type":"set_baseline","baseline":{"usable":true,"commands":[{"receipt_id":"<baseline-receipt>"}]}}
 ```
+
+Every successful `worker_java_build` response contains a top-level `receipt_id`, `outcome`, and
+`exit_code`. When `outcome` is `exited` and `exit_code` is `0`, copy that exact returned
+`receipt_id` into `set_baseline` immediately. Do not rerun the same baseline merely to obtain a
+receipt, and do not claim the receipt is unavailable when it is present in the tool response.
+
+### Trusted seed-patch recovery
+
+When `worker_apply_seed_patch` is supplied, it is a one-shot operator-authenticated recovery input,
+not model-authored evidence. Never reconstruct or request its patch text or private source path.
+Call it only after the successful baseline has been recorded, findings and slices are assigned, and
+a standalone `begin_phase` has made EXPOSE active. Pass the exact current workspace revision and
+fingerprint. After it applies, refresh `worker_workspace`, run the focused regression test, and use
+the test receipt—not the seed-patch receipt—as the EXPOSE command evidence. If the tool is absent,
+continue with the normal bounded authoring tools.
 
 ## 2. Discover and assign boundary work
 

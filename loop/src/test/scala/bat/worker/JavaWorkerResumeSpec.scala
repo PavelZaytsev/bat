@@ -405,28 +405,43 @@ object JavaWorkerResumeSpec extends ZIOSpecDefault:
       source: String
   ): Task[Unit] =
     ZIO.attemptBlocking {
-      val git = Files.createDirectories(repository.resolve(".git"))
       val src = Files.createDirectories(repository.resolve("src"))
-      val _ = Files.writeString(
-        git.resolve("HEAD"),
-        Pins.headCommit.value + "\n",
-        StandardCharsets.US_ASCII
-      )
-      val _ = Files.writeString(
-        git.resolve("config"),
-        "[core]\n\trepositoryformatversion = 0\n",
-        StandardCharsets.US_ASCII
-      )
-      val _ = Files.write(
-        git.resolve("index"),
-        "synthetic-index-v1".getBytes(StandardCharsets.US_ASCII)
-      )
       val _ = Files.writeString(
         src.resolve("Main.java"),
         source,
         StandardCharsets.UTF_8
       )
+      val _ = runGit(repository, "init")
+      val _ = runGit(repository, "add", "src/Main.java")
+      val _ = Files.writeString(
+        repository.resolve(".git").resolve("HEAD"),
+        Pins.headCommit.value + "\n",
+        StandardCharsets.US_ASCII
+      )
     }
+
+  private def runGit(repository: Path, arguments: String*): String =
+    val command = existingGit.toString +: arguments.toList
+    val builder = ProcessBuilder(command*)
+      .directory(repository.toFile)
+      .redirectErrorStream(true)
+    builder.environment().put("GIT_CONFIG_NOSYSTEM", "1")
+    builder.environment().put("GIT_CONFIG_GLOBAL", "/dev/null")
+    val process = builder.start()
+    process.getOutputStream.close()
+    val output = String(
+      process.getInputStream.readAllBytes(),
+      StandardCharsets.UTF_8
+    )
+    if process.waitFor() != 0 then
+      throw new IllegalStateException(s"Git fixture failed: $output")
+    output
+
+  private def existingGit: Path =
+    List("/usr/bin/git", "/opt/homebrew/bin/git")
+      .map(Path.of(_))
+      .find(path => Files.isRegularFile(path) && Files.isExecutable(path))
+      .getOrElse(throw new IllegalStateException("Git executable not found"))
 
   private def initialWorkspace(
       fingerprint: WorkspaceFingerprint

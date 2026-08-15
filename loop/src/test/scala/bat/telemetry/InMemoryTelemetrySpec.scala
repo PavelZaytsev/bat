@@ -75,6 +75,27 @@ object InMemoryTelemetrySpec extends ZIOSpecDefault:
           iterations.toSet == (1 to count).toSet
         )
       },
+      test("observes complete snapshots in emission order") {
+        val count = 128
+        for
+          observed <- Ref.make(Chunk.empty[Int])
+          collector <- InMemoryTelemetry.makeObserved(records =>
+            observed.update(_ :+ records.size)
+          )
+          _ <- ZIO.foreachParDiscard(1 to count) { iteration =>
+            collector.emit(
+              TelemetryEvent.BdrCheckpoint(
+                attribution(iteration, revision = iteration.toLong)
+              )
+            )
+          }
+          sizes <- observed.get
+          records <- collector.records
+        yield assertTrue(
+          sizes == Chunk.fromIterable(1 to count),
+          records.map(_.sequence) == Chunk.fromIterable(1L to count.toLong)
+        )
+      },
       test("no-op telemetry accepts sanitized events without state") {
         Telemetry.noop.emit(start).as(assertTrue(true))
       }

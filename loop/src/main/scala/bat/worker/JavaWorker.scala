@@ -20,6 +20,7 @@ import java.security.MessageDigest
 import scala.collection.mutable
 
 import zio.{Chunk, Clock, IO, Scope, Semaphore, UIO, ZIO}
+import zio.json.ast.Json
 
 final case class WorkerWorkspaceBootstrap(
     runId: RunId,
@@ -681,6 +682,7 @@ object WorkspaceProvisioner:
 
 final class JavaWorkerSession private (
     val runId: RunId,
+    val attemptId: AttemptId,
     val workspace: RunWorkspace,
     rawBdr: BdrSession,
     authority: PullRequestAuthority,
@@ -837,6 +839,103 @@ final class JavaWorkerSession private (
       yield result
     }
 
+  /** Apply the operator-bound recovery patch exactly once in this controller
+    * attempt. The fixed operation namespace makes a repeated actor call an
+    * authenticated ledger replay rather than a second mutation.
+    */
+  private[worker] def applySeedPatch(
+      expected: WorkspacePrecondition,
+      seedPatch: TrustedSeedPatch
+  ): IO[WorkerError, OperationResult] =
+    serialized {
+      if seedPatch == null then
+        ZIO.fail(
+          WorkerError.InvalidInput(
+            "invalid_seed_patch",
+            "trusted seed patch is required"
+          )
+        )
+      else
+        val operationId = OperationId.derive(
+          runId,
+          attemptId,
+          "trusted-seed-patch-v1",
+          "worker_apply_seed_patch"
+        )
+        val plan = GitCommandPolicy.applyPatch
+        val requestDigest = digestRequest(
+          plan,
+          s"trusted-seed-patch-v1:${seedPatch.sha256.value}"
+        )
+        for
+          operation <- ZIO.fromEither(
+            WorkerOperation.make(
+              operationId,
+              plan.kind,
+              requestDigest,
+              plan.requestIdentity,
+              expected,
+              plan.policyId,
+              Some(config.imageDigest)
+            )
+          )
+          completed <- ledger.lookup(operationId)
+          result <- completed match
+            case Some(_) =>
+              // reserve validates the complete immutable operation binding
+              // before returning the authenticated receipt and artifacts.
+              ledger.execute(operation)(
+                ZIO.fail(
+                  WorkerError.LedgerFailure(
+                    "seed_patch_replay_failed",
+                    "completed seed patch unexpectedly required execution"
+                  )
+                )
+              )
+            case None =>
+              for
+                _ <- requireSeedPatchWindow
+                _ <- ZIO
+                  .fail(
+                    WorkerError.InvalidInput(
+                      "seed_patch_not_admissible",
+                      "trusted seed patch requires the untouched revision-zero workspace"
+                    )
+                  )
+                  .unless(expected.revision.value == 0L)
+                _ <- ZIO.fromEither(PatchPolicy.validate(seedPatch.text))
+                _ <- AuthenticatedPrSource.requireFresh(
+                  authority,
+                  workspace.pins
+                )
+                actual <- WorkspaceFingerprinting.compute(
+                  workspace.repository
+                )
+                _ <- requireFingerprint(expected, actual)
+                applied <- ledger.execute(operation) {
+                  ZIO.scoped {
+                    PatchInput
+                      .open(
+                        config.scratchRoot,
+                        operationId,
+                        seedPatch.text
+                      )
+                      .flatMap(path =>
+                        runPlan(
+                          operationId,
+                          plan,
+                          workspace.repository,
+                          Some(path),
+                          stagedWorkspace = false,
+                          redactOutput = true
+                        )
+                      )
+                  }
+                }
+              yield applied
+        yield result
+    }
+
   def gitCommit(
       operationId: OperationId,
       expected: WorkspacePrecondition,
@@ -916,6 +1015,75 @@ final class JavaWorkerSession private (
       yield result
     }
 
+  /** Consume a successful reviewed build receipt when the tracker is waiting
+    * for its baseline. This transition is deterministic controller bookkeeping,
+    * not a model-authored refactoring decision, and prevents capable models
+    * from wasting turns rediscovering an already proven build entry point.
+    */
+  private[worker] def recordBaselineIfRequired(
+      receipt: TrustedReceipt
+  ): IO[WorkerError, Option[Json.Obj]] =
+    val broadEnough = Set(
+      WorkerOperationKind.MavenVerify,
+      WorkerOperationKind.GradleCheck,
+      WorkerOperationKind.JavacTest
+    ).contains(receipt.operationKind)
+    receipt.outcome match
+      case CommandOutcome.Exited(0) if !broadEnough => ZIO.none
+      case CommandOutcome.Exited(0)                 =>
+        serialized {
+          for
+            current <- healthyWorkspaceUnlocked
+            state <- rawBdr.checkpoint.mapError(error =>
+              WorkerError.LedgerFailure(error.code, error.safeMessage)
+            )
+            action = state.nextAction.fields.collectFirst {
+              case ("action", Json.Str(value)) => value
+            }
+            result <-
+              if action.exists(Set("record_baseline", "set_baseline")) then
+                val operation = Json.Obj(
+                  Chunk(
+                    "type" -> Json.Str("set_baseline"),
+                    "baseline" -> Json.Obj(
+                      Chunk(
+                        "usable" -> Json.Bool(true),
+                        "commands" -> Json.Arr(
+                          Chunk(
+                            Json.Obj(
+                              Chunk(
+                                "receipt_id" -> Json.Str(
+                                  receipt.operationId.value
+                                )
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+                ReceiptBoundOperation
+                  .materialize(
+                    operation,
+                    receiptId => trustedEvidenceUnlocked(receiptId, current)
+                  )
+                  .flatMap(materialized =>
+                    rawBdr
+                      .apply(materialized)
+                      .mapError(error =>
+                        WorkerError.LedgerFailure(
+                          error.code,
+                          error.safeMessage
+                        )
+                      )
+                  )
+                  .map(Some(_))
+              else ZIO.none
+          yield result
+        }
+      case _ => ZIO.none
+
   private def trustedEvidenceUnlocked(
       receiptId: String,
       current: WorkspacePrecondition
@@ -933,6 +1101,33 @@ final class JavaWorkerSession private (
         )
       evidence <- TrustedEvidenceMaterializer.materialize(receipt, current)
     yield evidence
+
+  private def requireSeedPatchWindow: IO[WorkerError, Unit] =
+    for
+      state <- rawBdr.checkpoint.mapError(error =>
+        WorkerError.LedgerFailure(error.code, error.safeMessage)
+      )
+      action = state.nextAction.fields.collectFirst {
+        case ("action", Json.Str(value)) => value
+      }
+      phase = state.nextAction.fields.collectFirst {
+        case ("phase", Json.Str(value)) => value
+      }
+      slice = state.nextAction.fields.collectFirst {
+        case ("slice", Json.Str(value)) => value
+      }
+      _ <- ZIO
+        .fail(
+          WorkerError.InvalidInput(
+            "seed_patch_not_admissible",
+            "trusted seed patch requires a usable baseline and active EXPOSE phase"
+          )
+        )
+        .unless(
+          action.contains("finish_or_recover_phase") &&
+            phase.contains("expose") && slice.exists(_.nonEmpty)
+        )
+    yield ()
 
   private def healthyWorkspaceUnlocked: IO[WorkerError, WorkspacePrecondition] =
     for
@@ -1116,7 +1311,8 @@ final class JavaWorkerSession private (
                       plan,
                       workspace.repository,
                       Some(path),
-                      stagedWorkspace = false
+                      stagedWorkspace = false,
+                      redactOutput = false
                     )
                   )
               }
@@ -1126,7 +1322,8 @@ final class JavaWorkerSession private (
                 plan,
                 workspace.repository,
                 None,
-                stagedWorkspace = false
+                stagedWorkspace = false,
+                redactOutput = false
               )
       }
     yield result
@@ -1136,7 +1333,8 @@ final class JavaWorkerSession private (
       plan: JavaCommandPlan,
       mountedRoot: Path,
       inputMount: Option[Path],
-      stagedWorkspace: Boolean
+      stagedWorkspace: Boolean,
+      redactOutput: Boolean = false
   ): IO[WorkerError, CompletedOperation] =
     for
       rootDestination <- containerPath(
@@ -1180,6 +1378,15 @@ final class JavaWorkerSession private (
       finished <- Clock.nanoTime
       durationMillis = math.max(0L, (finished - started) / 1000000L)
       observation <- result match
+        case Right(value) if redactOutput =>
+          val outcome = value.outcome match
+            case OciRunOutcome.Exited(code)   => CommandOutcome.Exited(code)
+            case OciRunOutcome.TimedOut       => CommandOutcome.TimedOut
+            case _: OciRunOutcome.OutputLimit =>
+              CommandOutcome.OutputLimit
+            case _: OciRunOutcome.RuntimeFailed =>
+              CommandOutcome.StartFailed
+          emptyObservation(outcome, durationMillis)
         case Right(value) => observationFrom(value, durationMillis)
         case Left(failure) if failure.code == "process_start_failed" =>
           emptyObservation(CommandOutcome.StartFailed, durationMillis)
@@ -1269,8 +1476,39 @@ object JavaWorkerSession:
   private val EmptyDigest =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
+  /** Compatibility overload for callers with no controller restart model.
+    * Restart-aware controllers must use the explicit-attempt overload.
+    */
   def start(
       runId: RunId,
+      baseRepository: RepositoryId,
+      pullRequestId: PullRequestId,
+      sourceRepository: Path,
+      authority: PullRequestAuthority,
+      sourceVerifier: PinnedGitSource,
+      workspaceGitRunner: GitRunner,
+      sandbox: OciSandbox,
+      bdrLifecycle: WorkerBdrLifecycle,
+      config: WorkerRuntimeConfig
+  ): ZIO[Scope, WorkerError, JavaWorkerSession] =
+    start(
+      runId,
+      AttemptId.Legacy,
+      baseRepository,
+      pullRequestId,
+      sourceRepository,
+      authority,
+      sourceVerifier,
+      workspaceGitRunner,
+      sandbox,
+      bdrLifecycle,
+      config
+    )
+
+  /** Opens a new logical run in an explicit controller-attempt namespace. */
+  def start(
+      runId: RunId,
+      attemptId: AttemptId,
       baseRepository: RepositoryId,
       pullRequestId: PullRequestId,
       sourceRepository: Path,
@@ -1312,8 +1550,9 @@ object JavaWorkerSession:
         workspaceGitRunner
       )
       _ <- AuthenticatedPrSource.requireFresh(authority, pins)
-      workspace <- RunWorkspace.seal(allocation)
-      bdr <- bdrLifecycle.initialize(runId, workspace.repository, pins)
+      _ <- RunWorkspace.rejectTargetBdr(allocation.repository)
+      bdr <- bdrLifecycle.initialize(runId, allocation.repository, pins)
+      workspace <- RunWorkspace.sealInitialized(allocation)
       initialRevision <- ZIO.fromEither(WorkspaceRevision.from(0L))
       initial = WorkspacePrecondition(
         initialRevision,
@@ -1324,6 +1563,7 @@ object JavaWorkerSession:
       actionMutex <- Semaphore.make(1L)
     yield JavaWorkerSession(
       runId,
+      attemptId,
       workspace,
       bdr,
       authority,
@@ -1335,8 +1575,33 @@ object JavaWorkerSession:
       actionMutex
     )
 
+  /** Compatibility overload for callers with no controller restart model.
+    * Restart-aware controllers must use the explicit-attempt overload.
+    */
   def resume(
       runId: RunId,
+      authority: PullRequestAuthority,
+      workspaceGitRunner: GitRunner,
+      sandbox: OciSandbox,
+      bdrLifecycle: WorkerBdrLifecycle,
+      config: WorkerRuntimeConfig
+  ): ZIO[Scope, WorkerError, JavaWorkerSession] =
+    resume(
+      runId,
+      AttemptId.Legacy,
+      authority,
+      workspaceGitRunner,
+      sandbox,
+      bdrLifecycle,
+      config
+    )
+
+  /** Resumes a logical run in a fresh or previously persisted controller
+    * attempt namespace. A controller restart must supply a new attempt ID.
+    */
+  def resume(
+      runId: RunId,
+      attemptId: AttemptId,
       authority: PullRequestAuthority,
       workspaceGitRunner: GitRunner,
       sandbox: OciSandbox,
@@ -1394,6 +1659,7 @@ object JavaWorkerSession:
       actionMutex <- Semaphore.make(1L)
     yield JavaWorkerSession(
       runId,
+      attemptId,
       workspace,
       bdr,
       authority,
