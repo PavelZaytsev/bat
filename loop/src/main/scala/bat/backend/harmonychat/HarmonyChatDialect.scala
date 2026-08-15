@@ -210,6 +210,14 @@ final class HarmonyChatDialect private (
 
   private def mapDialectError(error: BatError): BatError =
     error match
+      case failure: BatError.BackendFailure
+          if failure.code == "harmony_chat_chat_error" &&
+            config.replayPolicy.retriesInBandProviderError =>
+        BatError.BackendFailure(
+          errorCode = failure.code,
+          safeMessage = "Harmony Chat response failed",
+          retryable = true
+        )
       case failure: BatError.BackendFailure => failure
       case _: BatError.BudgetExceeded       => error
       case _                                => protocolFailure

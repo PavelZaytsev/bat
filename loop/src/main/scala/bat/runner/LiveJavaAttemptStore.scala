@@ -14,6 +14,7 @@ import java.nio.file.{
   StandardCopyOption,
   StandardOpenOption
 }
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 import scala.jdk.CollectionConverters.*
@@ -187,6 +188,26 @@ private[runner] final class LiveJavaAttemptStore private (
       documents: Chunk[(String, String)],
       forbiddenValues: Chunk[String]
   ): IO[BatError, Unit] =
+    publishWithBeforeCommit(
+      decision,
+      records,
+      documents,
+      forbiddenValues,
+      ZIO.unit
+    )
+
+  /** Test seam at the publication commit point. Production always supplies a
+    * successful hook; deterministic tests use it to model a process loss after
+    * every final byte is durable but before the directory rename commits the
+    * attempt.
+    */
+  private[runner] def publishWithBeforeCommit(
+      decision: String,
+      records: Chunk[TelemetryRecord],
+      documents: Chunk[(String, String)],
+      forbiddenValues: Chunk[String],
+      beforeCommit: IO[BatError, Unit]
+  ): IO[BatError, Unit] =
     for
       _ <- fail(
         LiveJavaAttemptStore.TerminalDecisions.contains(decision),
@@ -207,12 +228,24 @@ private[runner] final class LiveJavaAttemptStore private (
         ZIO.fromEither(StrictJson.parse(contents, "live attempt document"))
       }
       payload = documents.map(_._2).mkString("\n")
+      forbidden = forbiddenValues.filter(value =>
+        value != null && value.nonEmpty
+      )
+      encodedForbidden <- ZIO.foreach(forbidden)(value =>
+        ZIO.fromEither(
+          StrictJson
+            .canonical(Json.Str(value), "live attempt forbidden value")
+            .map(encoded => encoded.substring(1, encoded.length - 1))
+        )
+      )
       _ <- fail(
-        !forbiddenValues
-          .filter(value => value != null && value.nonEmpty)
-          .exists(payload.contains),
+        !forbidden.exists(payload.contains) &&
+          !encodedForbidden.exists(payload.contains),
         "live attempt publication failed the redaction check"
       )
+      documentDigests = documents.map { case (name, contents) =>
+        name -> LiveJavaAttemptStore.sha256Utf8(contents)
+      }
       elapsed <- elapsedMillis
       current = LiveJavaUsage.from(records, elapsed)
       cumulative <- ZIO.fromEither(priorUsage.add(current))
@@ -227,7 +260,8 @@ private[runner] final class LiveJavaAttemptStore private (
           records,
           current,
           cumulative,
-          LiveJavaUsage.latestBdr(records)
+          LiveJavaUsage.latestBdr(records),
+          documentDigests
         )
       )
       already <- published.get
@@ -240,11 +274,17 @@ private[runner] final class LiveJavaAttemptStore private (
           LiveJavaAttemptStore.replaceCheckpoint(staging, checkpoint)
         }
         .mapError(_ => publicationFailed)
+      _ <- beforeCommit
       _ <- (ZIO
         .attemptBlocking {
           if Files.exists(destination, LinkOption.NOFOLLOW_LINKS) then
             throw IllegalStateException("destination exists")
-          val _ = Files.move(staging, destination)
+          val _ = Files.move(
+            staging,
+            destination,
+            StandardCopyOption.ATOMIC_MOVE
+          )
+          LiveJavaAttemptStore.syncDirectory(destination.getParent)
         }
         .mapError(_ => publicationFailed) *> published.set(
         true
@@ -298,6 +338,11 @@ private[runner] object LiveJavaAttemptStore:
       destination: Path
   )
 
+  private final case class PublicationCheckpoint(
+      status: String,
+      documentsSha256: Map[String, String]
+  )
+
   private val LineageMonitor = new Object
   private val DirectoryPermissions =
     PosixFilePermissions.fromString("rwx------")
@@ -306,7 +351,7 @@ private[runner] object LiveJavaAttemptStore:
   private val TerminalDecisions = Set("ready", "rejected", "terminal", "failed")
   private val ResumableStates = Set("running", "failed")
   private val Schema = "bat.dev/live-java-checkpoint"
-  private val Version = 1L
+  private val Version = 2L
   private val LineageSchema = "bat.dev/live-java-lineage"
   private val LineageVersion = 1L
   private val LineageLock = ".live-java-lineage.lock"
@@ -427,6 +472,10 @@ private[runner] object LiveJavaAttemptStore:
         tip == previousAttempt,
         "previous live attempt is not the logical run tip"
       )
+      _ <- tip match
+        case Some(value) =>
+          recoverCommittedPublication(root, runId, value, bindingSha256)
+        case None => Right(())
       prior <- previousAttempt match
         case None        => Right(LiveJavaUsage.Zero)
         case Some(value) =>
@@ -458,6 +507,7 @@ private[runner] object LiveJavaAttemptStore:
           staging,
           PosixFilePermissions.asFileAttribute(DirectoryPermissions)
         )
+        syncDirectory(root)
       }
       _ <- fileStep("live attempt initial checkpoint failed") {
         replaceCheckpoint(staging, checkpoint)
@@ -466,6 +516,107 @@ private[runner] object LiveJavaAttemptStore:
         replaceLineage(root, runId, lineage)
       }
     yield PreparedAttempt(prior, staging, destination)
+
+  /** Finish an attempt whose complete terminal bundle reached durable staging
+    * before the process died at the final rename. This recovery never repairs
+    * or guesses a partial bundle: a running checkpoint is left resumable, and a
+    * terminal checkpoint is published only when its exact closed file set is
+    * present as ordinary files.
+    */
+  private def recoverCommittedPublication(
+      root: Path,
+      runId: TelemetryRunId,
+      attemptId: AttemptId,
+      bindingSha256: String
+  ): Either[BatError, Unit] =
+    val staging = root.resolve(s".${attemptId.value}.in-progress")
+    val destination = root.resolve(attemptId.value)
+    if !Files.exists(staging, LinkOption.NOFOLLOW_LINKS) ||
+      Files.exists(destination, LinkOption.NOFOLLOW_LINKS)
+    then Right(())
+    else
+      fileStep("previous live attempt publication is unavailable") {
+        val checkpoint = staging.resolve("checkpoint.json")
+        if Files.isSymbolicLink(staging) ||
+          !Files.isDirectory(staging, LinkOption.NOFOLLOW_LINKS) ||
+          Files.isSymbolicLink(checkpoint) ||
+          !Files.isRegularFile(checkpoint, LinkOption.NOFOLLOW_LINKS)
+        then throw IllegalStateException("unsafe staged publication")
+        Files.readString(checkpoint, StandardCharsets.UTF_8)
+      }.flatMap(text =>
+        publicationStatus(text, runId, attemptId, bindingSha256).flatMap {
+          case publication if TerminalDecisions.contains(publication.status) =>
+            val expected =
+              if publication.status == "failed" then
+                Set("checkpoint.json", "result.json", "telemetry.json")
+              else
+                Set(
+                  "checkpoint.json",
+                  "result.json",
+                  "evidence.json",
+                  "telemetry.json"
+                )
+            fileStep("previous live attempt publication is incomplete") {
+              val stream = Files.list(staging)
+              val entries =
+                try stream.toArray.map(_.asInstanceOf[Path]).toVector
+                finally stream.close()
+              if entries.map(_.getFileName.toString).toSet != expected ||
+                entries.exists(path =>
+                  Files.isSymbolicLink(path) ||
+                    !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+                )
+                || publication.documentsSha256.keySet !=
+                  (expected - "checkpoint.json")
+                  || publication.documentsSha256.exists { case (name, digest) =>
+                    sha256File(staging.resolve(name)) != digest
+                  }
+              then throw IllegalStateException("incomplete staged publication")
+              syncDirectory(staging)
+              val _ = Files.move(
+                staging,
+                destination,
+                StandardCopyOption.ATOMIC_MOVE
+              )
+              syncDirectory(destination.getParent)
+            }
+          case _ => Right(())
+        }
+      )
+
+  private def publicationStatus(
+      text: String,
+      runId: TelemetryRunId,
+      attemptId: AttemptId,
+      bindingSha256: String
+  ): Either[BatError, PublicationCheckpoint] =
+    for
+      value <- StrictJson.parseObject(text.trim, "live attempt checkpoint")
+      canonical <- StrictJson.canonical(value, "live attempt checkpoint")
+      _ <- require(
+        canonical == text.trim,
+        "previous checkpoint is not canonical"
+      )
+      _ <- literal(value, "schema", Schema)
+      _ <- number(value, "version").flatMap(result =>
+        require(result == Version, "previous checkpoint version is invalid")
+      )
+      _ <- literal(value, "run_id", runId.value)
+      _ <- literal(value, "attempt_id", attemptId.value)
+      _ <- literal(value, "binding_sha256", bindingSha256)
+      status <- string(value, "status")
+      _ <- require(
+        status == "running" || TerminalDecisions.contains(status),
+        "previous checkpoint status is invalid"
+      )
+      digests <- objectField(value, "publication_sha256").flatMap(
+        decodePublicationDigests
+      )
+      _ <- require(
+        status != "running" || digests.isEmpty,
+        "running checkpoint publication is invalid"
+      )
+    yield PublicationCheckpoint(status, digests)
 
   private def withLineageLock[A](root: Path)(effect: => A): A =
     val lockPath = root.resolve(LineageLock)
@@ -578,7 +729,8 @@ private[runner] object LiveJavaAttemptStore:
       records: Chunk[TelemetryRecord],
       current: LiveJavaUsage,
       cumulative: LiveJavaUsage,
-      bdr: Option[BdrAttribution]
+      bdr: Option[BdrAttribution],
+      documentDigests: Chunk[(String, String)] = Chunk.empty
   ): Either[BatError, String] =
     StrictJson.canonical(
       Json.Obj(
@@ -599,7 +751,12 @@ private[runner] object LiveJavaAttemptStore:
           "telemetry_records" -> Json.Arr(records.map(TelemetryRecord.json)),
           "current_usage" -> usageJson(current),
           "cumulative_usage" -> usageJson(cumulative),
-          "bdr" -> bdr.fold[Json](Json.Null)(bdrJson)
+          "bdr" -> bdr.fold[Json](Json.Null)(bdrJson),
+          "publication_sha256" -> Json.Obj(
+            documentDigests
+              .sortBy(_._1)
+              .map { case (name, digest) => name -> Json.Str(digest) }
+          )
         )
       ),
       "live attempt checkpoint"
@@ -711,6 +868,7 @@ private[runner] object LiveJavaAttemptStore:
       StandardCopyOption.ATOMIC_MOVE,
       StandardCopyOption.REPLACE_EXISTING
     )
+    syncDirectory(staging)
 
   private def replaceLineage(
       root: Path,
@@ -727,6 +885,7 @@ private[runner] object LiveJavaAttemptStore:
       StandardCopyOption.ATOMIC_MOVE,
       StandardCopyOption.REPLACE_EXISTING
     )
+    syncDirectory(root)
 
   private def lineagePath(root: Path, runId: TelemetryRunId): Path =
     root.resolve(s".${runId.value}.lineage.json")
@@ -737,9 +896,59 @@ private[runner] object LiveJavaAttemptStore:
       contents,
       StandardCharsets.UTF_8,
       StandardOpenOption.CREATE_NEW,
-      StandardOpenOption.WRITE
+      StandardOpenOption.WRITE,
+      StandardOpenOption.SYNC
     )
     val _ = Files.setPosixFilePermissions(path, FilePermissions)
+    syncFile(path)
+
+  private def syncFile(path: Path): Unit =
+    val channel = FileChannel.open(path, StandardOpenOption.WRITE)
+    try channel.force(true)
+    finally channel.close()
+
+  private def syncDirectory(path: Path): Unit =
+    val channel = FileChannel.open(path, StandardOpenOption.READ)
+    try channel.force(true)
+    finally channel.close()
+
+  private def sha256Utf8(contents: String): String =
+    sha256(contents.getBytes(StandardCharsets.UTF_8))
+
+  private def sha256File(path: Path): String =
+    val digest = MessageDigest.getInstance("SHA-256")
+    val input = Files.newInputStream(path, StandardOpenOption.READ)
+    try
+      val buffer = Array.ofDim[Byte](8192)
+      var read = input.read(buffer)
+      while read >= 0 do
+        if read > 0 then digest.update(buffer, 0, read)
+        read = input.read(buffer)
+    finally input.close()
+    hex(digest.digest())
+
+  private def sha256(bytes: Array[Byte]): String =
+    hex(MessageDigest.getInstance("SHA-256").digest(bytes))
+
+  private def hex(bytes: Array[Byte]): String =
+    bytes.iterator.map(byte => f"${byte & 0xff}%02x").mkString
+
+  private def decodePublicationDigests(
+      value: Json.Obj
+  ): Either[BatError, Map[String, String]] =
+    value.fields.foldLeft[Either[BatError, Map[String, String]]](
+      Right(Map.empty)
+    ) {
+      case (result, (name, Json.Str(digest))) =>
+        result.flatMap { values =>
+          require(
+            FileName.matches(name) && digest.matches("[0-9a-f]{64}"),
+            "previous publication digest is invalid"
+          ).map(_ => values.updated(name, digest))
+        }
+      case _ =>
+        invalid("previous publication digest is invalid")
+    }
 
   private def decodeUsage(value: Json.Obj): Either[BatError, LiveJavaUsage] =
     for

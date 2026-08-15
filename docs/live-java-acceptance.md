@@ -24,8 +24,10 @@ There are two different restart contracts:
   hidden model reasoning. The logical run ID, pinned source, workspace, BDR
   journal, and completed worker receipts remain durable. The new attempt gets a
   distinct attempt ID and a fresh model context. Its reviewed resume prompt
-  tells the model to read `worker_workspace` and `bdr_audit_summary`, then
-  continue the persisted next action without recreating prior work.
+  supplies the trusted workspace precondition while every model request carries
+  the validated BDR revision, state digest, and next action. The model uses
+  `bdr_audit_summary` only after uncertainty or a rejected BDR operation, then
+  continues without recreating prior work.
 
 Every telemetry event rewrites one canonical private checkpoint atomically.
 The checkpoint includes the sanitized event records, latest BDR identity,
@@ -61,6 +63,12 @@ mutation. An operator must reconcile it; BAT never guesses whether to repeat it.
 7. Exact operator observations for model revision, exo/runtime revision,
    Harmony template revision, quantization, topology, and active node count.
    Do not infer or copy values from a previous run.
+8. Provider/runtime request-body logging disabled. Do not use exo debug modes,
+   reverse-proxy body logging, shell tracing, or packet capture during a private
+   source run. Those surfaces can contain prompts, reasoning, source excerpts,
+   and tool payloads. If verbose logs from a failed lab run already exist,
+   checksum and quarantine them under the private operator boundary; publish
+   only bounded codes, counters, and sanitized derived facts.
 
 The trusted controller needs Docker or Podman, Git, a JDK-capable worker image,
 and HTTP reachability to exo. It does not need SSH access to the inference Macs.
@@ -135,6 +143,34 @@ For the maintained canary, `BAT_LIVE_ORACLE` is the hidden Java source root.
 For the Apache pilot, set `BAT_LIVE_CASE=apache` and supply its sealed oracle
 patch instead. Run the Apache case only after retaining the canary result.
 
+## Fresh-lineage seed-patch recovery
+
+An interrupted experiment may preserve a useful patch while its old workspace,
+ledger, or fingerprint version is no longer resumable. Never copy or rewrite
+those authenticated files. Start a new logical run and admit the exact patch as
+one explicit worker mutation:
+
+```bash
+export BAT_LIVE_RESUME=false
+unset BAT_LIVE_PREVIOUS_ATTEMPT_ID
+export BAT_LIVE_SEED_PATCH='<absolute-private-regular-patch-file>'
+export BAT_LIVE_SEED_PATCH_SHA256='<reviewed-lowercase-sha256>'
+```
+
+The patch file must be private to the operator, a regular non-symlink file
+inside `BAT_LIVE_PRIVATE_ROOT`, outside the evidence directory, strict UTF-8,
+no larger than 2 MiB, and accepted by BAT's ordinary text-patch policy. BAT
+binds the digest—but never the path or patch text—into the attempt and result.
+The tool is absent on controller resume.
+
+The actor must first establish a passing baseline, record its finding and
+slice, and enter active EXPOSE while the fresh workspace remains at revision
+zero. Only then can `worker_apply_seed_patch` apply the bound patch once. Its
+fixed operation identity makes an exact repeated call a receipt replay rather
+than a second mutation. Run the focused test after applying it and use the test
+receipt, not the seed receipt, as EXPOSE evidence. Unset both seed variables for
+ordinary runs.
+
 ## Controller restart
 
 Keep the same logical run and all semantic pins. Choose a new attempt ID and
@@ -177,9 +213,11 @@ attempt-001/
 ```
 
 `result.json` binds the logical run, attempt, telemetry digest, decision, and
-optional production-evidence digest. The final production evidence binds the
-authenticated source, worker image/policy, BDR state, delivered commit/patch,
-and evaluator report. A failed attempt has no fabricated handoff evidence.
+optional production-evidence digest. When configured, it also records the safe
+seed-patch digest, never its private path or contents. The final production
+evidence binds the authenticated source, worker image/policy, BDR state,
+delivered commit/patch, and evaluator report. A failed attempt has no fabricated
+handoff evidence.
 
 Retain the complete evidence root, including the hidden lineage file. It binds
 the logical run to its current attempt tip and is required for a controller

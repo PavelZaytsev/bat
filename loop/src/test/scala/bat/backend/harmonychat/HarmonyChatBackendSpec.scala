@@ -169,6 +169,35 @@ object HarmonyChatBackendSpec extends ZIOSpecDefault:
           malformed.retries.isEmpty
         )
       },
+      test(
+        "replays a sanitized in-band reload error only for a qualified endpoint"
+      ) {
+        for
+          recovered <- exercise(
+            Chunk(Right(chatErrorResponse), Right(okResponse)),
+            WireReplayPolicy.RetryQualifiedSelfHosted
+          )
+          failClosed <- exercise(
+            Chunk(Right(chatErrorResponse), Right(okResponse)),
+            WireReplayPolicy.RetryTransientFailures
+          )
+        yield assertTrue(
+          recovered.result.isRight,
+          recovered.requestCount == 2,
+          recovered.samePreparedRequest,
+          recovered.retries.map(_.reasonCode.value) == Chunk(
+            "harmony_chat_chat_error"
+          ),
+          recovered.eventOrder == Chunk("attempt:1", "retry:1", "attempt:2"),
+          !recovered.records.toString.contains(ProviderErrorCanary),
+          failClosed.requestCount == 1,
+          failClosed.result.left.exists(
+            nonRetryable("harmony_chat_chat_error")
+          ),
+          failClosed.retries.isEmpty,
+          !failClosed.result.toString.contains(ProviderErrorCanary)
+        )
+      },
       test("never replays auth, missing-dialect, or malformed responses") {
         val statuses = Chunk(
           401 -> "harmony_chat_unauthorized",
@@ -326,6 +355,11 @@ object HarmonyChatBackendSpec extends ZIOSpecDefault:
   private val malformedResponse: StreamingResponse =
     streamResponse("data: {not-json}\n\ndata: [DONE]\n\n")
 
+  private val chatErrorResponse: StreamingResponse =
+    streamResponse(
+      s"""data: {"error":{"message":"$ProviderErrorCanary"}}\n\n"""
+    )
+
   private def failedBodyResponse(
       failure: TransportError
   ): StreamingResponse =
@@ -373,6 +407,7 @@ object HarmonyChatBackendSpec extends ZIOSpecDefault:
       "data: [DONE]\n\n"
 
   private val PartialReasoningCanary = "DISCARDED_PARTIAL_REASONING_94af"
+  private val ProviderErrorCanary = "PRIVATE_PROVIDER_ERROR_10cd"
 
   private def unsafe[A](value: Either[BatError, A]): A =
     value.fold(error => throw AssertionError(error.safeMessage), value => value)

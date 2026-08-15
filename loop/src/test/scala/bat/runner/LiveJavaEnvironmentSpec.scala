@@ -2,8 +2,10 @@ package bat.runner
 
 import bat.protocol.BatError
 
+import java.nio.charset.StandardCharsets
 import java.nio.file.attribute.PosixFilePermissions
 import java.nio.file.{Files, Path}
+import java.security.MessageDigest
 
 import zio.ZIO
 import zio.Ref
@@ -98,6 +100,103 @@ object LiveJavaEnvironmentSpec extends ZIOSpecDefault:
           valid.toOption
             .flatMap(_.previousAttempt)
             .exists(_.value == "attempt-001")
+        )
+      },
+      test(
+        "admits a private operator-bound seed only on a fresh lineage"
+      ) {
+        for
+          fixture <- paths("bat-live-env-seed-")
+          patch = seedPatch("seed-private-marker")
+          seed <- writePrivateSeed(fixture, "operator.patch", patch)
+          digest = sha256(patch.getBytes(StandardCharsets.UTF_8))
+          seededValues = values(fixture)
+            .updated("BAT_LIVE_SEED_PATCH", seed.toString)
+            .updated("BAT_LIVE_SEED_PATCH_SHA256", digest)
+          parsed = LiveJavaEnvironment.from(seededValues)
+          verified <- ZIO
+            .fromEither(parsed)
+            .flatMap(LiveJavaPreflight.verify)
+          unseeded <- ZIO
+            .fromEither(LiveJavaEnvironment.from(values(fixture)))
+            .flatMap(LiveJavaPreflight.verify)
+          resume = LiveJavaEnvironment.from(
+            seededValues
+              .updated("BAT_LIVE_RESUME", "true")
+              .updated("BAT_LIVE_ATTEMPT_ID", "attempt-002")
+              .updated("BAT_LIVE_PREVIOUS_ATTEMPT_ID", "attempt-001")
+          )
+          missingDigest = LiveJavaEnvironment.from(
+            seededValues.removed("BAT_LIVE_SEED_PATCH_SHA256")
+          )
+        yield assertTrue(
+          verified.admittedSeedPatch.exists(_.nonEmpty),
+          verified.admittedSeedPatch.toOption.flatten.exists(
+            _.sha256.value == digest
+          ),
+          verified.bindingSha256 != unseeded.bindingSha256,
+          verified.forbiddenArtifactValues.contains(seed.toString),
+          verified.forbiddenArtifactValues.contains(patch),
+          !verified.toString.contains(seed.toString),
+          !verified.toString.contains(patch),
+          resume.isLeft,
+          missingDigest.isLeft
+        )
+      },
+      test("rejects unsafe or modified seed-patch sources") {
+        for
+          fixture <- paths("bat-live-env-seed-unsafe-")
+          patch = seedPatch("seed-safety-marker")
+          bytes = patch.getBytes(StandardCharsets.UTF_8)
+          digest = sha256(bytes)
+          outside <- ZIO.attemptBlocking {
+            val path = fixture.root.resolve("outside.patch")
+            val _ = Files.write(path, bytes)
+            val _ = Files.setPosixFilePermissions(
+              path,
+              PosixFilePermissions.fromString("rw-------")
+            )
+            path
+          }
+          outsideResult <- verifySeed(fixture, outside, digest)
+          privateSeed <- writePrivateSeed(fixture, "private.patch", patch)
+          link <- ZIO.attemptBlocking {
+            val path = fixture.privateRoot.resolve("linked.patch")
+            Files.createSymbolicLink(path, privateSeed.getFileName)
+          }
+          linkResult <- verifySeed(fixture, link, digest)
+          publicSeed <- ZIO.attemptBlocking {
+            val path = fixture.privateRoot.resolve("public.patch")
+            val _ = Files.write(path, bytes)
+            val _ = Files.setPosixFilePermissions(
+              path,
+              PosixFilePermissions.fromString("rw-r--r--")
+            )
+            path
+          }
+          publicResult <- verifySeed(fixture, publicSeed, digest)
+          changedResult <- verifySeed(fixture, privateSeed, "0" * 64)
+          malformed <- ZIO.attemptBlocking {
+            val path = fixture.privateRoot.resolve("malformed.patch")
+            val malformed = Array(0xc3.toByte, 0x28.toByte)
+            val _ = Files.write(path, malformed)
+            val _ = Files.setPosixFilePermissions(
+              path,
+              PosixFilePermissions.fromString("rw-------")
+            )
+            path -> sha256(malformed)
+          }
+          malformedResult <- verifySeed(
+            fixture,
+            malformed._1,
+            malformed._2
+          )
+        yield assertTrue(
+          outsideResult.isLeft,
+          linkResult.isLeft,
+          publicResult.isLeft,
+          changedResult.isLeft,
+          malformedResult.left.exists(_.safeMessage.contains("encoding"))
         )
       },
       test("rejects actor-visible oracle and output path overlap") {
@@ -351,3 +450,51 @@ object LiveJavaEnvironmentSpec extends ZIOSpecDefault:
       "BAT_LIVE_UID" -> "501",
       "BAT_LIVE_GID" -> "20"
     )
+
+  private def writePrivateSeed(
+      fixture: Paths,
+      name: String,
+      contents: String
+  ) =
+    ZIO.attemptBlocking {
+      val path = fixture.privateRoot.resolve(name)
+      val _ = Files.writeString(path, contents, StandardCharsets.UTF_8)
+      val _ = Files.setPosixFilePermissions(
+        path,
+        PosixFilePermissions.fromString("rw-------")
+      )
+      path
+    }
+
+  private def verifySeed(
+      fixture: Paths,
+      path: Path,
+      digest: String
+  ) =
+    ZIO
+      .fromEither(
+        LiveJavaEnvironment.from(
+          values(fixture)
+            .updated("BAT_LIVE_SEED_PATCH", path.toString)
+            .updated("BAT_LIVE_SEED_PATCH_SHA256", digest)
+        )
+      )
+      .flatMap(LiveJavaPreflight.verify)
+      .either
+
+  private def seedPatch(marker: String): String =
+    s"""diff --git a/src/Main.java b/src/Main.java
+       |--- a/src/Main.java
+       |+++ b/src/Main.java
+       |@@ -1 +1 @@
+       |-before
+       |+$marker
+       |""".stripMargin
+
+  private def sha256(bytes: Array[Byte]): String =
+    MessageDigest
+      .getInstance("SHA-256")
+      .digest(bytes)
+      .iterator
+      .map(byte => f"${byte & 0xff}%02x")
+      .mkString

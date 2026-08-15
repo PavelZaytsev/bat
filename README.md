@@ -284,6 +284,7 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native memory, lifetime, and concurrency guidance |
 | [`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) | opt-in live GPT-OSS conformance and evidence capture |
 | [`docs/live-java-acceptance.md`](docs/live-java-acceptance.md) | supervised restart-aware GPT-OSS Java worker and evaluator acceptance run |
+| [`docs/experiments/java-six-phase-120b-20260814.md`](docs/experiments/java-six-phase-120b-20260814.md) | sanitized postmortem of the first GPT-OSS-120B live Java attempt lineage |
 | [`docs/exo-efficiency.md`](docs/exo-efficiency.md) | measured throughput, prefix-cache behaviour, and the 120B readiness checklist |
 | [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
 | [`docs/quickstart.md`](docs/quickstart.md) | executable six-phase Java canary and provider portability contract |
@@ -302,8 +303,11 @@ fake-endpoint tested only; the Harmony Chat adapter has additionally passed live
 distributed three-node 120B exo deployments. Neither result evaluates a real Java repair. The
 production runner now has an explicitly armed, restart-aware live Java acceptance launcher, a
 digest-pinned worker-image contract, and a sealed OCI evaluator for the maintained canary. The first
-live Java canary result remains the next proof point. Provider transports and production worker
-orchestration are not wired into the public host adapters.
+live Java experiment reached EXPOSE and produced an authenticated red test, but did not complete: a
+BAT v1 workspace fingerprint treated a harmless Git stat-cache refresh as a source mutation. The
+sanitized postmortem and deterministic v2 recovery fixes are linked above; a fresh post-fix canary
+remains the next proof point. Provider transports and production worker orchestration are not wired
+into the public host adapters.
 
 Start with a supervised pilot, inspect the audit trail, and retain ordinary code review and CI as
 the final merge authority.

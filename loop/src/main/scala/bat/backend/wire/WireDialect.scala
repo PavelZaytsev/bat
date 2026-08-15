@@ -98,6 +98,15 @@ enum WireReplayPolicy:
       (code == 408 || (code >= 500 && code <= 599))) ||
       (this == RetryQualifiedSelfHosted && code == 404)
 
+  /** A qualified self-hosted Chat endpoint may report a model-instance reload
+    * as an in-band provider error after the HTTP stream has opened. Replaying
+    * the immutable request is safe at this boundary because no completed model
+    * turn—and therefore no tool effect—has reached the controller. Other
+    * deployments keep these provider errors terminal.
+    */
+  private[backend] def retriesInBandProviderError: Boolean =
+    this == RetryQualifiedSelfHosted
+
   private def retriesTransients: Boolean = this match
     case FailClosed                                        => false
     case RetryTransientFailures | RetryQualifiedSelfHosted => true

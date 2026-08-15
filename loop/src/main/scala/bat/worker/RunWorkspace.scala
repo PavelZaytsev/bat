@@ -29,7 +29,7 @@ final case class RunWorkspace private (
 
 object RunWorkspace:
   private val Manifest = "workspace.manifest"
-  private val Version = "bat-workspace-v1"
+  private val Version = "bat-workspace-v2"
 
   final case class Allocation private[worker] (
       runId: RunId,
@@ -343,9 +343,9 @@ object WorkspaceFingerprinting:
           !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)
         then throw FingerprintFailure("workspace root is unsafe")
         val head = readDetachedHead(root)
-        val index = readIndex(root)
+        val index = readIndex(root, head)
         val digest = MessageDigest.getInstance("SHA-256")
-        update(digest, "bat-workspace-fingerprint-v1")
+        update(digest, "bat-workspace-fingerprint-v2")
         update(digest, head)
         updateBytes(digest, index)
         val paths = fingerprintPaths(root)
@@ -393,13 +393,8 @@ object WorkspaceFingerprinting:
         _.value
       )
 
-  private def readIndex(root: Path): Array[Byte] =
-    val path = root.resolve(".git").resolve("index")
-    if Files.isSymbolicLink(path) ||
-      !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ||
-      Files.size(path) > 256L * 1024 * 1024
-    then throw FingerprintFailure("workspace index is unsafe")
-    Files.readAllBytes(path)
+  private def readIndex(root: Path, detachedHead: String): Array[Byte] =
+    GitIndexSnapshot.semanticDigest(root.resolve(".git"), detachedHead)
 
   private def isInternal(root: Path, path: Path): Boolean =
     val relative = root.relativize(path)

@@ -839,6 +839,103 @@ final class JavaWorkerSession private (
       yield result
     }
 
+  /** Apply the operator-bound recovery patch exactly once in this controller
+    * attempt. The fixed operation namespace makes a repeated actor call an
+    * authenticated ledger replay rather than a second mutation.
+    */
+  private[worker] def applySeedPatch(
+      expected: WorkspacePrecondition,
+      seedPatch: TrustedSeedPatch
+  ): IO[WorkerError, OperationResult] =
+    serialized {
+      if seedPatch == null then
+        ZIO.fail(
+          WorkerError.InvalidInput(
+            "invalid_seed_patch",
+            "trusted seed patch is required"
+          )
+        )
+      else
+        val operationId = OperationId.derive(
+          runId,
+          attemptId,
+          "trusted-seed-patch-v1",
+          "worker_apply_seed_patch"
+        )
+        val plan = GitCommandPolicy.applyPatch
+        val requestDigest = digestRequest(
+          plan,
+          s"trusted-seed-patch-v1:${seedPatch.sha256.value}"
+        )
+        for
+          operation <- ZIO.fromEither(
+            WorkerOperation.make(
+              operationId,
+              plan.kind,
+              requestDigest,
+              plan.requestIdentity,
+              expected,
+              plan.policyId,
+              Some(config.imageDigest)
+            )
+          )
+          completed <- ledger.lookup(operationId)
+          result <- completed match
+            case Some(_) =>
+              // reserve validates the complete immutable operation binding
+              // before returning the authenticated receipt and artifacts.
+              ledger.execute(operation)(
+                ZIO.fail(
+                  WorkerError.LedgerFailure(
+                    "seed_patch_replay_failed",
+                    "completed seed patch unexpectedly required execution"
+                  )
+                )
+              )
+            case None =>
+              for
+                _ <- requireSeedPatchWindow
+                _ <- ZIO
+                  .fail(
+                    WorkerError.InvalidInput(
+                      "seed_patch_not_admissible",
+                      "trusted seed patch requires the untouched revision-zero workspace"
+                    )
+                  )
+                  .unless(expected.revision.value == 0L)
+                _ <- ZIO.fromEither(PatchPolicy.validate(seedPatch.text))
+                _ <- AuthenticatedPrSource.requireFresh(
+                  authority,
+                  workspace.pins
+                )
+                actual <- WorkspaceFingerprinting.compute(
+                  workspace.repository
+                )
+                _ <- requireFingerprint(expected, actual)
+                applied <- ledger.execute(operation) {
+                  ZIO.scoped {
+                    PatchInput
+                      .open(
+                        config.scratchRoot,
+                        operationId,
+                        seedPatch.text
+                      )
+                      .flatMap(path =>
+                        runPlan(
+                          operationId,
+                          plan,
+                          workspace.repository,
+                          Some(path),
+                          stagedWorkspace = false,
+                          redactOutput = true
+                        )
+                      )
+                  }
+                }
+              yield applied
+        yield result
+    }
+
   def gitCommit(
       operationId: OperationId,
       expected: WorkspacePrecondition,
@@ -1004,6 +1101,33 @@ final class JavaWorkerSession private (
         )
       evidence <- TrustedEvidenceMaterializer.materialize(receipt, current)
     yield evidence
+
+  private def requireSeedPatchWindow: IO[WorkerError, Unit] =
+    for
+      state <- rawBdr.checkpoint.mapError(error =>
+        WorkerError.LedgerFailure(error.code, error.safeMessage)
+      )
+      action = state.nextAction.fields.collectFirst {
+        case ("action", Json.Str(value)) => value
+      }
+      phase = state.nextAction.fields.collectFirst {
+        case ("phase", Json.Str(value)) => value
+      }
+      slice = state.nextAction.fields.collectFirst {
+        case ("slice", Json.Str(value)) => value
+      }
+      _ <- ZIO
+        .fail(
+          WorkerError.InvalidInput(
+            "seed_patch_not_admissible",
+            "trusted seed patch requires a usable baseline and active EXPOSE phase"
+          )
+        )
+        .unless(
+          action.contains("finish_or_recover_phase") &&
+            phase.contains("expose") && slice.exists(_.nonEmpty)
+        )
+    yield ()
 
   private def healthyWorkspaceUnlocked: IO[WorkerError, WorkspacePrecondition] =
     for
@@ -1187,7 +1311,8 @@ final class JavaWorkerSession private (
                       plan,
                       workspace.repository,
                       Some(path),
-                      stagedWorkspace = false
+                      stagedWorkspace = false,
+                      redactOutput = false
                     )
                   )
               }
@@ -1197,7 +1322,8 @@ final class JavaWorkerSession private (
                 plan,
                 workspace.repository,
                 None,
-                stagedWorkspace = false
+                stagedWorkspace = false,
+                redactOutput = false
               )
       }
     yield result
@@ -1207,7 +1333,8 @@ final class JavaWorkerSession private (
       plan: JavaCommandPlan,
       mountedRoot: Path,
       inputMount: Option[Path],
-      stagedWorkspace: Boolean
+      stagedWorkspace: Boolean,
+      redactOutput: Boolean = false
   ): IO[WorkerError, CompletedOperation] =
     for
       rootDestination <- containerPath(
@@ -1251,6 +1378,15 @@ final class JavaWorkerSession private (
       finished <- Clock.nanoTime
       durationMillis = math.max(0L, (finished - started) / 1000000L)
       observation <- result match
+        case Right(value) if redactOutput =>
+          val outcome = value.outcome match
+            case OciRunOutcome.Exited(code)   => CommandOutcome.Exited(code)
+            case OciRunOutcome.TimedOut       => CommandOutcome.TimedOut
+            case _: OciRunOutcome.OutputLimit =>
+              CommandOutcome.OutputLimit
+            case _: OciRunOutcome.RuntimeFailed =>
+              CommandOutcome.StartFailed
+          emptyObservation(outcome, durationMillis)
         case Right(value) => observationFrom(value, durationMillis)
         case Left(failure) if failure.code == "process_start_failed" =>
           emptyObservation(CommandOutcome.StartFailed, durationMillis)

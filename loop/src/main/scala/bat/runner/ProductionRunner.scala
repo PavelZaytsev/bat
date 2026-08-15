@@ -58,38 +58,51 @@ object WorkerFactory:
   def java(
       openSession: ZIO[Scope, WorkerError, JavaWorkerSession]
   ): WorkerFactory =
+    java(openSession, None)
+
+  def java(
+      openSession: ZIO[Scope, WorkerError, JavaWorkerSession],
+      seedPatch: Option[TrustedSeedPatch]
+  ): WorkerFactory =
     new WorkerFactory:
       def open: ZIO[Scope, BatError, ActorWorker] =
-        openSession
-          .mapError(RunnerFailure.worker)
-          .map { session =>
-            new ActorWorker:
-              val bdr: BdrSession = ReceiptBoundBdrSession.make(session)
-              val tools: Chunk[Tool] = WorkerTools.all(session)
+        ZIO
+          .fail(
+            BatError.ProtocolViolation(
+              "trusted seed patch configuration is invalid"
+            )
+          )
+          .when(seedPatch == null || seedPatch.exists(_ == null)) *>
+          openSession
+            .mapError(RunnerFailure.worker)
+            .map { session =>
+              new ActorWorker:
+                val bdr: BdrSession = ReceiptBoundBdrSession.make(session)
+                val tools: Chunk[Tool] = WorkerTools.all(session, seedPatch)
 
-              def bootstrap: IO[BatError, WorkerBootstrap] =
-                session.workspaceBootstrap
-                  .mapError(RunnerFailure.worker)
-                  .flatMap(value =>
-                    ZIO.fromEither(
-                      WorkerBootstrap.make(
-                        value.runId.value,
-                        value.baseCommit.value,
-                        value.startingHeadCommit.value,
-                        value.sourceIdentityDigest,
-                        value.workspace.revision.value,
-                        value.workspace.fingerprint.value,
-                        value.imageDigest,
-                        value.buildPolicyId
+                def bootstrap: IO[BatError, WorkerBootstrap] =
+                  session.workspaceBootstrap
+                    .mapError(RunnerFailure.worker)
+                    .flatMap(value =>
+                      ZIO.fromEither(
+                        WorkerBootstrap.make(
+                          value.runId.value,
+                          value.baseCommit.value,
+                          value.startingHeadCommit.value,
+                          value.sourceIdentityDigest,
+                          value.workspace.revision.value,
+                          value.workspace.fingerprint.value,
+                          value.imageDigest,
+                          value.buildPolicyId
+                        )
                       )
                     )
-                  )
 
-              def prepareHandoff: IO[BatError, ProductionHandoff] =
-                session.prepareHandoff
-                  .mapError(RunnerFailure.worker)
-                  .map(ProductionHandoff.fromWorker)
-          }
+                def prepareHandoff: IO[BatError, ProductionHandoff] =
+                  session.prepareHandoff
+                    .mapError(RunnerFailure.worker)
+                    .map(ProductionHandoff.fromWorker)
+            }
 
   private[runner] def test(
       openWorker: ZIO[Scope, BatError, ActorWorker]
@@ -756,6 +769,16 @@ object ProductionRunner:
           BatError.ProtocolViolation("worker surface is incomplete")
         )
         .when(Option(bdr).isEmpty || Option(workerTools).isEmpty)
+      seedPatchAvailable = workerTools.exists(
+        _.definition.name == "worker_apply_seed_patch"
+      )
+      _ <- ZIO
+        .fail(
+          BatError.ProtocolViolation(
+            "trusted seed patch is available only to a fresh production attempt"
+          )
+        )
+        .when(config.resumeAttempt && seedPatchAvailable)
       bootstrap <- RunnerBoundary
         .guarded("worker_bootstrap_defect", "worker bootstrap failed")(
           worker.bootstrap
@@ -789,7 +812,13 @@ object ProductionRunner:
         )
       )
       developer <- ZIO.fromEither(DeveloperInput.make(prompt.text))
-      user <- ZIO.fromEither(bootstrapUser(bootstrap, config.resumeAttempt))
+      user <- ZIO.fromEither(
+        bootstrapUser(
+          bootstrap,
+          config.resumeAttempt,
+          seedPatchAvailable
+        )
+      )
       spec = RunSpec.make(
         RunMode.FullWriter,
         pins,
@@ -824,20 +853,29 @@ object ProductionRunner:
 
   private def bootstrapUser(
       value: WorkerBootstrap,
-      resumeAttempt: Boolean
+      resumeAttempt: Boolean,
+      seedPatchAvailable: Boolean
   ): Either[BatError, UserInput] =
     val opening =
       if resumeAttempt then
         """Continue the existing pinned Java BAT run from its durable state.
           |This is a fresh model context: prior reasoning and tool-call IDs are unavailable.
           |Treat the persisted BDR tracker, worker workspace, and completed receipts as the only authority.
-          |First read worker_workspace and bdr_audit_summary, then follow the current BDR next action.
+          |The trusted current workspace precondition is below, and every request carries the validated BDR revision, state digest, and next action. Continue from those facts immediately.
+          |Use worker_workspace only after a mutation or stale precondition. Use bdr_audit_summary only after uncertainty or a rejected BDR operation.
           |Do not recreate completed evidence or mutations; read worker_target_diff only when the current action needs the original change.""".stripMargin
       else
         """Analyze and repair the pinned Java pull-request change through all six BDR phases.
           |Begin by reading worker_target_diff.""".stripMargin
+    val recovery =
+      if seedPatchAvailable then
+        """A trusted operator recovery patch is available through worker_apply_seed_patch.
+          |After a successful baseline is recorded, discovery is assigned, and BDR reports an active EXPOSE phase, call that tool once with the current workspace precondition.
+          |Then run the focused test and use that test receipt—not the patch receipt—as EXPOSE evidence.""".stripMargin
+      else ""
     UserInput.make(
       s"""$opening
+         |$recovery
          |Trusted starting values (refresh with worker_workspace after any mutation):
          |base_commit=${value.baseCommit}
          |starting_head_commit=${value.startingHeadCommit}

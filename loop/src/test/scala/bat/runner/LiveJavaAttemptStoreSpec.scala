@@ -257,7 +257,128 @@ object LiveJavaAttemptStoreSpec extends ZIOSpecDefault:
           present,
           !staging,
           checkpoint.contains("\"status\":\"failed\""),
+          checkpoint.contains("\"publication_sha256\""),
+          checkpoint.contains("\"result.json\""),
+          checkpoint.contains("\"telemetry.json\""),
           duplicate.left.exists(_.code == "protocol_violation")
+        )
+      },
+      test("recovers a complete publication interrupted before its rename") {
+        for
+          fixture <- fixtureDirectory("bat-live-attempt-commit-recovery-")
+          runId = unsafe(TelemetryRunId.from("live-publication-recovery"))
+          firstId = unsafe(AttemptId.from("attempt-001"))
+          first <- LiveJavaAttemptStore.prepare(
+            fixture.output,
+            fixture.project,
+            runId,
+            firstId,
+            Binding,
+            None
+          )
+          telemetry <- first.telemetry
+          _ <- telemetry.emit(
+            TelemetryEvent.BdrCheckpoint(attribution(1, 3L))
+          )
+          records <- telemetry.records
+          interrupted <- first
+            .publishWithBeforeCommit(
+              "failed",
+              records,
+              Chunk(
+                "result.json" -> "{\"decision\":\"failed\"}",
+                "telemetry.json" -> "{\"records\":1}"
+              ),
+              Chunk.empty,
+              ZIO.fail(
+                BatError.ProtocolViolation("simulated process loss")
+              )
+            )
+            .either
+          stagedBefore <- exists(
+            fixture.output.resolve(".attempt-001.in-progress")
+          )
+          secondId = unsafe(AttemptId.from("attempt-002"))
+          second <- LiveJavaAttemptStore.prepare(
+            fixture.output,
+            fixture.project,
+            runId,
+            secondId,
+            Binding,
+            Some(firstId)
+          )
+          publishedAfter <- exists(fixture.output.resolve("attempt-001"))
+          stagedAfter <- exists(
+            fixture.output.resolve(".attempt-001.in-progress")
+          )
+        yield assertTrue(
+          interrupted.left.exists(_.safeMessage == "simulated process loss"),
+          stagedBefore,
+          publishedAfter,
+          !stagedAfter,
+          second.priorUsage.iterations == 1,
+          second.priorUsage.toolCalls == 0
+        )
+      },
+      test("rejects a corrupted terminal staging bundle during recovery") {
+        for
+          fixture <- fixtureDirectory("bat-live-attempt-corrupt-recovery-")
+          runId = unsafe(TelemetryRunId.from("live-corrupt-recovery"))
+          firstId = unsafe(AttemptId.from("attempt-001"))
+          first <- LiveJavaAttemptStore.prepare(
+            fixture.output,
+            fixture.project,
+            runId,
+            firstId,
+            Binding,
+            None
+          )
+          telemetry <- first.telemetry
+          _ <- telemetry.emit(
+            TelemetryEvent.BdrCheckpoint(attribution(1, 3L))
+          )
+          records <- telemetry.records
+          _ <- first
+            .publishWithBeforeCommit(
+              "failed",
+              records,
+              Chunk(
+                "result.json" -> "{\"decision\":\"failed\"}",
+                "telemetry.json" -> "{\"records\":1}"
+              ),
+              Chunk.empty,
+              ZIO.fail(
+                BatError.ProtocolViolation("simulated process loss")
+              )
+            )
+            .either
+          _ <- ZIO.attemptBlocking(
+            Files.writeString(
+              fixture.output.resolve(
+                ".attempt-001.in-progress/telemetry.json"
+              ),
+              "{}"
+            )
+          )
+          secondId = unsafe(AttemptId.from("attempt-002"))
+          recovered <- LiveJavaAttemptStore
+            .prepare(
+              fixture.output,
+              fixture.project,
+              runId,
+              secondId,
+              Binding,
+              Some(firstId)
+            )
+            .either
+          published <- exists(fixture.output.resolve("attempt-001"))
+          secondStaging <- exists(
+            fixture.output.resolve(".attempt-002.in-progress")
+          )
+        yield assertTrue(
+          recovered.left.exists(_.code == "protocol_violation"),
+          !published,
+          !secondStaging
         )
       },
       test("refuses to resume a completed attempt or publish a leak") {
@@ -286,6 +407,17 @@ object LiveJavaAttemptStoreSpec extends ZIOSpecDefault:
               Chunk("TOKEN_CANARY")
             )
             .either
+          encodedLeak <- first
+            .publish(
+              "ready",
+              records,
+              Chunk(
+                "result.json" ->
+                  "{\"value\":\"seed line one\\nseed line two\"}"
+              ),
+              Chunk("seed line one\nseed line two")
+            )
+            .either
           _ <- first.publish(
             "ready",
             records,
@@ -305,6 +437,7 @@ object LiveJavaAttemptStoreSpec extends ZIOSpecDefault:
             .either
         yield assertTrue(
           leak.left.exists(_.code == "protocol_violation"),
+          encodedLeak.left.exists(_.code == "protocol_violation"),
           resume.left.exists(_.code == "protocol_violation")
         )
       }

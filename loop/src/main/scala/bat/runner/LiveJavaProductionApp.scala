@@ -10,6 +10,8 @@ import bat.worker.oci.*
 
 import java.nio.file.{Files, LinkOption, Path}
 
+import scala.util.Try
+
 import zio.http.Client
 import zio.{Chunk, Duration, Scope, ZIO, ZIOAppDefault}
 import zio.json.ast.Json
@@ -185,6 +187,7 @@ object LiveJavaProductionApp extends ZIOAppDefault:
         )
       )
       workerRunId <- lift(RunId.from(loaded.runId))
+      seedPatch <- lift(loaded.admittedSeedPatch)
       baseRepository <- lift(
         RepositoryId.from(loaded.repositoryId, "base_repository_id")
       )
@@ -222,7 +225,7 @@ object LiveJavaProductionApp extends ZIOAppDefault:
             bdr,
             workerConfig
           )
-      worker = WorkerFactory.java(openSession)
+      worker = WorkerFactory.java(openSession, seedPatch)
       evaluator <- lift(
         OciJavaEvaluator.makePinned(
           sandbox,
@@ -343,6 +346,9 @@ object LiveJavaProductionApp extends ZIOAppDefault:
               "case" -> Json.Str(loaded.caseName),
               "evaluator_revision" -> Json.Str(loaded.evaluatorRevision),
               "oracle_sha256" -> Json.Str(oracleSha256),
+              "seed_patch_sha256" -> loaded.seedPatchSource
+                .map(source => Json.Str(source.sha256.value))
+                .getOrElse(Json.Null),
               "decision" -> Json.Str(decision),
               "reason_code" -> reasonCode.fold[Json](Json.Null)(Json.Str(_)),
               "evidence_sha256" -> evidenceDigest
@@ -421,7 +427,9 @@ private[runner] final case class LiveJavaEnvironment(
     uid: Int,
     gid: Int,
     profile: JavaEvaluationProfile,
-    oracleSha256: Option[String]
+    oracleSha256: Option[String],
+    seedPatchSource: Option[LiveJavaSeedPatchSource],
+    seedPatch: Option[TrustedSeedPatch]
 ):
   override def toString: String =
     "LiveJavaEnvironment(endpoint=<redacted>, paths=<redacted>, payload=<redacted>)"
@@ -441,6 +449,18 @@ private[runner] final case class LiveJavaEnvironment(
       BatError.ProtocolViolation("live Java oracle was not verified")
     )
 
+  def admittedSeedPatch: Either[BatError, Option[TrustedSeedPatch]] =
+    (seedPatchSource, seedPatch) match
+      case (None, None) => Right(None)
+      case (Some(source), Some(value)) if source.sha256 == value.sha256 =>
+        Right(Some(value))
+      case _ =>
+        Left(
+          BatError.ProtocolViolation(
+            "live Java seed patch was not verified"
+          )
+        )
+
   def forbiddenArtifactValues: Chunk[String] =
     Chunk(
       endpoint,
@@ -449,7 +469,7 @@ private[runner] final case class LiveJavaEnvironment(
       privateRoot.toString,
       outputDirectory.toString,
       oraclePath.toString
-    )
+    ) ++ seedPatchSource.map(_.path.toString) ++ seedPatch.map(_.text)
 
   def bindingSha256: Either[BatError, String] =
     verifiedOracleSha256.flatMap(oracle =>
@@ -473,7 +493,11 @@ private[runner] final case class LiveJavaEnvironment(
             "bat_commit" -> Json.Str(batCommit),
             "case" -> Json.Str(caseName),
             "evaluator_revision" -> Json.Str(evaluatorRevision),
-            "oracle_sha256" -> Json.Str(oracle)
+            "oracle_sha256" -> Json.Str(oracle),
+            "seed_patch_policy" -> Json.Str("trusted-seed-patch-v1"),
+            "seed_patch_sha256" -> seedPatchSource
+              .map(source => Json.Str(source.sha256.value))
+              .getOrElse(Json.Null)
           )
         ),
         "live Java attempt binding"
@@ -511,7 +535,9 @@ private[runner] object LiveJavaEnvironment:
     "BAT_LIVE_GIT",
     "BAT_LIVE_OCI_RUNTIME",
     "BAT_LIVE_UID",
-    "BAT_LIVE_GID"
+    "BAT_LIVE_GID",
+    "BAT_LIVE_SEED_PATCH",
+    "BAT_LIVE_SEED_PATCH_SHA256"
   )
 
   def from(values: Map[String, String]): Either[BatError, LiveJavaEnvironment] =
@@ -553,6 +579,21 @@ private[runner] object LiveJavaEnvironment:
             .left
             .map(_ => BatError.ProtocolViolation("invalid live attempt ID"))
             .map(Some(_))
+    def optional(key: String): Option[String] =
+      values.get(key).map(_.trim).filter(_.nonEmpty)
+    def optionalAbsolute(
+        value: String,
+        key: String
+    ): Either[BatError, Path] =
+      Try(Path.of(value)).toEither.left
+        .map(_ => BatError.ProtocolViolation(s"invalid live path: $key"))
+        .flatMap(path =>
+          Either.cond(
+            path.isAbsolute,
+            path.normalize,
+            BatError.ProtocolViolation(s"invalid live path: $key")
+          )
+        )
     for
       arm <- required("BAT_LIVE_ARM")
       _ <- Either.cond(
@@ -610,6 +651,27 @@ private[runner] object LiveJavaEnvironment:
           "live resume requires exactly one previous attempt"
         )
       )
+      seedPath = optional("BAT_LIVE_SEED_PATCH")
+      seedSha256 = optional("BAT_LIVE_SEED_PATCH_SHA256")
+      seedSource <- (seedPath, seedSha256) match
+        case (None, None)               => Right(None)
+        case (Some(path), Some(digest)) =>
+          optionalAbsolute(path, "BAT_LIVE_SEED_PATCH")
+            .flatMap(LiveJavaSeedPatchSource.make(_, digest))
+            .map(Some(_))
+        case _ =>
+          Left(
+            BatError.ProtocolViolation(
+              "live seed patch path and SHA-256 must be supplied together"
+            )
+          )
+      _ <- Either.cond(
+        seedSource.isEmpty || (!resume && previous.isEmpty),
+        (),
+        BatError.ProtocolViolation(
+          "live seed patch is available only to a fresh attempt lineage"
+        )
+      )
       runId <- required("BAT_LIVE_RUN_ID")
       repository <- required("BAT_LIVE_REPOSITORY_ID")
       base <- required("BAT_LIVE_BASE_COMMIT")
@@ -652,6 +714,8 @@ private[runner] object LiveJavaEnvironment:
       uid,
       gid,
       profile,
+      None,
+      seedSource,
       None
     )
 
@@ -692,8 +756,14 @@ private[runner] object LiveJavaPreflight:
           BatError.ProtocolViolation("live Java preflight boundary is invalid")
         )
       oracle <- JavaEvaluationOracleInspection.inspect(value.profile)
+      seedPatch <- ZIO.foreach(value.seedPatchSource)(
+        _.load(value.privateRoot, value.outputDirectory)
+      )
       _ <- verifyBatCheckout(value)
-    yield value.copy(oracleSha256 = Some(oracle.sha256))
+    yield value.copy(
+      oracleSha256 = Some(oracle.sha256),
+      seedPatch = seedPatch
+    )
 
   private def verifyBatCheckout(
       value: LiveJavaEnvironment
