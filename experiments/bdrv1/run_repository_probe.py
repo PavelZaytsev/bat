@@ -1034,7 +1034,7 @@ BASH_TOOL_SCHEMA = {
 
 @dataclass
 class OpenAICompatibleAdapter:
-    """Executable Chat Completions adapter with optional SSE streaming."""
+    """Executable OpenAI-compatible or Ollama-native chat adapter."""
 
     endpoint: str
     model: str
@@ -1043,6 +1043,7 @@ class OpenAICompatibleAdapter:
     served_model_precision: str
     served_context_window_tokens: int
     server_fingerprint: str
+    transport: str = "openai_chat_completions"
     api_key: str = "EMPTY"
     api_key_source: str = "literal-empty-or-runtime"
     tls_ca_file: str | None = None
@@ -1102,6 +1103,14 @@ class OpenAICompatibleAdapter:
             raise ConfigurationError("user_agent must be a non-empty HTTP header value")
         if not isinstance(self.stream, bool):
             raise ConfigurationError("stream must be a boolean")
+        if self.transport not in {"openai_chat_completions", "ollama_native_chat"}:
+            raise ConfigurationError(
+                "transport must be openai_chat_completions or ollama_native_chat"
+            )
+        if self.transport == "ollama_native_chat" and self.stream:
+            raise ConfigurationError(
+                "ollama_native_chat is currently a complete-response transport and requires stream=false"
+            )
         if self.json_response_format is not True:
             raise ConfigurationError(
                 "protocol-v2 context maintenance requires strict JSON Schema responses"
@@ -1145,7 +1154,7 @@ class OpenAICompatibleAdapter:
         reserved = {
             "model", "messages", "tools", "tool_choice", "parallel_tool_calls",
             "stream", "stream_options", "max_tokens", "temperature", "response_format",
-            "reasoning_effort",
+            "reasoning_effort", "format", "think", "options", "num_predict",
         }
         overlap = reserved.intersection(self.extra_body)
         if overlap:
@@ -1174,7 +1183,12 @@ class OpenAICompatibleAdapter:
     def policy_value(self) -> dict[str, Any]:
         endpoint_scheme = urlsplit(self.endpoint).scheme
         return {
-            "adapter": "openai-compatible-chat-completions/v2",
+            "adapter": (
+                "ollama-native-chat/v1"
+                if self.transport == "ollama_native_chat"
+                else "openai-compatible-chat-completions/v2"
+            ),
+            "transport": self.transport,
             "endpoint": self.endpoint,
             "model": self.model,
             "served_identity": {
@@ -1207,13 +1221,21 @@ class OpenAICompatibleAdapter:
             "json_response_format": self.json_response_format,
             "work_tool_choice": self._work_tool_choice_value(),
             "work_tool_schema": {
-                "protocol": "openai-compatible-function-tool/v1",
+                "protocol": (
+                    "ollama-native-function-tool/v1"
+                    if self.transport == "ollama_native_chat"
+                    else "openai-compatible-function-tool/v1"
+                ),
                 "name": BASH_TOOL_SCHEMA["function"]["name"],
                 "strict": BASH_TOOL_SCHEMA["function"]["strict"],
                 "schema_sha256": fingerprint(BASH_TOOL_SCHEMA),
             },
             "context_maintenance_response_format": {
-                "protocol": "openai-compatible-json-schema/v1",
+                "protocol": (
+                    "ollama-native-json-schema/v1"
+                    if self.transport == "ollama_native_chat"
+                    else "openai-compatible-json-schema/v1"
+                ),
                 "name": COMPACTION_RESPONSE_FORMAT["json_schema"]["name"],
                 "strict": True,
                 "response_format_sha256": fingerprint(COMPACTION_RESPONSE_FORMAT),
@@ -1419,25 +1441,47 @@ class OpenAICompatibleAdapter:
         context_maintenance: bool,
         on_sample_started: Callable[[], None] | None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {
-            "model": self.model,
-            "messages": [self._openai_message(message) for message in messages],
-            "temperature": self.temperature,
-            "max_tokens": max_tokens,
-            "stream": self.stream,
-        }
+        if self.transport == "ollama_native_chat":
+            body: dict[str, Any] = {
+                "model": self.model,
+                "messages": [self._ollama_message(message) for message in messages],
+                "options": {
+                    "temperature": self.temperature,
+                    "num_predict": max_tokens,
+                },
+                "stream": False,
+                # Ollama's OpenAI compatibility path cannot reliably disable Gemma thinking.
+                # Native chat can, and maintenance needs the constrained content channel only.
+                "think": not context_maintenance,
+            }
+        else:
+            body = {
+                "model": self.model,
+                "messages": [self._openai_message(message) for message in messages],
+                "temperature": self.temperature,
+                "max_tokens": max_tokens,
+                "stream": self.stream,
+            }
         if self.stream:
             body["stream_options"] = {"include_usage": True}
-        if not context_maintenance and self.reasoning_effort is not None:
+        if (
+            self.transport == "openai_chat_completions"
+            and not context_maintenance
+            and self.reasoning_effort is not None
+        ):
             body["reasoning_effort"] = self.reasoning_effort
         if with_tools:
-            body.update({
-                "tools": [BASH_TOOL_SCHEMA],
-                "tool_choice": self._work_tool_choice_value(),
-                "parallel_tool_calls": False,
-            })
+            body["tools"] = [BASH_TOOL_SCHEMA]
+            if self.transport == "openai_chat_completions":
+                body.update({
+                    "tool_choice": self._work_tool_choice_value(),
+                    "parallel_tool_calls": False,
+                })
         if json_mode:
-            body["response_format"] = COMPACTION_RESPONSE_FORMAT
+            if self.transport == "ollama_native_chat":
+                body["format"] = COMPACTION_RESPONSE_FORMAT["json_schema"]["schema"]
+            else:
+                body["response_format"] = COMPACTION_RESPONSE_FORMAT
         body.update(self.extra_body)
         if context_maintenance:
             body.update(self.context_maintenance_extra_body)
@@ -1502,8 +1546,82 @@ class OpenAICompatibleAdapter:
         if "error" in result:
             detail = json.dumps(result["error"], ensure_ascii=False)
             self._raise_transport(400, detail)
+        if self.transport == "ollama_native_chat":
+            result = self._normalize_ollama_response(result)
         self._validate_response_identity(result)
         return result
+
+    def _normalize_ollama_response(self, result: Mapping[str, Any]) -> dict[str, Any]:
+        """Convert one complete Ollama native response into the runner's OpenAI-shaped envelope."""
+        message = result.get("message")
+        if not isinstance(message, Mapping):
+            raise ModelProtocolError("Ollama response has no assistant message")
+        content = message.get("content", "")
+        thinking = message.get("thinking")
+        if not isinstance(content, str):
+            raise ModelProtocolError("Ollama assistant content must be a string")
+        if thinking is not None and not isinstance(thinking, str):
+            raise ModelProtocolError("Ollama assistant thinking must be a string")
+        normalized_calls: list[dict[str, Any]] = []
+        for index, raw_call in enumerate(message.get("tool_calls") or []):
+            if not isinstance(raw_call, Mapping):
+                raise ModelProtocolError("Ollama tool call must be an object")
+            function = raw_call.get("function")
+            if not isinstance(function, Mapping):
+                raise ModelProtocolError("Ollama tool call is missing its function")
+            name = function.get("name")
+            arguments = function.get("arguments")
+            if not isinstance(name, str) or not name:
+                raise ModelProtocolError("Ollama tool call function name is malformed")
+            if isinstance(arguments, Mapping):
+                arguments_text = canonical_json(dict(arguments)).decode("utf-8")
+            elif isinstance(arguments, str):
+                arguments_text = arguments
+            else:
+                raise ModelProtocolError("Ollama tool call arguments are malformed")
+            call_id = raw_call.get("id")
+            if not isinstance(call_id, str) or not call_id:
+                call_id = "ollama-" + fingerprint({
+                    "index": index,
+                    "name": name,
+                    "arguments": arguments_text,
+                })[:24]
+            normalized_calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments_text},
+            })
+        prompt_tokens = result.get("prompt_eval_count")
+        completion_tokens = result.get("eval_count")
+        for name, value in (
+            ("prompt_eval_count", prompt_tokens),
+            ("eval_count", completion_tokens),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ModelProtocolError("Ollama response " + name + " is malformed")
+        normalized_message: dict[str, Any] = {
+            "role": "assistant",
+            "content": content,
+        }
+        if thinking is not None:
+            normalized_message["reasoning"] = thinking
+        if normalized_calls:
+            normalized_message["tool_calls"] = normalized_calls
+        done_reason = result.get("done_reason")
+        if done_reason is not None and not isinstance(done_reason, str):
+            raise ModelProtocolError("Ollama response done_reason is malformed")
+        return {
+            "model": result.get("model"),
+            "choices": [{
+                "message": normalized_message,
+                "finish_reason": "tool_calls" if normalized_calls else done_reason,
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+        }
 
     def _validate_response_identity(self, result: Mapping[str, Any]) -> None:
         response_model = result.get("model")
@@ -1554,6 +1672,34 @@ class OpenAICompatibleAdapter:
             return {
                 "role": "tool",
                 "tool_call_id": message["tool_call_id"],
+                "content": message.get("content", ""),
+            }
+        raise ModelProtocolError("unsupported normalized message role: " + repr(role))
+
+    def _ollama_message(self, message: Mapping[str, Any]) -> dict[str, Any]:
+        role = message.get("role")
+        if role in {"system", "user"}:
+            return {"role": role, "content": message.get("content", "")}
+        if role == "assistant":
+            result: dict[str, Any] = {
+                "role": "assistant",
+                "content": message.get("content", ""),
+            }
+            reasoning = message.get("reasoning")
+            if isinstance(reasoning, str):
+                result["thinking"] = reasoning
+            calls = message.get("tool_calls", [])
+            if calls:
+                result["tool_calls"] = [{
+                    "function": {
+                        "name": call["name"],
+                        "arguments": call["arguments"],
+                    }
+                } for call in calls]
+            return result
+        if role == "tool":
+            return {
+                "role": "tool",
                 "content": message.get("content", ""),
             }
         raise ModelProtocolError("unsupported normalized message role: " + repr(role))
@@ -4359,6 +4505,7 @@ def runner_from_config(path: Path) -> RepositoryProbeRunner:
         served_model_precision=served_identity.get("precision"),
         served_context_window_tokens=served_identity.get("context_window_tokens"),
         server_fingerprint=served_identity.get("server_fingerprint"),
+        transport=model_config.get("transport", "openai_chat_completions"),
         api_key=api_key,
         api_key_source=api_key_source,
         tls_ca_file=model_config.get("tls_ca_file"),

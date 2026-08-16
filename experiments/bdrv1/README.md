@@ -27,6 +27,12 @@ qualification scorecard. A laptop 31B result is also a distinct deployment unles
 precision or quantization, context limit, serving stack, and host topology all match the frozen
 Gemma 4 31B candidate record.
 
+A dense Gemma 4 12B local proxy is also permitted only as a development canary. Its MLX/Ollama
+backend silently ignored the maintenance schema; the GGUF/native correction passed forced
+pause/cold-resume continuity but later corrupted the tracker and failed autonomous closure. See
+`results/2026-08-16-gemma4-12b-local-canary.md`. This rejects that exact 12B deployment for
+autonomous BDR but does not answer the 31B hypothesis.
+
 Through the Monday CorfuDB PR run, optimize for reliable live evidence rather than minimum GPU
 spend. Record dollars, node-hours, and wall time, and ask for a balance replenishment if funding
 would otherwise stop a useful run. Do not multiply runs without a concrete readiness question.
@@ -146,6 +152,12 @@ prompts, methodology, or qualification tests around the CorfuDB review oracle.
   commit, an independently green test, and a production-only revert that failed as expected. This
   completes the protocol-v2 reference continuity gate; it does not qualify Qwen or select the
   Monday GPT-OSS/Gemma deployment.
+- A free local dense Gemma 4 12B MLX canary exposed an Ollama backend bug that silently ignored
+  structured output. Switching to GGUF plus a typed native adapter fixed the contract and passed
+  forced pause/cold resume. The model then produced passing source/test changes but corrupted the
+  tracker, failed to recover from the writable-file/read-only-directory mount, and exhausted its
+  bounded pre-tool retries after 23 turns. This rejects the exact 12B deployment for autonomous
+  BDR while preserving a useful serving contract for the independent 31B test.
 
 ## Capability scorecard
 
