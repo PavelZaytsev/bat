@@ -1,0 +1,62 @@
+# Boundary-driven refactoring tracker — SINGLE SOURCE OF TRUTH for status.
+# Filled for the PairKey empty-left canary. Run `python3 slices.py --check` after every edit.
+
+meta:
+  project: "PairKey canary"
+  branch: "main"
+  repo: "local/repo"
+  findings_filed: 1
+  findings_from_review: 1      # found by reading
+  findings_from_execution: 0   # found by DOING a slice
+  last_updated: "2026-08-16"
+  merge_blocking_slices: [0]   # must agree with each slice's merge_blocking flag (R5)
+  optional_slices: []
+
+foreign_facts: []
+
+findings:
+  1:
+    slice: 0
+    status: fixed
+    severity: "low"
+    found: review
+    k: "is `left` empty, i.e. should a separator be emitted at all?"
+    k_kind: value
+    what: "At PairKey.join, the code needs to know whether `left` is empty and instead infers it from the constant assumption that a ':' is always inserted."
+    where: "src/main/java/canary/PairKey.java:7"
+    fix: "branch on left.isEmpty(): an empty left returns right with no leading separator"
+
+slices:
+  - id: 0
+    name: "PairKey.join assumes a separator is always warranted"
+    status: done
+    depends_on: []
+    loop_applies: true
+    boundary: >
+      The caller must know whether `left` is empty (and thus whether a separator is
+      warranted), and nothing tells join — it always inserts ':'.
+    merge_blocking: true
+    kill_list: [1]
+    representation: "the empty-check: join emits a separator only when left is non-empty"
+    collapse_claim:
+      predictions:
+        - "the unconditional `left + \":\" + right` concatenation disappears, replaced by a branch that omits the separator when left is empty"
+      unpredicted: []
+    purity_claim: "join is a pure string function; the empty-left case is testable with no mocks/IO/threads"
+    done_bar: "join(\"\", x) == x for all x, and join(a, b) == a+\":\"+b for non-empty a — both covered by executable tests that fail if reverted"
+    blast_radius: []
+    input_space: >
+      left (empty | non-empty) x right (empty | non-empty)
+    phases:
+      expose:    {status: done}
+      represent: {status: done}
+      route:
+        status: done
+        introduced:
+          - what: "a branch in join that omits the separator when left is empty"
+            blast_radius: "one method, pure, no shared state; only the empty-left output changes"
+            riskier_than_the_defect: "no — pure function, no new IO or shared state"
+            deviates_from_stated_fix: false
+      collapse:  {status: done, outcome: confirmed, died: ["the unconditional `left + \":\" + right` concatenation"]}
+      saturate:  {status: done}
+      falsify:   {status: done, siblings_confirmed_unreachable: []}

@@ -1,0 +1,103 @@
+# Boundary-driven refactoring tracker — SINGLE SOURCE OF TRUTH for status.
+#
+# Issue tracker role: an ID registry and a write-up archive. File once, never mutate.
+# An issue's remote state is permanently "open" and permanently meaningless. Read `status:` here.
+#
+# status: fixed | split | blocked | dormant | open
+#   fixed   - unreachable, with a test that fails if reverted
+#   split   - part fixed; remainder filed under its own ID. Parent is DONE.
+#   blocked - implemented, inert until a NAMED dependency lands
+#   dormant - implemented but NOT WIRED. Reads as done, does nothing. Treat as open.
+#   open    - not started
+# A slice may close with `split` and `blocked`. It may NOT close with `dormant` or `open`.
+#
+# YAML CONSTRAINT: a `{...}` flow mapping CANNOT contain a `>` block scalar. Findings needing a
+# multi-line field must use BLOCK style. Run `./slices.py --check` after EVERY edit — a parse
+# error makes this file silently unreadable.
+#
+# `--check` printing "consistent" means "against the rules it contains", nothing more.
+# Run `./slices.py --rules` once before you trust it, and `--selftest` if you edit the rules.
+
+meta:
+  project: "PairKey empty-left canary"
+  branch: "main"
+  repo: "workspace/repo"
+  findings_filed: 1
+  findings_from_review: 1      # found by reading
+  findings_from_execution: 0   # found by DOING a slice — a different, richer class
+  last_updated: "2026-08-16"
+  merge_blocking_slices: [0]   # must agree with each slice's merge_blocking flag (R5)
+  optional_slices: []
+
+# ---------------------------------------------------------------------------
+# FOREIGN FACTS — every third-party semantic the design depends on.
+# An assumption about someone else's API is an UNREPRESENTED FACT, so it lives here rather than
+# in your memory. R12 blocks a slice that routes while depending on an `assumed` one; R13 requires
+# each entry to say what is assumed, how it was established, and what a wrong answer costs.
+#
+# established:  eliminated > measured > documented > assumed
+#   eliminated - the code no longer depends on it; `evidence` names the check that replaced it
+#   measured   - a throwaway test read the ACTUAL value; `evidence` records the number
+#   documented - the vendor says so AND `checked_by` names what enforces it here
+#   assumed    - blocks (R12)
+# Eliminated beats measured: a measurement decays silently on the next upgrade, a check does not.
+# ---------------------------------------------------------------------------
+foreign_facts:
+  - symbol: "String.isEmpty()"
+    api: "java.lang (JDK)"
+    assumed: "returns true iff the string has length 0"
+    established: documented
+    evidence: "JDK javadoc: isEmpty() is defined as length() == 0"
+    checked_by: "PairKeyTest asserts join(\"\", \"beta\") == \"beta\", which only holds if isEmpty() is true for the empty string"
+    consequence_if_wrong: "the empty-left case would still emit a leading ':' and the new requirement would be unmet"
+    depended_on_by: [0]
+
+# The working record. Group by the MISSING FACT, not by file or symptom.
+findings:
+  1:
+    slice: 0
+    status: fixed
+    severity: "low"
+    found: review
+    k: "is `left` empty, i.e. does the joined key need a separator at all?"
+    k_kind: value
+    what: "At PairKey.join, the code needs to know whether left is empty and instead infers it from nothing — it unconditionally inserts ':'."
+    where: "src/main/java/canary/PairKey.java:7"
+    fix: "join checks left.isEmpty() and omits the separator when left is empty; non-empty left keeps left + ':' + right"
+
+slices:
+  - id: 0
+    name: "PairKey.join assumes a separator is always needed"
+    status: done
+    depends_on: []
+    loop_applies: true
+    boundary: >
+      The caller of join must know whether left is empty, and nothing tells join.
+    merge_blocking: true
+    kill_list: [1]
+    representation: "the explicit left.isEmpty() decision inside join: the separator is emitted only when left is non-empty"
+    collapse_claim:
+      # PREDICTIONS ONLY — the outcome lives on phases.collapse.outcome, where COLLAPSE writes
+      # it. Recording it in both places let a renderer read the stale planning stub and display
+      # confirmed slices as unverified for a whole session (R11).
+      predictions:              # derived from finding #1's stated fix direction, BEFORE routing
+        - "the unconditional `left + \":\" + right` expression disappears — the ':' becomes conditional on left being non-empty"
+      unpredicted: []
+    purity_claim: "join is a pure string function — every case is testable as plain values, no mocks / IO / threads"
+    done_bar: "join(\"\", x) == x and join(a, b) == a + \":\" + b for non-empty a, each with a test that fails if the fix is reverted"
+    blast_radius: []
+    input_space: >
+      left in {empty, non-empty} x right in {empty, non-empty, contains ':'}
+    phases:
+      expose:    {status: done, evidence: "PairKeyTest asserts join(empty, beta) == beta; ran red against pre-fix code: AssertionError expected <beta> but was <:beta>, exit=1 (2026-08-16)"}
+      represent: {status: done, evidence: "the separator decision is now an explicit left.isEmpty() branch in join; non-empty path is byte-identical to before"}
+      route:
+        status: done
+        introduced:
+          - what: "an explicit left.isEmpty() branch in join"
+            blast_radius: "one method, pure, no state, no new dependencies"
+            riskier_than_the_defect: "no — pure function, no new IO or shared state"
+            deviates_from_stated_fix: false
+      collapse:  {status: done, outcome: confirmed, died: ["the unconditional separator insertion for empty left — join returned left + \":\" + right for every input; the expression now runs only when left is non-empty"]}
+      saturate:  {status: done, evidence: "six value-level assertions: join(empty,beta)=beta, join(alpha,beta)=alpha:beta, join(alpha,empty)=alpha:, join(empty,empty)=empty, join(empty,a:b)=a:b, join(a:b,c)=a:b:c; sh test.sh green exit=0 (2026-08-16)"}
+      falsify:   {status: done, siblings_confirmed_unreachable: [], evidence: "single finding, no siblings; reverting join to return left + \":\" + right made the empty-left assertion fail (AssertionError expected <beta> but was <:beta>, exit=1); restoring the fix is green (exit=0)"}
