@@ -36,6 +36,7 @@ from run_repository_probe import (  # noqa: E402
     PolicyDriftError,
     ProbeConfiguration,
     RepositoryProbeRunner,
+    RetryableCompletedResponseError,
     RetryableModelError,
     RunnerLimits,
     ScriptedModelAdapter,
@@ -225,6 +226,60 @@ class FlakyAdapter(OverflowAdapter):
         self.generate_calls += 1
         if self.generate_calls == 1:
             raise RetryableModelError("zero-response transport failure")
+        return completion_turn()
+
+
+class CompletedResponseRejectionAdapter(OverflowAdapter):
+    def __init__(self, reject_calls: int = 1) -> None:
+        super().__init__()
+        self.reject_calls = reject_calls
+        self.rejection_secrets: list[str] = []
+
+    def policy_value(self) -> dict[str, Any]:
+        return {
+            "adapter": "completed-response-rejection-test/v1",
+            "capabilities": self.capabilities.policy_value(),
+        }
+
+    def generate(
+        self, messages: Sequence[Mapping[str, Any]], *, max_tokens: int,
+        on_sample_started: Any = None,
+    ) -> AssistantTurn:
+        del messages, max_tokens
+        self.generate_calls += 1
+        if on_sample_started is not None:
+            on_sample_started()
+        if self.generate_calls <= self.reject_calls:
+            secret = f"PRIVATE_REJECTED_RESPONSE_{self.generate_calls}"
+            self.rejection_secrets.append(secret)
+            response = {
+                "id": f"rejected-{self.generate_calls}",
+                "model": "candidate",
+                "system_fingerprint": "test-system-fingerprint",
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "reasoning_content": "private rejected reasoning " + secret,
+                        "tool_calls": [{
+                            "id": f"rejected-call-{self.generate_calls}",
+                            "type": "function",
+                            "function": {
+                                "name": "bash",
+                                "arguments": '{"command":"' + secret,
+                            },
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                },
+            }
+            raise RetryableCompletedResponseError(
+                "tool arguments are not strict JSON", response
+            )
         return completion_turn()
 
 
@@ -490,10 +545,162 @@ class RunnerIntegrationTests(unittest.TestCase):
         self.assertEqual(2, result["counters"]["model_attempts_started"])
         self.assertEqual(1, result["counters"]["retries"])
 
+    def test_fully_received_rejection_retries_same_checkpoint_and_retains_private_response(self) -> None:
+        with ProbeFixture() as fixture:
+            model = CompletedResponseRejectionAdapter()
+            process = ScriptedToolProcess([completion_observation()])
+            runner = RepositoryProbeRunner(fixture.configuration(), model, process)
+
+            result = runner.run()
+            state = read_json(runner.state_path)
+
+        self.assertEqual("completed", result["status"])
+        self.assertEqual(1, result["counters"]["logical_calls_started"])
+        self.assertEqual(2, result["counters"]["model_attempts_started"])
+        self.assertEqual(2, result["counters"]["model_attempts_completed"])
+        self.assertEqual(1, result["counters"]["retries"])
+        self.assertEqual(1, len(process.calls))
+        self.assertEqual(DEFAULT_COMPLETION_COMMAND, process.calls[0].arguments["command"])
+        self.assertEqual(1, len(state["private_rejected_model_responses"]))
+        rejection = state["private_rejected_model_responses"][0]
+        secret = model.rejection_secrets[0]
+        self.assertIn(secret, canonical_json(rejection["response"]).decode("utf-8"))
+        public_state = canonical_json({
+            "events": state["events"],
+            "failure": state["failure"],
+        }).decode("utf-8")
+        self.assertNotIn(secret, public_state)
+        self.assertEqual(
+            state["checkpoints"][0]["checkpoint_sha256"],
+            rejection["source_checkpoint_sha256"],
+        )
+        terminal = [
+            event for event in state["events"]
+            if event["kind"] == "model_attempt_finished"
+            and event["data"]["outcome"] == "completed_response_retry_scheduled"
+        ][0]
+        self.assertEqual(rejection["rejection_id"], terminal["data"]["rejection_id"])
+        self.assertEqual(
+            rejection["protocol_diagnostics"],
+            terminal["data"]["protocol_diagnostics"],
+        )
+        contract = runner.policy["runner"]["completed_response_recovery"]
+        self.assertEqual("forbidden", contract["response_repair"])
+        self.assertEqual("same-closed-checkpoint", contract["retry_source"])
+
+    def test_fully_received_rejection_exhaustion_fails_closed_without_tool_execution(self) -> None:
+        with ProbeFixture() as fixture:
+            model = CompletedResponseRejectionAdapter(reject_calls=10)
+            process = ScriptedToolProcess([])
+            runner = RepositoryProbeRunner(fixture.configuration(), model, process)
+
+            with self.assertRaises(ModelProtocolError):
+                runner.run()
+            state = read_json(runner.state_path)
+
+        self.assertEqual([], process.calls)
+        self.assertEqual(0, state["counters"]["tool_calls_requested"])
+        self.assertEqual(0, state["counters"]["tool_calls_completed"])
+        self.assertEqual(0, state["counters"]["logical_calls_completed"])
+        self.assertEqual(2, state["counters"]["model_attempts_started"])
+        self.assertEqual(2, state["counters"]["model_attempts_completed"])
+        self.assertEqual(1, state["counters"]["retries"])
+        self.assertEqual(2, len(state["private_rejected_model_responses"]))
+        self.assertEqual("model_protocol_error", state["failure"]["kind"])
+        outcomes = [
+            event["data"]["outcome"] for event in state["events"]
+            if event["kind"] == "model_attempt_finished"
+        ]
+        self.assertEqual([
+            "completed_response_retry_scheduled",
+            "completed_response_retry_exhausted",
+        ], outcomes)
+        public_state = canonical_json({
+            "events": state["events"],
+            "failure": state["failure"],
+        }).decode("utf-8")
+        for secret in model.rejection_secrets:
+            self.assertNotIn(secret, public_state)
+
+    def test_restart_resumes_completed_response_retry_from_same_closed_checkpoint(self) -> None:
+        with ProbeFixture() as fixture:
+            def crash_during_backoff(seconds: float) -> None:
+                self.assertEqual(3600, seconds)
+                raise RuntimeError("simulated crash during completed-response backoff")
+
+            configuration = replace(
+                fixture.configuration(
+                    fixture.limits(retry_backoff_seconds=3600)
+                ),
+                sleep=crash_during_backoff,
+            )
+            first_model = CompletedResponseRejectionAdapter()
+            first_process = ScriptedToolProcess([completion_observation()])
+            first_runner = RepositoryProbeRunner(
+                configuration, first_model, first_process
+            )
+            with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                first_runner.run()
+
+            crashed = read_json(first_runner.state_path)
+            source_checkpoint_sha256 = crashed["checkpoints"][-1]["checkpoint_sha256"]
+            rejection = crashed["private_rejected_model_responses"][0]
+            self.assertEqual([], first_process.calls)
+            self.assertEqual(source_checkpoint_sha256, rejection["source_checkpoint_sha256"])
+            self.assertEqual(
+                "completed_response_retry_scheduled",
+                crashed["events"][-1]["data"]["outcome"],
+            )
+
+            resumed_model = CompletedResponseRejectionAdapter()
+            resumed_model.generate_calls = 1
+            resumed_backoffs: list[float] = []
+            resumed_process = ScriptedToolProcess([completion_observation()])
+            resumed_runner = RepositoryProbeRunner(
+                replace(configuration, sleep=resumed_backoffs.append),
+                resumed_model,
+                resumed_process,
+            )
+            result = resumed_runner.run()
+            recovered = read_json(resumed_runner.state_path)
+
+        self.assertEqual("completed", result["status"])
+        self.assertEqual(1, first_model.generate_calls)
+        self.assertEqual(2, resumed_model.generate_calls)
+        self.assertEqual(1, len(resumed_process.calls))
+        self.assertEqual(1, len(recovered["private_rejected_model_responses"]))
+        self.assertEqual(1, result["counters"]["logical_calls_started"])
+        self.assertEqual(2, result["counters"]["model_attempts_started"])
+        self.assertEqual(1, result["counters"]["retries"])
+        self.assertEqual(1, len(resumed_backoffs))
+        self.assertGreater(resumed_backoffs[0], 0)
+        self.assertLessEqual(resumed_backoffs[0], 3600)
+
+    def test_private_rejection_corruption_is_refused_on_restart(self) -> None:
+        with ProbeFixture() as fixture:
+            model = CompletedResponseRejectionAdapter()
+            runner = RepositoryProbeRunner(
+                fixture.configuration(),
+                model,
+                ScriptedToolProcess([completion_observation()]),
+            )
+            runner.run()
+            state = read_json(runner.state_path)
+            state["private_rejected_model_responses"][0]["response"]["model"] = "tampered"
+            atomic_write_json(runner.state_path, state)
+
+            with self.assertRaises(StateIntegrityError):
+                RepositoryProbeRunner(
+                    fixture.configuration(),
+                    CompletedResponseRejectionAdapter(),
+                    ScriptedToolProcess([completion_observation()]),
+                ).run()
+
     def test_partial_sampled_stream_is_not_retried(self) -> None:
         with ProbeFixture() as fixture:
             model = PartialStreamAdapter()
-            runner = RepositoryProbeRunner(fixture.configuration(), model, ScriptedToolProcess([]))
+            process = ScriptedToolProcess([])
+            runner = RepositoryProbeRunner(fixture.configuration(), model, process)
 
             with self.assertRaises(IndeterminateModelResponseError):
                 runner.run()
@@ -502,6 +709,8 @@ class RunnerIntegrationTests(unittest.TestCase):
         self.assertEqual(1, model.generate_calls)
         self.assertEqual(0, state["counters"]["retries"])
         self.assertEqual("indeterminate_model_response", state["failure"]["kind"])
+        self.assertEqual([], process.calls)
+        self.assertEqual([], state["private_rejected_model_responses"])
 
     def test_restart_after_persisted_indeterminate_attempt_never_resamples(self) -> None:
         with ProbeFixture() as fixture:
@@ -825,8 +1034,93 @@ class StreamAndAdapterTests(unittest.TestCase):
         with patch(
             "run_repository_probe.urlopen",
             return_value=self.compact_stream("no tool call"),
-        ), self.assertRaises(ModelProtocolError):
+        ), self.assertRaises(RetryableCompletedResponseError):
             adapter.generate([{"role": "user", "content": "work"}], max_tokens=128)
+
+    def test_complete_malformed_tool_json_is_classified_for_private_pre_tool_recovery(self) -> None:
+        secret = "FULL_REJECTED_TOOL_ARGUMENT_SECRET"
+        events = [
+            {
+                "id": "work-response-malformed",
+                "model": "candidate",
+                "system_fingerprint": "test-system-fingerprint",
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call-malformed",
+                            "function": {
+                                "name": "bash",
+                                "arguments": '{"command":"' + secret,
+                            },
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+            },
+            {
+                "id": "work-response-malformed",
+                "model": "candidate",
+                "system_fingerprint": "test-system-fingerprint",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                },
+            },
+        ]
+        lines = [
+            ("data: " + json.dumps(event, separators=(",", ":")) + "\n").encode(
+                "utf-8"
+            )
+            for event in events
+        ] + [b"data: [DONE]\n"]
+
+        with (
+            patch(
+                "run_repository_probe.urlopen",
+                return_value=FakeStreamingHTTPResponse(lines),
+            ),
+            self.assertRaises(RetryableCompletedResponseError) as raised,
+        ):
+            self.adapter().generate(
+                [{"role": "user", "content": "work"}], max_tokens=128
+            )
+
+        error = raised.exception
+        response_bytes = canonical_json(error.rejected_response)
+        self.assertIn(secret, response_bytes.decode("utf-8"))
+        self.assertNotIn(secret, str(error))
+        self.assertEqual(
+            sha256_bytes(response_bytes),
+            error.safe_diagnostics["response_sha256"],
+        )
+        argument_diagnostics = error.safe_diagnostics["tool_calls"][0]["arguments"]
+        self.assertEqual(
+            sha256_bytes(('{"command":"' + secret).encode("utf-8")),
+            argument_diagnostics["sha256"],
+        )
+
+    def test_response_identity_failure_is_not_a_completed_response_retry(self) -> None:
+        response = self.compact_stream("ordinary work response")
+        wrong_identity_lines = [
+            line.replace(b'"model":"candidate"', b'"model":"unregistered"')
+            for line in response.lines
+        ]
+
+        with (
+            patch(
+                "run_repository_probe.urlopen",
+                return_value=FakeStreamingHTTPResponse(wrong_identity_lines),
+            ),
+            self.assertRaises(ModelProtocolError) as raised,
+        ):
+            self.adapter().generate(
+                [{"role": "user", "content": "work"}], max_tokens=128
+            )
+
+        self.assertIs(type(raised.exception), ModelProtocolError)
 
     def test_work_tool_choice_rejects_unregistered_values(self) -> None:
         for value in (None, "none", "required", "bash ", {"name": "bash"}):
@@ -957,6 +1251,8 @@ class StreamAndAdapterTests(unittest.TestCase):
             if event["kind"] == "model_attempt_finished"
         ][-1]
         self.assertEqual(diagnostics, terminal["data"]["protocol_diagnostics"])
+        self.assertEqual(0, state["counters"]["retries"])
+        self.assertEqual([], state["private_rejected_model_responses"])
 
     def test_protocol_failure_diagnostics_redact_content_reasoning_keys_and_api_key(self) -> None:
         provider_secret = "PROVIDER_API_KEY_SECRET_CANARY"

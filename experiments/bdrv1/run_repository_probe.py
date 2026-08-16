@@ -88,6 +88,20 @@ COMPACTION_RESPONSE_FORMAT = {
 }
 _UNPARSED_PROTOCOL_VALUE = object()
 
+COMPLETED_RESPONSE_RECOVERY_CONTRACT = {
+    "scope": "fully-received-normalized-work-response-adapter-rejection-before-tool-intent",
+    "retry_source": "same-closed-checkpoint",
+    "private_retention": "durable-full-normalized-response",
+    "public_diagnostics": "hash-and-structure-only",
+    "response_repair": "forbidden",
+    "partial_stream_retry": "forbidden",
+    "identity_or_policy_retry": "forbidden",
+    "post_tool_retry": "forbidden",
+    "restart": "resume-only-policy-valid-scheduled-retry",
+    "budget": "limits.max_model_retries-and-retry_backoff_seconds",
+    "exhaustion": "fail-closed",
+}
+
 CONTINUATION_INSTRUCTION = """Continue the same logical repository task autonomously. The JSON
 below is a context-maintenance packet derived at a completed assistant/tool boundary. Treat its
 summary as fallible prior work to verify against the repository. Its hashes and continuity fields
@@ -162,6 +176,27 @@ class ModelProtocolError(ProbeError):
         )
 
 
+class RetryableCompletedResponseError(ModelProtocolError):
+    """A fully received work response rejected before any tool intent exists."""
+
+    kind = "retryable_completed_response"
+
+    def __init__(self, private_message: str, rejected_response: Mapping[str, Any]) -> None:
+        normalized_response = strict_json_loads(
+            canonical_json(dict(rejected_response)).decode("utf-8")
+        )
+        if not isinstance(normalized_response, dict):
+            raise TypeError("rejected response must normalize to an object")
+        self.rejected_response = normalized_response
+        self.private_protocol_error = private_message
+        super().__init__(
+            "fully received work response failed pre-tool protocol validation",
+            safe_diagnostics=_completed_response_rejection_diagnostics(
+                normalized_response, private_message
+            ),
+        )
+
+
 class RunnerLimitError(ProbeError):
     kind = "runner_limit"
 
@@ -184,6 +219,90 @@ def sha256_bytes(value: bytes) -> str:
 
 def fingerprint(value: Any) -> str:
     return sha256_bytes(canonical_json(value))
+
+
+def _json_value_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, Mapping):
+        return "object"
+    return "unsupported"
+
+
+def _hashed_text_diagnostics(value: Any) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {"type": _json_value_type(value)}
+    if isinstance(value, str):
+        encoded = value.encode("utf-8")
+        diagnostics.update({
+            "length_bytes": len(encoded),
+            "sha256": sha256_bytes(encoded),
+        })
+    return diagnostics
+
+
+def _completed_response_rejection_diagnostics(
+    response: Mapping[str, Any], private_message: str,
+) -> dict[str, Any]:
+    """Describe a rejected response without exposing its private content."""
+
+    payload = canonical_json(dict(response))
+    private_error_bytes = private_message.encode("utf-8")
+    choices = response.get("choices")
+    first_choice = (
+        choices[0]
+        if isinstance(choices, list) and choices and isinstance(choices[0], Mapping)
+        else None
+    )
+    message = first_choice.get("message") if isinstance(first_choice, Mapping) else None
+    tool_calls = message.get("tool_calls") if isinstance(message, Mapping) else None
+    tool_diagnostics: list[dict[str, Any]] = []
+    if isinstance(tool_calls, list):
+        for index, raw_call in enumerate(tool_calls):
+            function = raw_call.get("function") if isinstance(raw_call, Mapping) else None
+            tool_diagnostics.append({
+                "index": index,
+                "call_type": _json_value_type(raw_call),
+                "id": _hashed_text_diagnostics(
+                    raw_call.get("id") if isinstance(raw_call, Mapping) else None
+                ),
+                "name": _hashed_text_diagnostics(
+                    function.get("name") if isinstance(function, Mapping) else None
+                ),
+                "arguments": _hashed_text_diagnostics(
+                    function.get("arguments") if isinstance(function, Mapping) else None
+                ),
+            })
+    return {
+        "schema": "completed-work-response-rejection/v1",
+        "response_sha256": sha256_bytes(payload),
+        "response_length_bytes": len(payload),
+        "response_fields_sha256": fingerprint(sorted(str(key) for key in response)),
+        "protocol_error_sha256": sha256_bytes(private_error_bytes),
+        "protocol_error_length_bytes": len(private_error_bytes),
+        "choices_type": _json_value_type(choices),
+        "choice_count": len(choices) if isinstance(choices, list) else None,
+        "finish_reason": _hashed_text_diagnostics(
+            first_choice.get("finish_reason") if isinstance(first_choice, Mapping) else None
+        ),
+        "content": _hashed_text_diagnostics(
+            message.get("content") if isinstance(message, Mapping) else None
+        ),
+        "reasoning": _hashed_text_diagnostics(
+            message.get("reasoning_content", message.get("reasoning"))
+            if isinstance(message, Mapping) else None
+        ),
+        "tool_calls_type": _json_value_type(tool_calls),
+        "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else None,
+        "tool_calls": tool_diagnostics,
+    }
 
 
 def environment_policy(environment: Mapping[str, str] | None) -> dict[str, Any]:
@@ -1059,13 +1178,20 @@ class OpenAICompatibleAdapter:
             context_maintenance=False,
             on_sample_started=on_sample_started,
         )
-        turn = self._assistant_turn(result)
-        if self.work_tool_choice == "bash" and (
-            len(turn.tool_calls) != 1 or turn.tool_calls[0].name != "bash"
-        ):
-            raise ModelProtocolError(
-                "named bash tool choice response did not contain exactly one bash call"
-            )
+        try:
+            turn = self._assistant_turn(result)
+            if self.work_tool_choice == "bash" and (
+                len(turn.tool_calls) != 1 or turn.tool_calls[0].name != "bash"
+            ):
+                raise ModelProtocolError(
+                    "named bash tool choice response did not contain exactly one bash call"
+                )
+        except ModelProtocolError as error:
+            # _request has already observed a complete stream and validated the served identity.
+            # Preserve the complete normalized response without repairing it; the runner decides
+            # whether its current
+            # durable checkpoint is still eligible for a bounded pre-tool retry.
+            raise RetryableCompletedResponseError(str(error), result) from error
         return turn
 
     def compact(
@@ -2274,6 +2400,7 @@ class RepositoryProbeRunner:
                 "implementation_sha256": runner_source_sha256,
                 "checkpoint_boundary": "complete-assistant-and-tool-observations",
                 "pending_tool_resume": "fail-without-replay",
+                "completed_response_recovery": COMPLETED_RESPONSE_RECOVERY_CONTRACT,
                 "context_maintenance": "same-model-no-tools-structured-packet",
                 "methodology_delivery": "ordered-model-path-and-hash-manifest",
                 "methodology_bytes_embedded": False,
@@ -2362,6 +2489,7 @@ class RepositoryProbeRunner:
                 "events": [],
                 "checkpoints": [],
                 "continuations": [],
+                "private_rejected_model_responses": [],
                 "forced_compactions_consumed": [],
                 "model_inflight": None,
                 "tool_inflight": None,
@@ -2453,6 +2581,43 @@ class RepositoryProbeRunner:
                         "a prior restart abandoned this model attempt; it will not retry"
                     )
                 outcome = attempt_data.get("outcome")
+                if outcome == "completed_response_retry_scheduled":
+                    rejection = self._rejection_for_attempt(
+                        state, model_inflight, attempt_data
+                    )
+                    retry_backoff_seconds = attempt_data.get("retry_backoff_seconds")
+                    ended_unix_seconds = attempt_data.get("ended_unix_seconds")
+                    if (
+                        model_inflight.get("sample_started") is not True
+                        or attempt_data.get("retry_class")
+                        != RetryableCompletedResponseError.kind
+                        or model_inflight.get("failures", 0) < 1
+                        or model_inflight.get("failures", 0)
+                        > self.configuration.limits.max_model_retries
+                        or isinstance(retry_backoff_seconds, bool)
+                        or not isinstance(retry_backoff_seconds, (int, float))
+                        or not math.isfinite(retry_backoff_seconds)
+                        or retry_backoff_seconds
+                        != self.configuration.limits.retry_backoff_seconds
+                        or isinstance(ended_unix_seconds, bool)
+                        or not isinstance(ended_unix_seconds, (int, float))
+                        or not math.isfinite(ended_unix_seconds)
+                        or rejection.get("protocol_diagnostics")
+                        != attempt_data.get("protocol_diagnostics")
+                    ):
+                        raise StateIntegrityError(
+                            "persisted completed-response retry is not policy-valid"
+                        )
+                    self._assert_completed_response_retry_boundary(
+                        state, model_inflight
+                    )
+                    remaining_backoff = max(
+                        0.0,
+                        ended_unix_seconds + retry_backoff_seconds - time.time(),
+                    )
+                    if remaining_backoff > 0:
+                        self.configuration.sleep(remaining_backoff)
+                    return
                 if outcome == "retry_scheduled":
                     retry_backoff_seconds = attempt_data.get("retry_backoff_seconds")
                     ended_unix_seconds = attempt_data.get("ended_unix_seconds")
@@ -2505,6 +2670,29 @@ class RepositoryProbeRunner:
                     raise RetryableModelError(
                         "a durably terminal model attempt exhausted its retry policy"
                     )
+                if outcome == "completed_response_retry_exhausted":
+                    rejection = self._rejection_for_attempt(
+                        state, model_inflight, attempt_data
+                    )
+                    if (
+                        model_inflight.get("sample_started") is not True
+                        or attempt_data.get("retry_class")
+                        != RetryableCompletedResponseError.kind
+                        or model_inflight.get("failures", 0)
+                        != self.configuration.limits.max_model_retries + 1
+                        or rejection.get("protocol_diagnostics")
+                        != attempt_data.get("protocol_diagnostics")
+                    ):
+                        raise StateIntegrityError(
+                            "persisted completed-response exhaustion is not policy-valid"
+                        )
+                    self._assert_completed_response_retry_boundary(
+                        state, model_inflight
+                    )
+                    raise ModelProtocolError(
+                        "fully received work response exhausted pre-tool retry policy",
+                        safe_diagnostics=rejection["protocol_diagnostics"],
+                    )
                 if outcome == "completed":
                     raise StateIntegrityError(
                         "completed model attempt is missing its durable response"
@@ -2537,6 +2725,35 @@ class RepositoryProbeRunner:
         ):
             return None
         return event["kind"], data
+
+    @staticmethod
+    def _rejection_for_attempt(
+        state: Mapping[str, Any],
+        inflight: Mapping[str, Any],
+        attempt_data: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        records = state.get("private_rejected_model_responses")
+        if not isinstance(records, list) or not records:
+            raise StateIntegrityError(
+                "completed-response terminal event lacks its private rejection"
+            )
+        rejection = records[-1]
+        if (
+            not isinstance(rejection, Mapping)
+            or attempt_data.get("rejection_id") != rejection.get("rejection_id")
+            or attempt_data.get("rejection_sha256")
+            != rejection.get("rejection_sha256")
+            or rejection.get("logical_kind") != inflight.get("kind")
+            or rejection.get("logical_index") != inflight.get("logical_index")
+            or rejection.get("attempt_index") != inflight.get("attempt_index")
+            or rejection.get("failure_count") != inflight.get("failures")
+            or rejection.get("source_checkpoint_sha256")
+            != inflight.get("source_checkpoint_sha256")
+        ):
+            raise StateIntegrityError(
+                "completed-response terminal event does not match its private rejection"
+            )
+        return rejection
 
     def _should_compact(self, state: dict[str, Any]) -> bool:
         inflight = state.get("model_inflight")
@@ -2834,6 +3051,105 @@ class RepositoryProbeRunner:
         })
         return inflight
 
+    def _assert_completed_response_retry_boundary(
+        self, state: Mapping[str, Any], inflight: Mapping[str, Any],
+    ) -> None:
+        """Prove that a rejected response cannot have crossed a tool boundary."""
+
+        if (
+            inflight.get("kind") != "work"
+            or state.get("model_inflight") != inflight
+            or inflight.get("response") is not None
+            or inflight.get("sample_started") is not True
+            or state.get("tool_inflight") is not None
+            or state.get("pending_compaction_trigger") is not None
+        ):
+            raise StateIntegrityError(
+                "completed-response retry is outside the preregistered pre-tool work boundary"
+            )
+        checkpoints = state.get("checkpoints")
+        if not isinstance(checkpoints, list) or not checkpoints:
+            raise StateIntegrityError("completed-response retry lacks a source checkpoint")
+        checkpoint = checkpoints[-1]
+        if (
+            checkpoint.get("checkpoint_sha256")
+            != inflight.get("source_checkpoint_sha256")
+            or checkpoint.get("complete_turn_boundary") is not True
+            or checkpoint.get("tool_calls_closed") is not True
+            or checkpoint.get("history_sha256") != state.get("history_sha256")
+            or checkpoint.get("history_message_count") != len(state["transcript"])
+            or checkpoint.get("active_context_sha256")
+            != state.get("active_context_sha256")
+            or checkpoint.get("active_message_count") != len(state["active_messages"])
+            or checkpoint.get("workspace_fingerprint")
+            != state.get("expected_workspace_fingerprint")
+        ):
+            raise StateIntegrityError(
+                "completed-response retry did not remain at its exact closed checkpoint"
+            )
+        checkpoint_counters = checkpoint.get("counters")
+        counters = state.get("counters")
+        if not isinstance(checkpoint_counters, Mapping) or not isinstance(counters, Mapping):
+            raise StateIntegrityError("completed-response retry counters are malformed")
+        for name in (
+            "logical_calls_completed",
+            "compaction_calls_completed",
+            "tool_calls_requested",
+            "tool_calls_completed",
+            "completed_turns",
+            "compactions_completed",
+        ):
+            if counters.get(name) != checkpoint_counters.get(name):
+                raise StateIntegrityError(
+                    "completed-response retry crossed a model or tool completion boundary"
+                )
+        self._assert_closed_transcript(state["transcript"])
+        self._assert_closed_transcript(state["active_messages"])
+        self._verify_inputs()
+        self._verify_workspace(state)
+
+    def _retain_rejected_model_response(
+        self,
+        state: dict[str, Any],
+        inflight: Mapping[str, Any],
+        attempt_index: int,
+        error: RetryableCompletedResponseError,
+    ) -> dict[str, Any]:
+        self._assert_completed_response_retry_boundary(state, inflight)
+        records = state.get("private_rejected_model_responses")
+        if not isinstance(records, list):
+            raise StateIntegrityError("private rejected-response state is malformed")
+        response = strict_json_loads(
+            canonical_json(error.rejected_response).decode("utf-8")
+        )
+        diagnostics = _completed_response_rejection_diagnostics(
+            response, error.private_protocol_error
+        )
+        if diagnostics != error.safe_diagnostics:
+            raise StateIntegrityError("rejected-response diagnostics changed before retention")
+        sequence = len(records)
+        body: dict[str, Any] = {
+            "rejection_id": f"rejection-{sequence:06d}",
+            "sequence": sequence,
+            "previous_rejection_sha256": (
+                records[-1]["rejection_sha256"] if sequence else None
+            ),
+            "logical_kind": inflight["kind"],
+            "logical_index": inflight["logical_index"],
+            "attempt_index": attempt_index,
+            "failure_count": inflight["failures"],
+            "source_checkpoint_sha256": inflight["source_checkpoint_sha256"],
+            "recorded_unix_seconds": time.time(),
+            "response": response,
+            "response_sha256": diagnostics["response_sha256"],
+            "response_length_bytes": diagnostics["response_length_bytes"],
+            "private_protocol_error": error.private_protocol_error,
+            "protocol_diagnostics": diagnostics,
+        }
+        body["rejection_sha256"] = fingerprint(body)
+        records.append(body)
+        return body
+
     def _attempt_model_call(
         self,
         state: dict[str, Any],
@@ -2881,6 +3197,37 @@ class RepositoryProbeRunner:
                     attempt_started_monotonic, "indeterminate", error.kind,
                 )
                 raise
+            except RetryableCompletedResponseError as error:
+                state["counters"]["model_attempts_completed"] += 1
+                inflight["failures"] += 1
+                rejection = self._retain_rejected_model_response(
+                    state, inflight, attempt_index, error
+                )
+                if inflight["failures"] > self.configuration.limits.max_model_retries:
+                    self._append_attempt_finished_event(
+                        state, inflight, attempt_index, attempt_started_unix,
+                        attempt_started_monotonic,
+                        "completed_response_retry_exhausted", error.kind,
+                        protocol_diagnostics=error.safe_diagnostics,
+                        rejection_id=rejection["rejection_id"],
+                        rejection_sha256=rejection["rejection_sha256"],
+                    )
+                    raise ModelProtocolError(
+                        "fully received work response exhausted pre-tool retry policy",
+                        safe_diagnostics=error.safe_diagnostics,
+                    ) from error
+                state["counters"]["retries"] += 1
+                self._append_attempt_finished_event(
+                    state, inflight, attempt_index, attempt_started_unix,
+                    attempt_started_monotonic,
+                    "completed_response_retry_scheduled", error.kind,
+                    retry_backoff_seconds=self.configuration.limits.retry_backoff_seconds,
+                    protocol_diagnostics=error.safe_diagnostics,
+                    rejection_id=rejection["rejection_id"],
+                    rejection_sha256=rejection["rejection_sha256"],
+                )
+                self.configuration.sleep(self.configuration.limits.retry_backoff_seconds)
+                continue
             except RetryableModelError as error:
                 state["counters"]["model_attempts_completed"] += 1
                 if inflight["sample_started"] is True:
@@ -3029,6 +3376,8 @@ class RepositoryProbeRunner:
         response_model: Any = None,
         response_system_fingerprint: Any = None,
         protocol_diagnostics: Mapping[str, Any] | None = None,
+        rejection_id: str | None = None,
+        rejection_sha256: str | None = None,
     ) -> None:
         ended = time.time()
         data = {
@@ -3047,6 +3396,9 @@ class RepositoryProbeRunner:
         }
         if protocol_diagnostics is not None:
             data["protocol_diagnostics"] = dict(protocol_diagnostics)
+        if rejection_id is not None or rejection_sha256 is not None:
+            data["rejection_id"] = rejection_id
+            data["rejection_sha256"] = rejection_sha256
         self._append_event(state, "model_attempt_finished", data)
 
     def _append_logical_finished_event(
@@ -3175,7 +3527,7 @@ class RepositoryProbeRunner:
             raise StateIntegrityError("state status is invalid")
         for name in (
             "base_messages", "transcript", "active_messages", "events",
-            "checkpoints", "continuations",
+            "checkpoints", "continuations", "private_rejected_model_responses",
         ):
             if not isinstance(state.get(name), list):
                 raise StateIntegrityError(name + " must be an array")
@@ -3193,6 +3545,7 @@ class RepositoryProbeRunner:
             state["transcript"], allow_dangling=state.get("tool_inflight") is not None
         )
         self._validate_counters(state)
+        self._validate_rejected_model_responses(state)
         self._validate_events(state)
         self._validate_checkpoints(state)
         _validate_sha256(state.get("initial_manifest_sha256"), "initial_manifest_sha256")
@@ -3257,8 +3610,88 @@ class RepositoryProbeRunner:
             previous_continuation = declared_manifest_sha256
 
     @staticmethod
-    def _validate_events(state: Mapping[str, Any]) -> None:
+    def _validate_rejected_model_responses(state: Mapping[str, Any]) -> None:
         previous: str | None = None
+        checkpoint_hashes = {
+            checkpoint.get("checkpoint_sha256")
+            for checkpoint in state["checkpoints"]
+            if isinstance(checkpoint, Mapping)
+        }
+        for sequence, rejection in enumerate(
+            state["private_rejected_model_responses"]
+        ):
+            if not isinstance(rejection, dict):
+                raise StateIntegrityError("private rejected response must be an object")
+            declared = rejection.get("rejection_sha256")
+            body = dict(rejection)
+            body.pop("rejection_sha256", None)
+            if declared != fingerprint(body):
+                raise StateIntegrityError("private rejected-response hash mismatch")
+            if (
+                rejection.get("sequence") != sequence
+                or rejection.get("rejection_id") != f"rejection-{sequence:06d}"
+                or rejection.get("previous_rejection_sha256") != previous
+            ):
+                raise StateIntegrityError(
+                    "private rejected-response hash chain is broken"
+                )
+            if rejection.get("logical_kind") != "work":
+                raise StateIntegrityError("only work responses may be privately rejected")
+            for name in ("logical_index", "attempt_index", "failure_count"):
+                value = _nonnegative_int(
+                    rejection.get(name), "private rejection " + name
+                )
+                if value < 1:
+                    raise StateIntegrityError(
+                        "private rejection " + name + " must be positive"
+                    )
+            source_checkpoint_sha256 = _validate_sha256(
+                rejection.get("source_checkpoint_sha256"),
+                "private rejection source_checkpoint_sha256",
+            )
+            if source_checkpoint_sha256 not in checkpoint_hashes:
+                raise StateIntegrityError(
+                    "private rejection source checkpoint is missing"
+                )
+            recorded = rejection.get("recorded_unix_seconds")
+            if (
+                isinstance(recorded, bool)
+                or not isinstance(recorded, (int, float))
+                or not math.isfinite(recorded)
+            ):
+                raise StateIntegrityError(
+                    "private rejection timestamp is malformed"
+                )
+            response = rejection.get("response")
+            private_error = rejection.get("private_protocol_error")
+            diagnostics = rejection.get("protocol_diagnostics")
+            if (
+                not isinstance(response, Mapping)
+                or not isinstance(private_error, str)
+                or not isinstance(diagnostics, Mapping)
+            ):
+                raise StateIntegrityError(
+                    "private rejected-response payload is malformed"
+                )
+            payload = canonical_json(dict(response))
+            if (
+                rejection.get("response_sha256") != sha256_bytes(payload)
+                or rejection.get("response_length_bytes") != len(payload)
+                or diagnostics
+                != _completed_response_rejection_diagnostics(response, private_error)
+            ):
+                raise StateIntegrityError(
+                    "private rejected-response diagnostics do not match its payload"
+                )
+            previous = declared
+
+    def _validate_events(self, state: Mapping[str, Any]) -> None:
+        previous: str | None = None
+        rejections_by_id = {
+            rejection["rejection_id"]: rejection
+            for rejection in state["private_rejected_model_responses"]
+        }
+        referenced_rejections: set[str] = set()
         for sequence, event in enumerate(state["events"]):
             if not isinstance(event, dict):
                 raise StateIntegrityError("runner event must be an object")
@@ -3273,7 +3706,76 @@ class RepositoryProbeRunner:
                 raise StateIntegrityError("runner event hash chain is broken")
             if not isinstance(event.get("kind"), str) or not isinstance(event.get("data"), Mapping):
                 raise StateIntegrityError("runner event kind or data is malformed")
+            if event.get("kind") == "model_attempt_finished":
+                data = event["data"]
+                outcome = data.get("outcome")
+                completed_response_outcomes = {
+                    "completed_response_retry_scheduled",
+                    "completed_response_retry_exhausted",
+                }
+                if outcome in completed_response_outcomes:
+                    rejection_id = data.get("rejection_id")
+                    rejection = rejections_by_id.get(rejection_id)
+                    if (
+                        rejection is None
+                        or rejection_id in referenced_rejections
+                        or data.get("rejection_sha256")
+                        != rejection.get("rejection_sha256")
+                        or data.get("logical_kind")
+                        != rejection.get("logical_kind")
+                        or data.get("logical_index")
+                        != rejection.get("logical_index")
+                        or data.get("attempt_index")
+                        != rejection.get("attempt_index")
+                        or data.get("retry_class")
+                        != RetryableCompletedResponseError.kind
+                        or data.get("protocol_diagnostics")
+                        != rejection.get("protocol_diagnostics")
+                        or "response" in data
+                        or "private_protocol_error" in data
+                    ):
+                        raise StateIntegrityError(
+                            "completed-response event does not match its private rejection"
+                        )
+                    failure_count = rejection.get("failure_count")
+                    retry_backoff = data.get("retry_backoff_seconds")
+                    if (
+                        outcome == "completed_response_retry_scheduled"
+                        and (
+                            failure_count > self.configuration.limits.max_model_retries
+                            or isinstance(retry_backoff, bool)
+                            or not isinstance(retry_backoff, (int, float))
+                            or not math.isfinite(retry_backoff)
+                            or retry_backoff
+                            != self.configuration.limits.retry_backoff_seconds
+                        )
+                    ):
+                        raise StateIntegrityError(
+                            "completed-response retry event violates its budget or backoff"
+                        )
+                    if (
+                        outcome == "completed_response_retry_exhausted"
+                        and (
+                            failure_count
+                            != self.configuration.limits.max_model_retries + 1
+                            or retry_backoff is not None
+                        )
+                    ):
+                        raise StateIntegrityError(
+                            "completed-response exhaustion unexpectedly schedules a retry"
+                        )
+                    referenced_rejections.add(rejection_id)
+                elif data.get("rejection_id") is not None or data.get(
+                    "rejection_sha256"
+                ) is not None:
+                    raise StateIntegrityError(
+                        "non-rejection model event references a private rejection"
+                    )
             previous = declared
+        if referenced_rejections != set(rejections_by_id):
+            raise StateIntegrityError(
+                "private rejected response lacks one terminal model event"
+            )
         inflight = state.get("model_inflight")
         if inflight is not None:
             if not isinstance(inflight, dict) or inflight.get("kind") not in {"work", "compaction"}:
