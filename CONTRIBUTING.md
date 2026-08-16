@@ -39,9 +39,8 @@ reproduction artifacts. A private repository is not a reason to weaken this rule
 
 ## Run the local gate
 
-The BDR state engine and its repository gates are dependency-free and support Python 3.10 and
-newer. The BAT controller gate additionally requires JDK 21 and Scala CLI. Before opening or
-updating a pull request, run:
+The BDR state engine and direct runtime are dependency-free and support Python 3.10 and newer.
+Before opening or updating a pull request, run:
 
 ```bash
 python3 -m py_compile \
@@ -54,21 +53,15 @@ python3 scripts/bdr.py selftest
 python3 scripts/check_plugin_manifests.py
 python3 scripts/check_benchmark_artifacts.py
 bin/bdr --version
-scala-cli fmt --check loop
-scala-cli test --server=false loop
+bin/bat-direct rehearse
+bin/bat-direct example-config | python3 -m json.tool >/dev/null
 ```
 
 On Windows, use `bin\bdr.cmd --version` for the launcher check. GitHub Actions repeats the engine
 suite on the minimum and current supported Python versions on Linux and on current Python on
-Windows. CI also runs the focused provider-neutral Scala/ZIO suite on Linux. CI is read-only and
-does not call OpenAI, gpt-oss, Anthropic, or any other model.
-
-The required `Live OCI containment` job resolves its synthetic Alpine fixture to an immutable image
-digest, then adversarially checks the Java worker's environment, filesystem, read-only source and
-root, bounded build staging, network boundary, and daemon cleanup after host-runner deadline expiry
-or output floods. It uses a clearly synthetic canary—never add a real credential to an isolation
-test. The ordinary local Scala suite covers deterministic OCI command construction and skips the
-live fixture when its explicit `BAT_LIVE_OCI_*` test variables are absent.
+Windows. CI also runs the direct runtime's protocol, evaluator, retry, integrity, and forced-
+compaction tests on Linux. CI is read-only and does not call OpenAI, GPT-OSS, Gemma, Anthropic, or
+any other model.
 
 ## Record experiments as experiments
 

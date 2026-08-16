@@ -1,5 +1,8 @@
 # Handoff — production-runner integration
 
+> **Historical design record.** The Scala/ZIO runtime described here was removed from the active
+> tree. Its commands and paths are not runnable at this revision; use [`../direct-runtime.md`](../direct-runtime.md).
+
 A self-contained brief for the production-runner boundary. PR #31 now supplies the live launcher,
 closed canary action, restart-aware attempts, and pinned OCI evaluator described here, but does not
 claim the six-phase live acceptance until a retained field run exists. Operators should use

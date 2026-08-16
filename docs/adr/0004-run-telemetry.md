@@ -1,5 +1,8 @@
 # ADR 0004: Payload-free run telemetry
 
+> **Historical ADR.** This records telemetry for the removed Scala/ZIO runtime. It is retained for
+> architectural evidence and is not an implementation claim for the current tree.
+
 - Status: accepted
 - Date: 2026-08-09
 - Issue: [#21](https://github.com/PavelZaytsev/bat/issues/21)

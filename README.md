@@ -52,61 +52,25 @@ bin/bdr rules
 bin/bdr selftest
 ```
 
-The provider-neutral BAT controller is a separate Scala 3/ZIO module. Contributors can run its
-focused conformance suite and executable two-tool trace with:
+The supported autonomous runtime is the dependency-free, phase-opaque direct runner. It keeps the
+model's repository interface familiar while enforcing identity, isolation, durable checkpoints,
+replay safety, context maintenance, and budgets at the host boundary:
 
 ```bash
-scala-cli test --server=false loop
-scala-cli run --server=false loop --main-class bat.conformance.GoldenTrace
+bin/bat-direct rehearse
+bin/bat-direct example-config
 ```
 
-Reasoning providers plug into a functional backend boundary while retaining their native wire
-dialects and opaque replay state. Transport mechanics are shared; provider DTOs and continuation
-rules are not. See
-[`docs/adr/0003-reasoning-backends.md`](docs/adr/0003-reasoning-backends.md) for the architecture and
-fail-closed dialect policy.
-
-Two GPT-OSS dialects exist behind that boundary: OpenAI Responses over SSE, and native Harmony over
-Chat Completions for endpoints that carry the raw analysis channel in `reasoning_content`. Neither is
-a fallback for the other — a dialect is selected explicitly and recorded in the evidence. Everything
-identical across SSE-framed reasoning providers lives in one shared streaming backend, so the next
-provider is a dialect rather than another copy of the transport loop. See
-[`docs/adr/0005-wire-dialect-seam.md`](docs/adr/0005-wire-dialect-seam.md), which also records why
-exo's Responses endpoint is treated as incompatible. Before deploying GPT-OSS on vLLM, also read
+The live adapter uses an explicitly configured OpenAI-compatible Chat Completions endpoint and
+preserves reasoning continuation only when the configured server exposes it. Before serving
+GPT-OSS with vLLM, read
 [`docs/gpt-oss-vllm-streaming-runbook.md`](docs/gpt-oss-vllm-streaming-runbook.md) for the previously
 diagnosed upstream parser crash, the coarse-streaming trap, the exact legacy patch, and the
 fail-closed decision table for malformed tool arguments.
 
-An explicitly armed live conformance probe can exercise the same GPT-OSS Responses/SSE cartridge
-against a remote 20B or 120B deployment while BAT runs on a laptop or in a container. Ordinary CI
-uses deterministic loopback endpoints and makes no live model call. See
-[`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) for the environment-only command, security
-boundary, current source/container prerequisites, verdicts, and evidence artifacts. Both a
-single-node 20B deployment and a three-node 120B exo Pipeline/MLX Ring deployment have passed it.
-These are wire-conformance results, not model-quality comparisons.
-
-Observed controller runs can emit a versioned, payload-free telemetry record that attributes model
-turns, provider attempts, retries, tools, tokens, and elapsed time to validated BDR checkpoints.
-Unknown measurements remain `null` with a reason. See
-[`docs/adr/0004-run-telemetry.md`](docs/adr/0004-run-telemetry.md).
-
-To run the complete six-phase Java portability canary with the real controller and BDR engine—but
-zero provider, target-dependency, GPU, or paid-inference calls once BAT's Scala dependencies are
-provisioned:
-
-```bash
-scala-cli run --server=false loop --main-class bat.quickstart.ToyQuickstart
-```
-
-See [`docs/quickstart.md`](docs/quickstart.md) for the buggy two-commit subject, five-invocation
-verification cadence, sealed evaluator, artifacts, and the exact boundary between portability
-evidence and model-quality evidence.
-
-The controller also contains a digest-pinned OCI worker for isolated Java PR authoring. It binds a
-run to exact authenticated base/head commits, exposes only bounded read/search/patch/Git and offline
-Maven/Gradle operations, and produces verified local commits or a patch—never a push. See
-[`docs/adr/0002-isolated-java-worker.md`](docs/adr/0002-isolated-java-worker.md) for its trust boundary,
-replay behavior, and current integration limits.
+See [`docs/direct-runtime.md`](docs/direct-runtime.md) for the supported exo/local execution path,
+preregistration boundary, cold-resume gate, and current model evidence. Ordinary CI uses a
+deterministic adapter and makes no live model call.
 
 Inside a target Git repository, its normal lifecycle is:
 
@@ -227,29 +191,20 @@ This repository currently contains:
 
 - the portable BDR refactoring skill;
 - a deterministic, dependency-free BDR 2.2 state and evidence engine;
-- a typed Scala 3/ZIO BAT controller with capability and budget enforcement;
-- a commit-verified, validated JSON subprocess bridge from BAT to the existing BDR engine;
-- a pinned, resumable, OCI-isolated Java PR worker with durable operation receipts and local-only
-  handoff;
-- a provider-neutral production-runner core that composes GPT-OSS Responses or Harmony Chat with
-  that worker, one telemetry sink, receipt-bound BDR evidence, and a separately injected trusted
-  evaluator boundary;
-- an executable, reasoning-redacted two-tool conformance harness that accepts an injected backend;
-- an executable, dependency-free Java canary that drives all six BDR phases with a sealed evaluator;
+- a dependency-free, phase-opaque direct runtime for OpenAI-compatible exo or local inference;
+- durable intent, replay protection, context compaction, bounded retry, identity checks, and
+  container-bound shell execution;
+- a deterministic forced-compaction rehearsal and a hidden-evaluator boundary;
 - thin host-installation adapters for Claude Code, ChatGPT, and Codex;
 - resumable repository-local state and an append-only audit journal;
 - idempotent GitHub issue projection with an offline outbox; and
 - benchmark records plus integrity validation.
 
-The hardware-independent GPT-OSS Responses and Harmony Chat adapters and the shared scoped ZIO
-HTTP/SSE transport are implemented and conformance-tested against deterministic in-process fake
-endpoints and exo-shaped payloads in ordinary CI.
-
-Two live deployments have passed the conformance probe over the Harmony Chat dialect: a single-node
-`gpt-oss-20b` deployment and a three-node Pipeline/MLX Ring `gpt-oss-120b` deployment. Both reached
-the terminal BDR checkpoint through both pinned tools. These are transport and continuation results,
-not evidence about model quality on real Java defects. Claude Messages, Kimi Chat, cost telemetry,
-trusted publishing, and PR automation remain future work.
+The direct runtime is conformance-tested with deterministic adapters in ordinary CI. Qwen3.8-27B is
+the external reference success for continuity and a bounded Java repair. GPT-OSS-120B is retained
+as a negative convergence result. Gemma 4 31B remains unscored because its rented-GPU attempt never
+reached inference. Active model work uses exo or a local/work-laptop endpoint; rented capacity
+requires a new explicit authorization.
 
 ## Safety and authority
 
@@ -260,17 +215,16 @@ Target code, pull-request text, issues, comments, build logs, tests, and tracker
 untrusted data. Build and test entrypoints execute target-controlled code and should run in an
 isolated, least-privileged environment without ambient production credentials.
 
-The Java worker implements that boundary with a networkless, non-root, resource-bounded OCI profile.
-It keeps controller/receipt state outside target mounts, stages read-only source into bounded
-ephemeral build storage, and fails closed when a crash leaves a mutation's outcome indeterminate.
-Offline dependency failure is an environment block; it does not relax the isolation profile.
+The direct runtime can enforce that boundary with a networkless, non-root, resource-bounded OCI
+container. It keeps control state outside target mounts and fails closed when a crash leaves a
+mutation's outcome indeterminate.
 
 BAT makes reversible implementation choices, quarantines decisions that need human authority, and
 continues independent safe slices. By default it does not push, merge, deploy, rewrite history,
 weaken tests, or accept a higher-risk design on the user's behalf.
 
-The provider-neutral controller separates authority by run mode: audit runs can see and invoke only
-explicitly read-only tools, while full-writer completion requires a fresh terminal BDR checkpoint.
+The host separates tool authority from model judgment and requires a fresh terminal checkpoint plus
+independent acceptance before publishing a writer result.
 
 Workspace trust, permission prompts, organization policy, missing credentials, rate limits,
 unavailable build tools, stale PR input, unsafe tests, and genuinely ambiguous intended behavior can
@@ -285,33 +239,21 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`skills/refactor/references/tracker.md`](skills/refactor/references/tracker.md) | state, evidence, transitions, and readiness contracts |
 | [`skills/refactor/references/autonomy.md`](skills/refactor/references/autonomy.md) | authority, safety, and interruption policy |
 | [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native memory, lifetime, and concurrency guidance |
-| [`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) | opt-in live GPT-OSS conformance and evidence capture |
-| [`docs/live-java-acceptance.md`](docs/live-java-acceptance.md) | supervised restart-aware GPT-OSS Java worker and evaluator acceptance run |
+| [`docs/direct-runtime.md`](docs/direct-runtime.md) | supported exo/local runtime, safety boundary, and cold-resume procedure |
 | [`docs/experiments/java-six-phase-120b-20260814.md`](docs/experiments/java-six-phase-120b-20260814.md) | sanitized postmortem of the first GPT-OSS-120B live Java attempt lineage |
 | [`docs/convergent-agentic-loops.md`](docs/convergent-agentic-loops.md) | architecture blueprint for autonomous loops that converge |
 | [`docs/exo-efficiency.md`](docs/exo-efficiency.md) | measured throughput, prefix-cache behaviour, and the 120B readiness checklist |
 | [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
-| [`docs/quickstart.md`](docs/quickstart.md) | executable six-phase Java canary and provider portability contract |
-| [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | BAT controller and BDR methodology responsibility boundary |
-| [`docs/adr/0002-isolated-java-worker.md`](docs/adr/0002-isolated-java-worker.md) | isolated Java PR worker, replay, evidence, and handoff boundary |
-| [`docs/adr/0003-reasoning-backends.md`](docs/adr/0003-reasoning-backends.md) | provider-native reasoning dialects, opaque replay, and shared transport boundary |
-| [`docs/adr/0004-run-telemetry.md`](docs/adr/0004-run-telemetry.md) | payload-free run, phase, retry, token, and timing telemetry contract |
+| [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | BAT runtime and BDR methodology responsibility boundary |
 
 ## Status
 
 BAT and BDR are alpha. The workflow is promising and the state engine is designed to fail closed,
 but the method has not yet been independently validated across multiple domains or organizations.
-The isolated worker, provider-neutral backend harness, and the hardware-independent GPT-OSS Responses
-and Harmony Chat adapters are implemented as controller modules. The Responses adapter is
-fake-endpoint tested only; the Harmony Chat adapter has additionally passed live single-node 20B and
-distributed three-node 120B exo deployments. Neither result evaluates a real Java repair. The
-production runner now has an explicitly armed, restart-aware live Java acceptance launcher, a
-digest-pinned worker-image contract, and a sealed OCI evaluator for the maintained canary. The first
-live Java experiment reached EXPOSE and produced an authenticated red test, but did not complete: a
-BAT v1 workspace fingerprint treated a harmless Git stat-cache refresh as a source mutation. The
-sanitized postmortem and deterministic v2 recovery fixes are linked above; a fresh post-fix canary
-remains the next proof point. Provider transports and production worker orchestration are not wired
-into the public host adapters.
+The supported direct runtime has deterministic protocol coverage and one external-reference repair
+success; deployment-candidate quality is still unresolved. Provider execution is not wired into the
+public host adapters. The next proof point is a fresh, preregistered Gemma run on exo or the work
+laptop—not another rented-GPU infrastructure attempt.
 
 Start with a supervised pilot, inspect the audit trail, and retain ordinary code review and CI as
 the final merge authority.

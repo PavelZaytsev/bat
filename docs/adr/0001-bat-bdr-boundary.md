@@ -34,9 +34,11 @@ BAT owns:
 - at-most-once tool-call replay within one live run; and
 - ephemeral provider continuation state.
 
-The BAT controller is implemented in Scala 3. ZIO supplies typed effects, composition,
-interruption, clocks, and resource scopes. The established BDR engine remains behind its versioned
-JSON command-line contract while the controller is introduced.
+BAT's supported autonomous runtime is the dependency-free, phase-opaque direct runner exposed by
+`bin/bat-direct`. It keeps the established BDR engine and readable repository artifacts behind
+their versioned contracts while enforcing transport, identity, replay, compaction, and effect
+boundaries outside the model's methodology decisions. The removed Scala/ZIO controller remains in
+Git history as an experiment; it is not a supported runtime.
 
 BAT resumes from a freshly validated BDR checkpoint. Provider-side conversation or response state
 is only an optimization. Audit mode exposes only explicitly read-only tools and may complete only
@@ -56,11 +58,11 @@ formats do not enter `scripts/bdr.py` or the BDR state contract.
 
 ## Consequences
 
-- Hosted OpenAI and gpt-oss adapters can share one conformance suite.
+- OpenAI-compatible local and exo endpoints share one conformance suite.
 - A restarted controller reconstructs work from BDR state instead of replaying hidden model state.
 - Audit and writer authority are different types of tool access, enforced before execution.
-- The initial controller can invoke the proven Python BDR engine without coupling BDR to Python
-  permanently.
+- The direct runner can invoke the proven Python BDR engine without making provider conversation
+  state authoritative.
 - BDR mutations remain optimistic and stale-safe through BAT-supplied revision preconditions and
   actor identity; BDR remains the authority that owns and advances the revision.
 - Real provider transports, isolated Java execution, routing, and cluster deployment remain separate

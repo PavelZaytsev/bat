@@ -1,5 +1,8 @@
 # Live Java acceptance runbook
 
+> **Historical runbook.** The Scala worker described here was removed from the active tree. Its
+> commands are not runnable at this revision; use [`direct-runtime.md`](direct-runtime.md).
+
 This is the supervised proof-of-concept path for issue #25. It connects BAT's
 trusted controller to an already-qualified exo GPT-OSS endpoint, gives the model
 only the isolated Java worker tools, and evaluates the delivered patch in a

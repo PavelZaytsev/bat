@@ -1,5 +1,8 @@
 # ADR 0003: Isolate each reasoning provider behind its native dialect
 
+> **Historical ADR.** This records the removed Scala/ZIO backend layer. It is retained for
+> architectural evidence and is not an implementation claim for the current tree.
+
 - Status: accepted
 - Date: 2026-08-09
 

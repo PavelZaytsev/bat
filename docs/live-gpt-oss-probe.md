@@ -1,5 +1,8 @@
 # Live GPT-OSS conformance probe
 
+> **Historical runbook.** The Scala probe described here was removed from the active tree. Preserve
+> this document for prior evidence only; use [`direct-runtime.md`](direct-runtime.md) for new exo or local runs.
+
 BAT includes an explicitly armed probe for checking one pinned GPT-OSS deployment against the
 controller contract. The BAT controller can run on a developer laptop or in a small CI/container
 job while the model runs on different hardware—an exo cluster, a GPU host, or a hosted inference

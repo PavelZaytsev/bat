@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+set -eu
+
+BAT_BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+BAT_RUNNER="$BAT_BIN_DIR/../experiments/bdrv1/run_repository_probe.py"
+
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 "$BAT_RUNNER" "$@"
+fi
+
+if command -v python >/dev/null 2>&1; then
+  exec python "$BAT_RUNNER" "$@"
+fi
+
+echo "bat-direct: Python 3.10 or newer is required" >&2
+exit 127

@@ -1,5 +1,8 @@
 # 0005 — The wire-dialect seam and the GPT-OSS Harmony Chat cartridge
 
+> **Historical ADR.** This records the removed Scala/ZIO wire layer. It is retained for prior
+> evidence; new execution uses the direct OpenAI-compatible adapter in [`../direct-runtime.md`](../direct-runtime.md).
+
 - Status: accepted
 - Supersedes: nothing
 - Amends: [`0003-reasoning-backends.md`](0003-reasoning-backends.md)
