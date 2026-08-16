@@ -102,6 +102,22 @@ COMPLETED_RESPONSE_RECOVERY_CONTRACT = {
     "exhaustion": "fail-closed",
 }
 
+COMPACTION_TOOL_RESPONSE_RECOVERY_CONTRACT = {
+    "scope": "fully-received-normalized-context-maintenance-response-with-tool-call",
+    "retry_source": "same-closed-checkpoint-and-compaction-trigger",
+    "eligibility": "post-parse-tool-call-rejection-only",
+    "private_retention": "durable-full-normalized-response",
+    "public_diagnostics": "hash-and-structure-only",
+    "tool_execution": "forbidden",
+    "tool_call_salvage": "forbidden",
+    "other_compaction_protocol_retry": "forbidden",
+    "partial_stream_retry": "forbidden",
+    "identity_or_policy_retry": "forbidden",
+    "restart": "resume-only-policy-valid-scheduled-retry",
+    "budget": "shared-limits.max_model_retries-and-retry_backoff_seconds",
+    "exhaustion": "fail-closed",
+}
+
 CONTINUATION_INSTRUCTION = """Continue the same logical repository task autonomously. The JSON
 below is a context-maintenance packet derived at a completed assistant/tool boundary. Treat its
 summary as fallible prior work to verify against the repository. Its hashes and continuity fields
@@ -180,6 +196,7 @@ class RetryableCompletedResponseError(ModelProtocolError):
     """A fully received work response rejected before any tool intent exists."""
 
     kind = "retryable_completed_response"
+    rejection_logical_kind = "work"
 
     def __init__(self, private_message: str, rejected_response: Mapping[str, Any]) -> None:
         normalized_response = strict_json_loads(
@@ -190,11 +207,44 @@ class RetryableCompletedResponseError(ModelProtocolError):
         self.rejected_response = normalized_response
         self.private_protocol_error = private_message
         super().__init__(
-            "fully received work response failed pre-tool protocol validation",
+            "fully received " + self.rejection_logical_kind
+            + " response failed pre-tool protocol validation",
             safe_diagnostics=_completed_response_rejection_diagnostics(
-                normalized_response, private_message
+                normalized_response, private_message, self.rejection_logical_kind
             ),
         )
+
+
+class RetryableCompactionToolResponseError(RetryableCompletedResponseError):
+    """A complete maintenance response rejected solely for attempting a tool call."""
+
+    kind = "retryable_compaction_tool_response"
+    rejection_logical_kind = "compaction"
+
+    def __init__(self, private_message: str, rejected_response: Mapping[str, Any]) -> None:
+        if private_message != "context-maintenance response attempted a tool call":
+            raise ValueError("compaction retry is limited to the exact tool-call rejection")
+        super().__init__(private_message, rejected_response)
+        try:
+            parsed_turn = OpenAICompatibleAdapter._assistant_turn(
+                self.rejected_response
+            )
+        except ModelProtocolError as error:
+            raise ValueError(
+                "compaction retry requires a successfully parsed response"
+            ) from error
+        if not parsed_turn.tool_calls:
+            raise ValueError(
+                "compaction retry requires at least one successfully parsed tool call"
+            )
+
+
+def _completed_response_retry_class(logical_kind: str) -> str:
+    if logical_kind == "work":
+        return RetryableCompletedResponseError.kind
+    if logical_kind == "compaction":
+        return RetryableCompactionToolResponseError.kind
+    raise StateIntegrityError("completed-response retry has an invalid logical kind")
 
 
 class RunnerLimitError(ProbeError):
@@ -249,7 +299,7 @@ def _hashed_text_diagnostics(value: Any) -> dict[str, Any]:
 
 
 def _completed_response_rejection_diagnostics(
-    response: Mapping[str, Any], private_message: str,
+    response: Mapping[str, Any], private_message: str, logical_kind: str = "work",
 ) -> dict[str, Any]:
     """Describe a rejected response without exposing its private content."""
 
@@ -281,7 +331,12 @@ def _completed_response_rejection_diagnostics(
                 ),
             })
     return {
-        "schema": "completed-work-response-rejection/v1",
+        "schema": (
+            "completed-work-response-rejection/v1"
+            if logical_kind == "work"
+            else "completed-compaction-tool-response-rejection/v1"
+        ),
+        "logical_kind": logical_kind,
         "response_sha256": sha256_bytes(payload),
         "response_length_bytes": len(payload),
         "response_fields_sha256": fingerprint(sorted(str(key) for key in response)),
@@ -1211,7 +1266,12 @@ class OpenAICompatibleAdapter:
         )
         turn = self._assistant_turn(result)
         if turn.tool_calls:
-            raise ModelProtocolError("context-maintenance response attempted a tool call")
+            # This is the one retryable maintenance rejection: the stream is complete, identity
+            # and usage were validated by _request, and parsing proved a tool call was attempted.
+            # No tool is registered for maintenance, and the response is never salvaged/executed.
+            raise RetryableCompactionToolResponseError(
+                "context-maintenance response attempted a tool call", result
+            )
         diagnostics = self._compaction_protocol_diagnostics(turn)
         try:
             value = strict_json_loads(turn.content)
@@ -2401,6 +2461,9 @@ class RepositoryProbeRunner:
                 "checkpoint_boundary": "complete-assistant-and-tool-observations",
                 "pending_tool_resume": "fail-without-replay",
                 "completed_response_recovery": COMPLETED_RESPONSE_RECOVERY_CONTRACT,
+                "compaction_tool_response_recovery": (
+                    COMPACTION_TOOL_RESPONSE_RECOVERY_CONTRACT
+                ),
                 "context_maintenance": "same-model-no-tools-structured-packet",
                 "methodology_delivery": "ordered-model-path-and-hash-manifest",
                 "methodology_bytes_embedded": False,
@@ -2590,7 +2653,7 @@ class RepositoryProbeRunner:
                     if (
                         model_inflight.get("sample_started") is not True
                         or attempt_data.get("retry_class")
-                        != RetryableCompletedResponseError.kind
+                        != _completed_response_retry_class(model_inflight.get("kind"))
                         or model_inflight.get("failures", 0) < 1
                         or model_inflight.get("failures", 0)
                         > self.configuration.limits.max_model_retries
@@ -2677,7 +2740,7 @@ class RepositoryProbeRunner:
                     if (
                         model_inflight.get("sample_started") is not True
                         or attempt_data.get("retry_class")
-                        != RetryableCompletedResponseError.kind
+                        != _completed_response_retry_class(model_inflight.get("kind"))
                         or model_inflight.get("failures", 0)
                         != self.configuration.limits.max_model_retries + 1
                         or rejection.get("protocol_diagnostics")
@@ -2690,7 +2753,8 @@ class RepositoryProbeRunner:
                         state, model_inflight
                     )
                     raise ModelProtocolError(
-                        "fully received work response exhausted pre-tool retry policy",
+                        "fully received " + str(model_inflight.get("kind"))
+                        + " response exhausted pre-tool retry policy",
                         safe_diagnostics=rejection["protocol_diagnostics"],
                     )
                 if outcome == "completed":
@@ -2747,6 +2811,9 @@ class RepositoryProbeRunner:
             or rejection.get("logical_index") != inflight.get("logical_index")
             or rejection.get("attempt_index") != inflight.get("attempt_index")
             or rejection.get("failure_count") != inflight.get("failures")
+            or rejection.get("retry_class") != attempt_data.get("retry_class")
+            or rejection.get("source_compaction_trigger_sha256")
+            != inflight.get("source_compaction_trigger_sha256")
             or rejection.get("source_checkpoint_sha256")
             != inflight.get("source_checkpoint_sha256")
         ):
@@ -3031,12 +3098,21 @@ class RepositoryProbeRunner:
     ) -> dict[str, Any]:
         if kind not in {"work", "compaction"}:
             raise StateIntegrityError("invalid model call kind")
+        pending_trigger = state.get("pending_compaction_trigger")
+        if (
+            (kind == "work" and pending_trigger is not None)
+            or (kind == "compaction" and not isinstance(pending_trigger, Mapping))
+        ):
+            raise StateIntegrityError("model call kind disagrees with compaction trigger state")
         counter_name = "logical_calls_started" if kind == "work" else "compaction_calls_started"
         state["counters"][counter_name] += 1
         inflight = {
             "kind": kind,
             "logical_index": state["counters"][counter_name],
             "source_checkpoint_sha256": source_checkpoint_sha256,
+            "source_compaction_trigger_sha256": (
+                fingerprint(pending_trigger) if kind == "compaction" else None
+            ),
             "failures": 0,
             "sample_started": False,
             "response": None,
@@ -3056,16 +3132,33 @@ class RepositoryProbeRunner:
     ) -> None:
         """Prove that a rejected response cannot have crossed a tool boundary."""
 
+        logical_kind = inflight.get("kind")
+        pending_trigger = state.get("pending_compaction_trigger")
         if (
-            inflight.get("kind") != "work"
+            logical_kind not in {"work", "compaction"}
             or state.get("model_inflight") != inflight
             or inflight.get("response") is not None
             or inflight.get("sample_started") is not True
             or state.get("tool_inflight") is not None
-            or state.get("pending_compaction_trigger") is not None
         ):
             raise StateIntegrityError(
-                "completed-response retry is outside the preregistered pre-tool work boundary"
+                "completed-response retry is outside the preregistered pre-tool boundary"
+            )
+        if logical_kind == "work":
+            if (
+                pending_trigger is not None
+                or inflight.get("source_compaction_trigger_sha256") is not None
+            ):
+                raise StateIntegrityError(
+                    "work-response retry unexpectedly has a compaction trigger"
+                )
+        elif (
+            not isinstance(pending_trigger, Mapping)
+            or inflight.get("source_compaction_trigger_sha256")
+            != fingerprint(pending_trigger)
+        ):
+            raise StateIntegrityError(
+                "compaction-response retry changed its durable trigger"
             )
         checkpoints = state.get("checkpoints")
         if not isinstance(checkpoints, list) or not checkpoints:
@@ -3123,9 +3216,13 @@ class RepositoryProbeRunner:
             canonical_json(error.rejected_response).decode("utf-8")
         )
         diagnostics = _completed_response_rejection_diagnostics(
-            response, error.private_protocol_error
+            response, error.private_protocol_error, inflight["kind"]
         )
-        if diagnostics != error.safe_diagnostics:
+        if (
+            error.rejection_logical_kind != inflight["kind"]
+            or error.kind != _completed_response_retry_class(inflight["kind"])
+            or diagnostics != error.safe_diagnostics
+        ):
             raise StateIntegrityError("rejected-response diagnostics changed before retention")
         sequence = len(records)
         body: dict[str, Any] = {
@@ -3138,7 +3235,11 @@ class RepositoryProbeRunner:
             "logical_index": inflight["logical_index"],
             "attempt_index": attempt_index,
             "failure_count": inflight["failures"],
+            "retry_class": error.kind,
             "source_checkpoint_sha256": inflight["source_checkpoint_sha256"],
+            "source_compaction_trigger_sha256": inflight[
+                "source_compaction_trigger_sha256"
+            ],
             "recorded_unix_seconds": time.time(),
             "response": response,
             "response_sha256": diagnostics["response_sha256"],
@@ -3213,7 +3314,8 @@ class RepositoryProbeRunner:
                         rejection_sha256=rejection["rejection_sha256"],
                     )
                     raise ModelProtocolError(
-                        "fully received work response exhausted pre-tool retry policy",
+                        "fully received " + str(inflight.get("kind"))
+                        + " response exhausted pre-tool retry policy",
                         safe_diagnostics=error.safe_diagnostics,
                     ) from error
                 state["counters"]["retries"] += 1
@@ -3635,8 +3737,26 @@ class RepositoryProbeRunner:
                 raise StateIntegrityError(
                     "private rejected-response hash chain is broken"
                 )
-            if rejection.get("logical_kind") != "work":
-                raise StateIntegrityError("only work responses may be privately rejected")
+            logical_kind = rejection.get("logical_kind")
+            if logical_kind not in {"work", "compaction"}:
+                raise StateIntegrityError(
+                    "private rejection has an invalid logical kind"
+                )
+            if rejection.get("retry_class") != _completed_response_retry_class(
+                logical_kind
+            ):
+                raise StateIntegrityError("private rejection has the wrong retry class")
+            trigger_sha256 = rejection.get("source_compaction_trigger_sha256")
+            if logical_kind == "work":
+                if trigger_sha256 is not None:
+                    raise StateIntegrityError(
+                        "private work rejection has a compaction trigger hash"
+                    )
+            else:
+                _validate_sha256(
+                    trigger_sha256,
+                    "private rejection source_compaction_trigger_sha256",
+                )
             for name in ("logical_index", "attempt_index", "failure_count"):
                 value = _nonnegative_int(
                     rejection.get(name), "private rejection " + name
@@ -3673,12 +3793,33 @@ class RepositoryProbeRunner:
                 raise StateIntegrityError(
                     "private rejected-response payload is malformed"
                 )
+            if (
+                logical_kind == "compaction"
+                and private_error
+                != "context-maintenance response attempted a tool call"
+            ):
+                raise StateIntegrityError(
+                    "private compaction rejection is not the exact tool-call rejection"
+                )
+            if logical_kind == "compaction":
+                try:
+                    parsed_turn = OpenAICompatibleAdapter._assistant_turn(response)
+                except ModelProtocolError as error:
+                    raise StateIntegrityError(
+                        "private compaction rejection is not successfully parsed"
+                    ) from error
+                if not parsed_turn.tool_calls:
+                    raise StateIntegrityError(
+                        "private compaction rejection does not contain a parsed tool call"
+                    )
             payload = canonical_json(dict(response))
             if (
                 rejection.get("response_sha256") != sha256_bytes(payload)
                 or rejection.get("response_length_bytes") != len(payload)
                 or diagnostics
-                != _completed_response_rejection_diagnostics(response, private_error)
+                != _completed_response_rejection_diagnostics(
+                    response, private_error, logical_kind
+                )
             ):
                 raise StateIntegrityError(
                     "private rejected-response diagnostics do not match its payload"
@@ -3728,7 +3869,10 @@ class RepositoryProbeRunner:
                         or data.get("attempt_index")
                         != rejection.get("attempt_index")
                         or data.get("retry_class")
-                        != RetryableCompletedResponseError.kind
+                        != _completed_response_retry_class(
+                            rejection.get("logical_kind")
+                        )
+                        or rejection.get("retry_class") != data.get("retry_class")
                         or data.get("protocol_diagnostics")
                         != rejection.get("protocol_diagnostics")
                         or "response" in data
@@ -3783,6 +3927,17 @@ class RepositoryProbeRunner:
             _nonnegative_int(inflight.get("failures"), "model_inflight.failures")
             if not isinstance(inflight.get("sample_started"), bool):
                 raise StateIntegrityError("model_inflight.sample_started must be a boolean")
+            trigger_sha256 = inflight.get("source_compaction_trigger_sha256")
+            if inflight["kind"] == "work":
+                if trigger_sha256 is not None:
+                    raise StateIntegrityError(
+                        "work model_inflight has a compaction trigger hash"
+                    )
+            else:
+                _validate_sha256(
+                    trigger_sha256,
+                    "model_inflight.source_compaction_trigger_sha256",
+                )
             if inflight.get("response") is not None:
                 if inflight["kind"] == "work":
                     _turn_from_json(inflight["response"])
