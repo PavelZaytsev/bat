@@ -46,6 +46,9 @@ WORK_SYSTEM_INSTRUCTION = """You are an autonomous coding agent working on one r
 Use the supplied methodology artifacts as written, the repository, and the bash tool as evidence.
 Continue the same logical task after a repository-probe continuation packet. Do not ask whether to
 proceed while safe work remains. Do not claim a command ran unless its tool observation is present.
+For every bash call, arguments are exactly one object whose command field is one JSON string. This
+remains true for multiline scripts and patches: command is never an array and its arguments object
+closes with the string's quote followed by the object brace, without an array bracket.
 When the task is genuinely complete, give the final report and make the exact completion command
 described in the task context as your only tool call.
 """
@@ -1008,7 +1011,15 @@ BASH_TOOL_SCHEMA = {
         "description": "Run one shell command in the configured repository workspace.",
         "parameters": {
             "type": "object",
-            "properties": {"command": {"type": "string"}},
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "One shell command encoded as a JSON string, including for multiline "
+                        "scripts or patches. This value is never an array."
+                    ),
+                }
+            },
             "required": ["command"],
             "additionalProperties": False,
         },

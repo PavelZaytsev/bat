@@ -45,6 +45,7 @@ from run_repository_probe import (  # noqa: E402
     StateIntegrityError,
     ToolAction,
     ToolObservation,
+    WORK_SYSTEM_INSTRUCTION,
     WorkspaceDriftError,
     WorkspaceLayout,
     atomic_write_json,
@@ -59,6 +60,17 @@ from run_repository_probe import (  # noqa: E402
     sha256_bytes,
     strict_json_loads,
 )
+
+
+class BashToolContractTests(unittest.TestCase):
+    def test_command_is_explicitly_a_single_string_even_for_multiline_patches(self) -> None:
+        command_schema = BASH_TOOL_SCHEMA["function"]["parameters"]["properties"]["command"]
+
+        self.assertEqual("string", command_schema["type"])
+        self.assertIn("multiline", command_schema["description"])
+        self.assertIn("never an array", command_schema["description"])
+        self.assertIn("command field is one JSON string", WORK_SYSTEM_INSTRUCTION)
+        self.assertIn("without an array bracket", WORK_SYSTEM_INSTRUCTION)
 
 
 def git(cwd: Path, *arguments: str) -> None:
