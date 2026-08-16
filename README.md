@@ -72,7 +72,10 @@ a fallback for the other — a dialect is selected explicitly and recorded in th
 identical across SSE-framed reasoning providers lives in one shared streaming backend, so the next
 provider is a dialect rather than another copy of the transport loop. See
 [`docs/adr/0005-wire-dialect-seam.md`](docs/adr/0005-wire-dialect-seam.md), which also records why
-exo's Responses endpoint is treated as incompatible.
+exo's Responses endpoint is treated as incompatible. Before deploying GPT-OSS on vLLM, also read
+[`docs/gpt-oss-vllm-streaming-runbook.md`](docs/gpt-oss-vllm-streaming-runbook.md) for the previously
+diagnosed upstream parser crash, the coarse-streaming trap, the exact legacy patch, and the
+fail-closed decision table for malformed tool arguments.
 
 An explicitly armed live conformance probe can exercise the same GPT-OSS Responses/SSE cartridge
 against a remote 20B or 120B deployment while BAT runs on a laptop or in a container. Ordinary CI
