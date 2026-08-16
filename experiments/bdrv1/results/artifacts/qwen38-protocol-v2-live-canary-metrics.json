@@ -1,0 +1,120 @@
+{
+  "schema_version": "bdrv1-protocol-v2-live-canary-metrics/v1",
+  "model": "Qwen/Qwen3.8-27B",
+  "role": "external-reference-continuity-canary",
+  "classification": "runner-limit-censored-after-complete-committed-work-product",
+  "cross_model_comparable": false,
+  "qualified": false,
+  "protocol": {
+    "policy_sha256": "06b78e61e3a54c1014d234c7ead66fc574fe6cdcf8c7c7f23155c4a21717c7d2",
+    "runner_implementation_sha256": "82914adb99ed897efd757f37f0843d3248b371eb57aa6ccc92a626f729922e13",
+    "context_window_tokens": 131072,
+    "proactive_trigger_tokens": 100000,
+    "work_output_tokens": 8192,
+    "compaction_output_tokens": 4096,
+    "max_logical_calls": 40,
+    "max_observation_chars": 12000,
+    "forced_compaction_after_turns": [1],
+    "container_security_identity_sha256": "dbee1f814d76f5fecf3615392e67c79b6979d2c562a01122ce86da623b1a6452",
+    "image_fingerprint": "sha256:4f60962593bf87def007c32d4420d6cbdadea0fa7427b82cc0ea5d4282824629",
+    "private_state_sha256": "35a350ce9ae65f01d8f996692ee80e20a010d8670dedaa039be2589b6c49e2fb",
+    "final_event_sha256": "fbc650866a5807c89979ab4be7b09de43ddc0942c8ae554455d2e1135ca4e9da",
+    "final_checkpoint_sha256": "e5acdb8b9a801fdd8e918c7bc5aea102f8f84a2fb1ee649140909921db272240"
+  },
+  "terminal": {
+    "runner_status": "failed",
+    "failure_kind": "runner_limit",
+    "failure_message": "maximum logical model calls reached",
+    "completion_marker_emitted": false,
+    "product_work_complete": true,
+    "last_completed_action": "candidate commit plus clean status and stat verification"
+  },
+  "counters": {
+    "completed_work_turns": 40,
+    "logical_work_calls_started": 40,
+    "logical_work_calls_completed": 40,
+    "compaction_calls_started": 2,
+    "compaction_calls_completed": 2,
+    "model_attempts_started": 43,
+    "model_attempts_completed": 43,
+    "model_attempts_abandoned": 0,
+    "tool_calls_requested": 40,
+    "tool_calls_completed": 40,
+    "retries": 1,
+    "checkpoints": 43,
+    "hash_chained_events": 257,
+    "continuations": 2
+  },
+  "usage": {
+    "wall_seconds_first_attempt_to_last_response": 461.436,
+    "completed_model_responses": 42,
+    "prompt_tokens": 998961,
+    "completion_tokens": 20720,
+    "total_tokens": 1019681,
+    "work": {
+      "responses": 40,
+      "prompt_tokens": 947221,
+      "completion_tokens": 14550,
+      "total_tokens": 961771,
+      "model_elapsed_seconds": 291.067
+    },
+    "compaction": {
+      "responses": 2,
+      "prompt_tokens": 51740,
+      "completion_tokens": 6170,
+      "total_tokens": 57910,
+      "model_elapsed_seconds": 109.377
+    }
+  },
+  "compactions": [
+    {
+      "ordinal": 1,
+      "reason": "forced_turn",
+      "completed_turns": 1,
+      "estimated_tokens": 16991,
+      "continuation_manifest_sha256": "daddfebf5fac2a3b1d1cbf018b11a85bc8cee095e4aecc9014dfaacc4bdc4f54",
+      "evaluator_preflight": "passed"
+    },
+    {
+      "ordinal": 2,
+      "reason": "estimated_threshold",
+      "completed_turns": 22,
+      "estimated_tokens": 102337,
+      "continuation_manifest_sha256": "26e6112bd9fbb3bb005ae1e7f9c9adb253dea99ea597acd3007aa2ea1ef27e91",
+      "evaluator_preflight": "passed"
+    }
+  ],
+  "retry": {
+    "logical_work_call": 27,
+    "sampled_events_before_retry": 0,
+    "classification": "retryable_model_error",
+    "backoff_seconds": 5.0,
+    "next_attempt_completed": true
+  },
+  "candidate": {
+    "base_commit": "83aaab1b36d6615a55fd690d1b9a37908777935b",
+    "commit": "6cd548bd85fe7841cce91d876261961caeaa121c",
+    "tree": "f9b95907e36e8623bfdab651276a0446b8cfffe1",
+    "changed_files": 2,
+    "insertions": 11,
+    "deletions": 0,
+    "git_diff_sha256": "440fb3e944a82cc2a37215ba7490776e9d0811c0c73fb2910571d1e2a81f896c",
+    "tracker_sha256": "afbb8a001126c818c94e1527b73507912ffcc25aa652b14843314d9d229bfb49",
+    "git_worktree_clean": true
+  },
+  "independent_verification": {
+    "candidate_test": "passed in the original offline container",
+    "production_only_revert_test": "failed at the empty-left assertion as expected",
+    "tracker_check": "consistent against all 19 frozen rules",
+    "tracker_selftest": "all 19 rules proven to fire",
+    "evaluator_slice_status": "passed",
+    "continuation_manifests_validated": 2
+  },
+  "private_artifacts_not_committed": [
+    "raw state and transcript",
+    "model reasoning and tool observations",
+    "endpoint and live configuration",
+    "container inspection",
+    "scratch files"
+  ]
+}

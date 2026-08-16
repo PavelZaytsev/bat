@@ -1,0 +1,20 @@
+Read-only analysis. Four findings were filed:
+
+F1 OrderService.place:
+  boolean paid = paymentToken.startsWith("ok_");
+
+F2 OrderService.place:
+  boolean reserved = inventory.available(sku) > 0;
+
+F3 ReceiptEmail.maybeSend:
+  if (paymentToken.startsWith("ok_")) sendReceipt();
+
+F4 Inventory.release:
+  if (inventory.available(sku) < inventory.capacity(sku)) {
+      inventory.increment(sku);
+  }
+
+PaymentGateway verifies a payment token but its authorization result is currently discarded.
+Inventory.reserve currently returns a boolean, which OrderService discards.
+
+The issue author grouped F1 and F2 because they are in OrderService, and grouped F3 and F4 as cleanup work. Evaluate and repartition the findings using BDR. Do not edit code.

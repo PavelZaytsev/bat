@@ -1,0 +1,14 @@
+Read-only REPRESENT/ROUTE decision.
+
+A proposed two-pass implementation uses a third-party API:
+
+  Iterable<Page> pages = vendor.scan();
+  if (pages.iterator().hasNext()) {
+      for (Page page : pages) {
+          consume(page);
+      }
+  }
+
+The API signature says Iterable<Page>. Local vendor documentation does not say whether iterator() returns a fresh iterator. The design depends on the second pass seeing every page. No measurement, runtime check, or materialization exists.
+
+Decide whether ROUTE may proceed, what belongs in foreign_facts, and the preferred next action.

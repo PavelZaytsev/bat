@@ -1,0 +1,236 @@
+# Boundary-driven refactoring tracker — SINGLE SOURCE OF TRUTH for status.
+#
+# Issue tracker role: an ID registry and a write-up archive. File once, never mutate.
+# An issue's remote state is permanently "open" and permanently meaningless. Read `status:` here.
+#
+# status: fixed | split | blocked | dormant | open
+#   fixed   - unreachable, with a test that fails if reverted
+#   split   - part fixed; remainder filed under its own ID. Parent is DONE.
+#   blocked - implemented, inert until a NAMED dependency lands
+#   dormant - implemented but NOT WIRED. Reads as done, does nothing. Treat as open.
+#   open    - not started
+# A slice may close with `split` and `blocked`. It may NOT close with `dormant` or `open`.
+#
+# `--check` printing "consistent" means "against the rules it contains", nothing more.
+
+meta:
+  project: "commons-csv multi-char delimiter / non-ready Reader boundary"
+  branch: "main"
+  repo: "apache/commons-csv (evaluation snapshot)"
+  findings_filed: 3
+  findings_from_review: 0
+  findings_from_execution: 3
+  last_updated: "2026-08-16"
+  merge_blocking_slices: [0]
+  optional_slices: []
+
+# ---------------------------------------------------------------------------
+# FOREIGN FACTS — every third-party semantic the design depends on.
+# established: eliminated > measured > documented > assumed
+# ---------------------------------------------------------------------------
+foreign_facts:
+  - symbol: "UnsynchronizedBufferedReader.read(char[],int,int)"
+    api: "commons-io 2.22.0"
+    assumed: "that a bulk read fills the requested length unless the stream is at EOF"
+    established: eliminated
+    evidence: >
+      The fix no longer depends on this. peekBlocking fills its window with single-char read()
+      calls (which block), so a short count can only mean EOF. The bulk-read partial-fill behaviour
+      (RootCauseProbe: n=1 with a NUL in slot 1 MID-STREAM on a ready()=false reader) is what the
+      defect exploited; it is now bypassed. The invariant is enforced by ChunkedDelimiterTest, which
+      asserts delivery independence across chunk sizes 1..3 and fails if the code regresses to a
+      bulk-read/ready()-dependent lookahead.
+    consequence_if_wrong: >
+      If it actually blocked to full length, the multi-char delimiter would be found and there would
+      be no bug. It does not, so the delimiter is silently treated as literal content (wrong parse /
+      unescaped output). The fix removes the dependency by blocking on single-char reads.
+    depended_on_by: [0]
+  - symbol: "UnsynchronizedBufferedReader.read() (single char)"
+    api: "commons-io 2.22.0"
+    assumed: "that a single-char read blocks until a char or EOF (never returns a partial/short char)"
+    established: measured
+    evidence: >
+      PeekProbe FACT1: reading a chunked(1) reader char-by-char through ExtendedBufferedReader.read()
+      yielded the full string 'abcdef' with no loss. The single-char path skips the ready() early-break
+      (remaining == len), so it blocks via fillBuf/in.read. peekBlocking is built directly on this.
+    consequence_if_wrong: >
+      The blocking peek is built on single-char reads; if they could return short, the lookahead would
+      still be incomplete and the bug would survive.
+    depended_on_by: [0]
+  - symbol: "UnsynchronizedBufferedReader.mark(int) / reset()"
+    api: "commons-io 2.22.0"
+    assumed: "that mark(n) then reading exactly n chars then reset() rewinds cleanly (mark not invalidated)"
+    established: measured
+    evidence: >
+      PeekProbe FACT2/FACT4: after a blocking peek that read exactly markLimit chars, a subsequent full
+      read returned the original string unchanged (rewind correct), and no IOException was thrown at the
+      markLimit boundary. reset() sets pos=mark with no over-limit throw in 2.22.0. peekBlocking relies on
+      this to restore the stream position after the lookahead.
+    consequence_if_wrong: >
+      If reset() threw or failed to rewind, the lookahead would consume input or crash, corrupting every
+      multi-char delimiter parse.
+    depended_on_by: [0]
+
+# The working record. Group by the MISSING FACT, not by file or symptom.
+findings:
+  1:
+    slice: 0
+    status: fixed
+    severity: "high — silent mis-parse: fields not split on a multi-char delimiter"
+    found: execution
+    k: "Are the next (len-1) stream characters the rest of the delimiter, or has the stream ended (EOF)?"
+    k_kind: temporal
+    dissolves_to: completion
+    what: >
+      At Lexer.isDelimiter, the code needs to know whether the multi-char lookahead is complete (all
+      chars present) or the stream has ended, and instead infers it from whether peek(char[]) left the
+      buffer NUL-free — which the underlying Reader only guarantees when it reports ready().
+    where: "Lexer.java:157"
+    fix: >
+      a blocking multi-char lookahead that returns the count of chars actually available (all requested,
+      or fewer at EOF), so a short read genuinely means EOF; the caller checks the count before comparing.
+  2:
+    slice: 0
+    status: fixed
+    severity: "high — silent mis-parse: an escaped multi-char delimiter is not consumed"
+    found: execution
+    k: "Are the next (2*len-1) stream characters an escaped delimiter, or has the stream ended (EOF)?"
+    k_kind: temporal
+    dissolves_to: completion
+    what: >
+      At Lexer.isEscapeDelimiter, the code needs to know whether the escaped-delimiter lookahead is
+      complete or the stream has ended, and instead infers it from whether peek(char[]) left the buffer
+      NUL-free — which holds only when the Reader reports ready().
+    where: "Lexer.java:196"
+    fix: >
+      a blocking multi-char lookahead returning the count of chars actually available; the caller checks
+      the count before comparing the escaped-delimiter pattern.
+  3:
+    slice: 0
+    status: fixed
+    severity: "high — data corruption: a delimiter in a printed Reader value is not escaped, breaking round-trip"
+    found: execution
+    k: "Are the next (len-1) stream characters the rest of a delimiter (so it must be escaped), or has the stream ended (EOF)?"
+    k_kind: temporal
+    dissolves_to: completion
+    what: >
+      At CSVFormat.printWithEscapes(Reader), the code needs to know whether a delimiter sequence is
+      present in the value being printed (so it can escape it) or the stream has ended, and instead infers
+      it from whether peek(char[]) left the look-ahead buffer NUL-free — which holds only when the Reader
+      reports ready().
+    where: "CSVFormat.java:2447"
+    fix: >
+      a blocking multi-char lookahead returning the count of chars actually available; the caller treats a
+      short read as EOF (no delimiter to escape) before building the compare string.
+
+slices:
+  - id: 0
+    name: "the multi-char lookahead is treated as complete because the buffer is NUL-free, when it is complete only if the Reader was ready"
+    status: done
+    depends_on: []
+    loop_applies: true
+    boundary: >
+      The lexer and the escaping printer must know whether the multi-character lookahead they read is
+      complete (all chars present) or the stream has ended (EOF), and nothing tells them — they infer it
+      from whether the lookahead buffer came back NUL-free, which the underlying Reader only guarantees
+      when it reports ready().
+    merge_blocking: true
+    kill_list: [1, 2, 3]
+    temporal_representation: >-
+      the count returned by the blocking peek(char[]) — a completion value: count == requested means
+      the lookahead window is full (all chars present), count < requested means the window is closed
+      (EOF reached). The window's state is a value the caller holds, not an assumption about the buffer.
+    runtime_check: >-
+      the blocking peek blocks until the window is full or EOF, so a short count is a genuine EOF rather
+      than 'not delivered yet'; each caller checks peeked < needed and treats it as 'delimiter incomplete'
+      instead of assuming the buffer is NUL-free. A wrong assumption now yields an explicit, testable
+      answer (no delimiter) rather than a silent mis-parse.
+    representation: >
+      ExtendedBufferedReader.peekBlocking(char[]) blocks until the buffer is full or EOF and returns the
+      count of chars actually available — the completion value. All three call sites (Lexer.isDelimiter,
+      Lexer.isEscapeDelimiter, CSVFormat.printWithEscapes(Reader)) consume the count and treat a short
+      count as EOF before comparing.
+    collapse_claim:
+      predictions:
+        - "Lexer.isDelimiter: the Arrays.fill(delimiterBuf, '\\0') guard dies, replaced by an explicit peeked<length (EOF) check"
+        - "Lexer.isEscapeDelimiter: the Arrays.fill(escapeDelimiterBuf, '\\0') guard dies, replaced by an explicit peeked<length (EOF) check"
+        - "CSVFormat.printWithEscapes(Reader): the Arrays.fill(lookAheadBuffer, 0) guard dies, replaced by an explicit peeked<length (EOF) check"
+      unpredicted:
+        - "Lexer.java: the now-unused `import java.util.Arrays;` died with its only use (the removed fill guard)"
+    purity_claim: >
+      the lookahead's completion (full vs EOF) and the delimiter decision become testable with a
+      deterministic chunked Reader (ready()=false) — no mocks, no threads, no real I/O.
+    done_bar: >
+      parsing and escaping-printing of multi-char delimiters produce identical results for a StringReader
+      and a chunked Reader (ready()=false), for delimiter lengths 2 and 3, with and without escaping,
+      including a partial delimiter at EOF; and the pre-fix EXPOSE test fails at its assertion on the
+      original code.
+    blast_radius: []
+    input_space: >
+      delimiter length {1, 2, 3} x reader delivery {ready=true StringReader, ready=false chunked(1),
+      chunked(k>1)} x escape {none, set} x quote {none, set} x delimiter position {start, middle, end,
+      partial-at-EOF} x operation {parse, print-with-escapes}
+    phases:
+      expose:
+        status: done
+        test: "ChunkedDelimiterTest.parseMultiCharDelimiterIsIndependentOfReaderDelivery"
+        failed_at: "assertion (assertEquals), pre-fix"
+        note: >
+          The original EXPOSE test compared List<CSVRecord> with assertEquals, but CSVRecord defines no
+          value equals (identity only), so it could never pass even on correct code — it asserted the
+          mechanism, not the property. Corrected to compare parsed VALUES (the property: delivery
+          independence). Re-verified against the pre-fix code after the change: it fails at its assertion
+          showing the real mis-parse ([[a[|]b[|]c],[d[|]e[|]f]] vs [[a,b,c],[d,e,f]]), so the correction
+          did not launder the finding.
+      represent:
+        status: done
+        note: >
+          Added ExtendedBufferedReader.peekBlocking(char[]) (mark + single-char read loop + reset,
+          returning the count). Pure addition: all 955 pre-existing tests still pass (the phase added,
+          it did not change).
+      route:
+        status: done
+        introduced:
+          - what: "ExtendedBufferedReader.peekBlocking(char[]) — a blocking multi-char lookahead returning the count of chars actually available"
+            blast_radius: >
+              New package-private method on ExtendedBufferedReader, called from exactly the three defect
+              sites (Lexer.isDelimiter, Lexer.isEscapeDelimiter, CSVFormat.printWithEscapes(Reader)). It
+              reuses the existing mark/read/reset machinery and mutates no shared state beyond what those
+              already do. The design notes proposed overriding the inherited peek(char[]); instead a
+              separate method was added so the inherited peek's semantics are untouched for any other
+              caller. Tested by PeekBlockingTest (5 value-level cases) and the ChunkedDelimiterTest
+              delivery-independence matrix.
+            riskier_than_the_defect: "no — the defect silently mis-parses / fails to escape ANY multi-char delimiter on a non-ready Reader (data corruption for every such user); the addition is one well-tested method that only changes behaviour on the previously-buggy path"
+            deviates_from_stated_fix: false
+      collapse:
+        status: done
+        outcome: confirmed
+        died:
+          - "Lexer.isDelimiter: the Arrays.fill(delimiterBuf, '\\0') guard (replaced by an explicit peeked<length EOF check)"
+          - "Lexer.isEscapeDelimiter: the Arrays.fill(escapeDelimiterBuf, '\\0') guard (replaced by an explicit peeked<length EOF check)"
+          - "CSVFormat.printWithEscapes(Reader): the Arrays.fill(lookAheadBuffer, 0) guard (replaced by an explicit peeked<length EOF check)"
+          - "Lexer.java: the now-unused `import java.util.Arrays;` (unpredicted — died with its only use)"
+      saturate:
+        status: done
+        note: >
+          122 value-level tests, no mocks / I/O / threads: ChunkedDelimiterTest (117) covers the declared
+          input space (delimiter length 1..3 x chunk 1..3 x escape {none,set} x position {start,middle,end,
+          partial-at-EOF} x {parse, print-with-escapes}) plus quote, CRLF, partial/complete escaped
+          delimiter at EOF, round-trip, and the 8192-char internal-buffer boundary; PeekBlockingTest (5)
+          covers the completion value's algebra (full window, short-only-at-EOF, empty stream, zero-length
+          buffer, chunked refill). Two SATURATE assertions were corrected to match the true invariant
+          (a peek does not consume; a bulk read on a non-ready reader may return short mid-stream) — the
+          code was right, the first-draft assertions were not.
+      falsify:
+        status: done
+        siblings_confirmed_unreachable: [1, 2, 3]
+        note: >
+          All three findings are closed by the one representation (the blocking peek's count), not patched
+          separately. Counterfactual run against the pre-fix code (main changes stashed, tests kept):
+          #1 ChunkedDelimiterTest.parseMultiCharDelimiterIsIndependentOfReaderDelivery fails at its
+          assertion ([[a[|]b[|]c],[d[|]e[|]f]] vs [[a,b,c],[d,e,f]]);
+          #2 ChunkedDelimiterTest.parseEscapedMultiCharDelimiterIsIndependentOfReaderDelivery fails at its
+          assertion ([[x![!|!]y[|]z]] vs [[x[|]y,z]]);
+          #3 ChunkedDelimiterTest.printWithEscapesEscapesMultiCharDelimiterRegardlessOfReaderDelivery fails
+          at its assertion (a[|]b vs a![!|!]b). With the fix restored the whole suite is green:
+          1077 tests, 0 failures, 11 skipped (mvn -o test, BUILD SUCCESS).

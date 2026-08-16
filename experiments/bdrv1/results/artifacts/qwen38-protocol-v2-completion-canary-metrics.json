@@ -1,0 +1,147 @@
+{
+  "schema_version": "bdrv1-protocol-v2-live-canary-metrics/v1",
+  "model": "Qwen/Qwen3.8-27B",
+  "role": "external-reference-continuity-canary",
+  "classification": "completed-protocol-v2-live-continuity-canary",
+  "cross_model_comparable": false,
+  "qualified": false,
+  "continuity_mechanics_passed": true,
+  "deployment": {
+    "served_model": "qwen3.8-27b",
+    "model_revision": null,
+    "model_revision_unknown_reason": "the endpoint exposed a served alias but not an immutable cached-snapshot revision",
+    "precision": null,
+    "precision_unknown_reason": "the deployment reported vLLM auto dtype rather than an exact precision",
+    "serving_runtime": "vLLM",
+    "runtime_build_fingerprint": "vllm-0.1.dev19754+g3a0914114-021e3e14",
+    "context_window_tokens": 131072
+  },
+  "protocol": {
+    "policy_sha256": "af643a723380817476b319caa1bb69c093a23df7556e368bb0d99e368907be3d",
+    "runner_implementation_sha256": "3317124c902683048fd6f004ce5257e736fb7404047854ae00399fe17e6adcee",
+    "context_window_tokens": 131072,
+    "proactive_trigger_tokens": 100000,
+    "work_output_tokens": 8192,
+    "compaction_output_tokens": 4096,
+    "work_reasoning_effort": "medium",
+    "context_maintenance_reasoning_effort": null,
+    "context_maintenance_reasoning_effort_reason": "maintenance used the preregistered non-thinking backend path",
+    "context_maintenance_extra_body_keys": [
+      "chat_template_kwargs"
+    ],
+    "context_maintenance_extra_body_sha256": "220b99e47feb82851cab428f86b8fe977ae7c605400d421a91e99d4a35ec9c26",
+    "max_logical_calls": 64,
+    "max_model_retries": 2,
+    "max_tool_calls_per_turn": 1,
+    "tool_timeout_seconds": 900,
+    "max_observation_chars": 12000,
+    "safe_tail_messages": 8,
+    "forced_compaction_after_turns": [
+      1
+    ],
+    "container_security_identity_sha256": "6238b16191b5cdb76ae7a4480929605303806dd6c1268026b4642115f28b8e40",
+    "image_fingerprint": "sha256:4f60962593bf87def007c32d4420d6cbdadea0fa7427b82cc0ea5d4282824629",
+    "private_state_sha256": "acd88bce5c6cd0241bcc540b221e92c0c37d3c49149d84b22525f613736abe93",
+    "final_event_sha256": "19615f7c6a293ecefe5d384abc0c4f67e20e48e4be208115b2d936b3d15b0c3e",
+    "final_checkpoint_sha256": "e4eea50b2b212e995ce88c4c7f6f86c5e4fb3c825ff77cd0314e881379e95ad4"
+  },
+  "terminal": {
+    "runner_status": "completed",
+    "failure_kind": null,
+    "failure_kind_reason": "the runner completed without failure",
+    "completion_marker_emitted": true,
+    "completion_marker_was_sole_final_tool_call": true,
+    "product_work_complete": true
+  },
+  "counters": {
+    "completed_work_turns": 29,
+    "logical_work_calls_started": 29,
+    "logical_work_calls_completed": 29,
+    "compaction_calls_started": 2,
+    "compaction_calls_completed": 2,
+    "model_attempts_started": 31,
+    "model_attempts_completed": 31,
+    "model_attempts_abandoned": 0,
+    "tool_calls_requested": 29,
+    "tool_calls_completed": 29,
+    "retries": 0,
+    "checkpoints": 32,
+    "hash_chained_events": 189,
+    "continuations": 2
+  },
+  "usage": {
+    "wall_seconds_first_attempt_to_last_response": 356.518,
+    "completed_model_responses": 31,
+    "prompt_tokens": 741394,
+    "completion_tokens": 14787,
+    "total_tokens": 756181,
+    "work": {
+      "responses": 29,
+      "prompt_tokens": 690495,
+      "completion_tokens": 11532,
+      "total_tokens": 702027,
+      "model_elapsed_seconds": 229.421
+    },
+    "compaction": {
+      "responses": 2,
+      "prompt_tokens": 50899,
+      "completion_tokens": 3255,
+      "total_tokens": 54154,
+      "model_elapsed_seconds": 58.764
+    }
+  },
+  "cost": {
+    "gpu": "H200 SXM x1",
+    "displayed_hourly_rate_usd": 4.59,
+    "node_hours_during_model_run": 0.099,
+    "run_only_cost_usd_estimate": 0.45,
+    "exact_incremental_billed_cost_usd": null,
+    "exact_incremental_billed_cost_unknown_reason": "the pod was already running before the canary and the provider bills continuously"
+  },
+  "compactions": [
+    {
+      "ordinal": 1,
+      "reason": "forced_turn",
+      "completed_turns": 1,
+      "estimated_tokens": 16991,
+      "continuation_manifest_sha256": "704e64fb3739a79f42e13df835efa7efc052c972a02ed001bea8be71eac44814",
+      "evaluator_preflight": "passed"
+    },
+    {
+      "ordinal": 2,
+      "reason": "estimated_threshold",
+      "completed_turns": 20,
+      "estimated_tokens": 101195,
+      "continuation_manifest_sha256": "7b1117bd78c8a7ee963f255f9650791a61ca16455ec2d4a64d4113d8650d4421",
+      "evaluator_preflight": "passed"
+    }
+  ],
+  "candidate": {
+    "base_commit": "2679ec83a396399293dd21b0e7aba8c7f35ed1d6",
+    "commit": "a1fab3554de93c43b86f3bcd1afd1c9b606ed7e4",
+    "tree": "71bf4c5c524afe4db15f5384c770607ec408e575",
+    "changed_files": 2,
+    "insertions": 9,
+    "deletions": 0,
+    "git_diff_sha256": "2eb5fdb410f7fdc9ff205e13d821127ca07d6de177f469efd3ecb74fef907108",
+    "tracker_sha256": "e83a1e3f1bb714bf0016865087c2424ef3332a1a7fddc9a410f0b42c39d511be",
+    "git_worktree_clean": true
+  },
+  "independent_verification": {
+    "candidate_test": "passed in the original offline container",
+    "production_only_revert_test": "failed at the empty-left assertion as expected",
+    "tracker_check": "consistent against all 19 frozen rules",
+    "tracker_selftest": "all 19 rules proven to fire",
+    "evaluator_slice_status": "passed",
+    "continuation_manifests_validated": 2,
+    "hardened_continuation_chain_evaluator": "passed post-run against both preserved manifests in origin order",
+    "docker_host_to_model_binding_audit": "passed post-run against the preserved configuration and running container"
+  },
+  "private_artifacts_not_committed": [
+    "raw state and transcript",
+    "model reasoning and tool observations",
+    "endpoint and live configuration",
+    "container inspection",
+    "scratch files"
+  ]
+}

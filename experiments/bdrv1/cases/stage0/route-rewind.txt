@@ -1,0 +1,24 @@
+Read-only analysis of a slice already in progress.
+
+The findings say:
+- callers infer how many buffers were released;
+- callers infer whether any release failed.
+
+The collapse predictions, written before ROUTE, say:
+- caller-supplied releasedCount disappears;
+- the catch-and-assume-success helper disappears.
+
+REPRESENT introduced:
+
+  enum ReleaseOutcome { RELEASED, ABSENT }
+
+All pre-existing tests still pass.
+
+During ROUTE, a call site needs the actual released count and failed buffer IDs. The current proposal is:
+
+  int count = outcome == RELEASED ? requested.size() : 0;
+  ledger.recordReleased(count);
+
+and a new helper catches per-buffer failures and returns RELEASED when at least one succeeded.
+
+Decide the next BDR action and the tracker changes. Do not implement it.

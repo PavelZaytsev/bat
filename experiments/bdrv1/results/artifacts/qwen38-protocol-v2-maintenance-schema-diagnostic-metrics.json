@@ -1,0 +1,70 @@
+{
+  "schema_version": "bdrv1-protocol-v2-safe-diagnostic/v1",
+  "model": "Qwen/Qwen3.8-27B",
+  "role": "external-reference-continuity-canary",
+  "classification": "context-maintenance-schema-failure-before-work-product",
+  "qualified": false,
+  "cross_model_comparable": false,
+  "terminal": {
+    "runner_status": "failed",
+    "failure_kind": "model_protocol_error",
+    "failure_stage": "context_maintenance",
+    "failure_code": "wrong_field_set",
+    "retryable": false,
+    "completion_marker_emitted": false,
+    "product_work_complete": false
+  },
+  "counters": {
+    "completed_work_turns": 17,
+    "logical_work_calls_started": 17,
+    "logical_work_calls_completed": 17,
+    "compaction_calls_started": 2,
+    "compaction_calls_completed": 1,
+    "successful_continuations": 1,
+    "model_attempts_started": 19,
+    "model_attempts_completed": 19,
+    "model_attempts_abandoned": 0,
+    "retries": 0,
+    "tool_calls_requested": 17,
+    "tool_calls_completed": 17,
+    "checkpoints": 19,
+    "hash_chained_events": 115
+  },
+  "continuity": {
+    "state_validation": "passed",
+    "policy_and_inputs": "passed",
+    "event_chain": "passed",
+    "checkpoint_chain": "passed",
+    "continuation_chain": "passed",
+    "workspace_binding": "passed",
+    "last_safe_checkpoint": "checkpoint-000018",
+    "last_safe_checkpoint_closed": true
+  },
+  "workspace": {
+    "clean_at_base_revision": true,
+    "candidate_commit": null,
+    "tracker_byte_identical_to_template": true
+  },
+  "usage": {
+    "accepted_responses_with_usage": 18,
+    "prompt_tokens": 416724,
+    "completion_tokens": 9370,
+    "total_tokens": 426094,
+    "terminal_response_usage_recorded": false,
+    "wall_seconds": 246.097
+  },
+  "integrity_digests": {
+    "policy_sha256": "4b6bf6c51a3218e160d6a5218ee21106d5aa0e0158f05962f1e9991f42cf5293",
+    "state_sha256": "41c8bf4394b933c457c7c15e808cbf76e12a1abf62fe41ed1645fb3875a202f8",
+    "final_checkpoint_sha256": "8dc747111dfdc3e0bbd9cb255b8e7665600246ea51115cdcba711195f4c7c555",
+    "final_event_sha256": "62a0000341393c1797597c428605965c37cedbccbc786e179dfd400281769df7"
+  },
+  "private_artifacts_not_committed": [
+    "raw state and transcript",
+    "model reasoning and tool observations",
+    "rejected maintenance response content",
+    "endpoint and live configuration",
+    "container inspection",
+    "scratch files"
+  ]
+}

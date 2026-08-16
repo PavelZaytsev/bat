@@ -1,0 +1,83 @@
+{
+  "schema_version": "bdrv1-protocol-v2-safe-diagnostic/v1",
+  "model": "Qwen/Qwen3.8-27B",
+  "role": "external-reference-continuity-canary",
+  "classification": "context-maintenance-empty-final-content-before-work-product",
+  "qualified": false,
+  "cross_model_comparable": false,
+  "terminal": {
+    "runner_status": "failed",
+    "failure_kind": "model_protocol_error",
+    "failure_stage": "context_maintenance",
+    "failure_code": "empty_final_content_not_strict_json",
+    "retryable": false,
+    "completion_marker_emitted": false,
+    "product_work_complete": false,
+    "finish_reason": null,
+    "finish_reason_unknown_reason": "the older runner did not retain a safe terminal finish reason",
+    "reasoning_length_bytes": null,
+    "reasoning_length_unknown_reason": "the older runner did not retain redacted reasoning-channel diagnostics"
+  },
+  "counters": {
+    "completed_work_turns": 19,
+    "logical_work_calls_started": 19,
+    "logical_work_calls_completed": 19,
+    "compaction_calls_started": 2,
+    "compaction_calls_completed": 1,
+    "successful_continuations": 1,
+    "model_attempts_started": 22,
+    "model_attempts_completed": 22,
+    "model_attempts_abandoned": 0,
+    "retries": 1,
+    "tool_calls_requested": 19,
+    "tool_calls_completed": 19,
+    "checkpoints": 21,
+    "hash_chained_events": 129
+  },
+  "continuity": {
+    "continuation_evaluator_preflight": "passed",
+    "policy_and_inputs": "passed",
+    "first_continuation_manifest": "passed",
+    "workspace_binding": "passed",
+    "last_safe_checkpoint": "checkpoint-000020",
+    "last_safe_checkpoint_closed": true,
+    "first_continuation_manifest_sha256": "1839ea12b85fb9d7dfd3392c119508d92c236b3c2d31dd0ebc90e29cfb302991"
+  },
+  "workspace": {
+    "base_commit": "78f645db0eee39e175368079745c6aecb9d5f1dc",
+    "base_tree": "9ea23ba241fc486b8727c28270bb461df742edbb",
+    "clean_at_base_revision": true,
+    "candidate_commit": null,
+    "tracker_byte_identical_to_template": true
+  },
+  "usage": {
+    "accepted_responses_with_usage": 20,
+    "prompt_tokens": 452929,
+    "completion_tokens": 3388,
+    "total_tokens": 456317,
+    "terminal_response_usage": null,
+    "terminal_response_usage_unknown_reason": "the older runner did not retain terminal maintenance usage",
+    "model_attempt_elapsed_seconds": 163.477,
+    "wall_seconds": 194.662
+  },
+  "protocol": {
+    "strict_json_schema_requested": true,
+    "context_maintenance_output_tokens": 4096,
+    "natural_trigger_work_request_estimate_tokens": 101689,
+    "runner_implementation_sha256": "f79b7a2e70e3ea6584cce7bb3ed8371a1e000f47e66362c1d3302b9dc9897563"
+  },
+  "integrity_digests": {
+    "policy_sha256": "9f77780fa023ac9454a60625ae5de42873d8525c842c54a9bf9bc957751b4de5",
+    "state_sha256": "7e48a4f72b7507346a9ec6567fb245ce73dcc9e85030b3d67d3bf37ea27fbd0d",
+    "final_checkpoint_sha256": "31b66370d91b5597ce8a465524bf1f10c9f4399036a8ac72f4d34e9cac4bc032",
+    "final_event_sha256": "ea4542180b5cf65d4cc3d16968cf0eb47b1656907bc2e395bafc7624fabf1257"
+  },
+  "private_artifacts_not_committed": [
+    "raw state and transcript",
+    "model reasoning and tool observations",
+    "endpoint and live configuration",
+    "container inspection",
+    "scratch files",
+    "full continuation packet"
+  ]
+}

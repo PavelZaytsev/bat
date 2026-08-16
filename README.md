@@ -72,7 +72,10 @@ a fallback for the other — a dialect is selected explicitly and recorded in th
 identical across SSE-framed reasoning providers lives in one shared streaming backend, so the next
 provider is a dialect rather than another copy of the transport loop. See
 [`docs/adr/0005-wire-dialect-seam.md`](docs/adr/0005-wire-dialect-seam.md), which also records why
-exo's Responses endpoint is treated as incompatible.
+exo's Responses endpoint is treated as incompatible. Before deploying GPT-OSS on vLLM, also read
+[`docs/gpt-oss-vllm-streaming-runbook.md`](docs/gpt-oss-vllm-streaming-runbook.md) for the previously
+diagnosed upstream parser crash, the coarse-streaming trap, the exact legacy patch, and the
+fail-closed decision table for malformed tool arguments.
 
 An explicitly armed live conformance probe can exercise the same GPT-OSS Responses/SSE cartridge
 against a remote 20B or 120B deployment while BAT runs on a laptop or in a container. Ordinary CI
@@ -285,6 +288,7 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) | opt-in live GPT-OSS conformance and evidence capture |
 | [`docs/live-java-acceptance.md`](docs/live-java-acceptance.md) | supervised restart-aware GPT-OSS Java worker and evaluator acceptance run |
 | [`docs/experiments/java-six-phase-120b-20260814.md`](docs/experiments/java-six-phase-120b-20260814.md) | sanitized postmortem of the first GPT-OSS-120B live Java attempt lineage |
+| [`docs/convergent-agentic-loops.md`](docs/convergent-agentic-loops.md) | architecture blueprint for autonomous loops that converge |
 | [`docs/exo-efficiency.md`](docs/exo-efficiency.md) | measured throughput, prefix-cache behaviour, and the 120B readiness checklist |
 | [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
 | [`docs/quickstart.md`](docs/quickstart.md) | executable six-phase Java canary and provider portability contract |

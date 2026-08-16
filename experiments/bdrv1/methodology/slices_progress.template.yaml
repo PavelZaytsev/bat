@@ -1,0 +1,133 @@
+# Boundary-driven refactoring tracker — SINGLE SOURCE OF TRUTH for status.
+#
+# Issue tracker role: an ID registry and a write-up archive. File once, never mutate.
+# An issue's remote state is permanently "open" and permanently meaningless. Read `status:` here.
+#
+# status: fixed | split | blocked | dormant | open
+#   fixed   - unreachable, with a test that fails if reverted
+#   split   - part fixed; remainder filed under its own ID. Parent is DONE.
+#   blocked - implemented, inert until a NAMED dependency lands
+#   dormant - implemented but NOT WIRED. Reads as done, does nothing. Treat as open.
+#   open    - not started
+# A slice may close with `split` and `blocked`. It may NOT close with `dormant` or `open`.
+#
+# YAML CONSTRAINT: a `{...}` flow mapping CANNOT contain a `>` block scalar. Findings needing a
+# multi-line field must use BLOCK style. Run `./slices.py --check` after EVERY edit — a parse
+# error makes this file silently unreadable.
+#
+# `--check` printing "consistent" means "against the rules it contains", nothing more.
+# Run `./slices.py --rules` once before you trust it, and `--selftest` if you edit the rules.
+
+meta:
+  project: "<name>"
+  branch: "<working branch>"
+  repo: "<host/org/repo>"
+  findings_filed: 0
+  findings_from_review: 0      # found by reading
+  findings_from_execution: 0   # found by DOING a slice — a different, richer class
+  last_updated: "YYYY-MM-DD"
+  merge_blocking_slices: [0]   # must agree with each slice's merge_blocking flag (R5)
+  optional_slices: []
+
+# ---------------------------------------------------------------------------
+# FOREIGN FACTS — every third-party semantic the design depends on.
+# An assumption about someone else's API is an UNREPRESENTED FACT, so it lives here rather than
+# in your memory. R12 blocks a slice that routes while depending on an `assumed` one; R13 requires
+# each entry to say what is assumed, how it was established, and what a wrong answer costs.
+#
+# established:  eliminated > measured > documented > assumed
+#   eliminated - the code no longer depends on it; `evidence` names the check that replaced it
+#   measured   - a throwaway test read the ACTUAL value; `evidence` records the number
+#   documented - the vendor says so AND `checked_by` names what enforces it here
+#   assumed    - blocks (R12)
+# Eliminated beats measured: a measurement decays silently on the next upgrade, a check does not.
+# ---------------------------------------------------------------------------
+foreign_facts:
+  - symbol: "Library.call()"
+    api: "<library>"
+    assumed: "what you believed it returns or means"
+    established: assumed
+    evidence: "the observed number, or the check that made the dependency moot"
+    consequence_if_wrong: "what breaks — this is what decides measure vs design-away"
+    depended_on_by: [0]
+
+# The working record. Group by the MISSING FACT, not by file or symptom.
+findings:
+  1:
+    slice: 0
+    status: open
+    severity: "<use your own vocabulary>"
+    found: review
+    # k and k_kind are REQUIRED for any finding a slice owns (R16). k_kind decides the
+    # representation: `value` becomes a record or sum type; `temporal` is a TODO meaning the
+    # ownership structure has not been found yet, and R17 then requires `dissolves_to`.
+    k: "<the one missing fact, as a question the code cannot answer>"
+    k_kind: value            # value | temporal
+    # dissolves_to: ownership | borrow | lease | capability | work_ownership | reservation |
+    #               projection | completion | irreducible      <- required when k_kind: temporal
+    what: "At <site>, the code needs to know K and instead infers K from I."
+    where: "File.java:123"
+    fix: "the value that makes K explicit"
+
+  # OPTIONAL FIELDS, each existing because its absence cost something:
+  #
+  # unassigned: "<why>"        REQUIRED on an open finding with slice: null (R6). "Deliberately
+  #                            its own item" and "nobody has decided yet" are identical in the
+  #                            data and need opposite responses, so the reason is a field.
+  #
+  # routed_from: <slice id>    Set when a finding MOVES between slices, and then
+  # k_verified_at: <slice id>  k_verified_at must equal its new `slice` (R8). A transfer is only
+  #                            real once you have re-read the CODE at the receiving slice and
+  #                            confirmed its K belongs there. Findings get routed on notes like
+  #                            "-> slice N", and a note is a decision, not a verification: one
+  #                            was moved because it lived in the same unseamed REGION as that
+  #                            slice's findings, which is grouping by exactly what the boundary
+  #                            procedure forbids.
+
+slices:
+  - id: 0
+    name: "<boundary stated as an assumption someone holds>"
+    status: pending
+    depends_on: []
+    loop_applies: true          # false for pure-enabler slices (no kill list, no collapse claim)
+    boundary: >
+      Party A must know K about party B, and nothing tells it.
+    merge_blocking: true        # must appear in meta's blocking or optional list (R5)
+    kill_list: [1]
+    representation: "the value being introduced"
+    collapse_claim:
+      # PREDICTIONS ONLY — the outcome lives on phases.collapse.outcome, where COLLAPSE writes
+      # it. Recording it in both places let a renderer read the stale planning stub and display
+      # confirmed slices as unverified for a whole session (R11).
+      predictions:              # derive from the FINDINGS' fix directions, not your build plan
+        - "specific code that must become dead"
+      unpredicted: []           # strongest evidence the boundary was real
+    purity_claim: "what becomes testable with no mocks / IO / threads"
+    done_bar: "a falsifiable statement"
+    blast_radius: []            # other slices whose assumptions this changes — re-read during ROUTE
+    # input_space is written at EXPOSE: every condition the defect manifests across, INCLUDING
+    # the ones you are not testing yet. It becomes SATURATE's checklist. Skipping it shipped a
+    # fix covering 1 of 3 conditions, and COLLAPSE was mistaken for coverage.
+    input_space: >
+      <axis> x <axis> x <axis>
+    phases:
+      expose:    {status: pending}
+      represent: {status: pending}
+      # ROUTE records what it ADDED, not only what died — every other phase measures removal, so
+      # new machinery is the one thing nothing is pointed at (R14/R15). `introduced: []` if truly
+      # nothing new was built.
+      route:
+        status: pending
+        introduced:
+          - what: "<the new machinery>"
+            blast_radius: "<what it touches, what state it mutates, what is untested>"
+            riskier_than_the_defect: "<compare against the DEFECT's blast radius; say yes if yes>"
+            deviates_from_stated_fix: false
+      collapse:  {status: pending}
+      # when COLLAPSE runs, record BOTH of these:
+      #   outcome: unverified | confirmed | partially_refuted | refuted
+      #   died: ["..."]                  what actually became dead
+      #   no_death_expected: "<why>"     ONLY if nothing should die — required in its place, so
+      #                                  that "nothing collapsed" cannot be a blank (R10)
+      saturate:  {status: pending}
+      falsify:   {status: pending, siblings_confirmed_unreachable: []}

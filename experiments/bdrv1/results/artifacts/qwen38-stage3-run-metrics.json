@@ -1,0 +1,80 @@
+{
+  "schema_version": "bdrv1-stage3-run-metrics/v1",
+  "model": "Qwen/Qwen3.8-27B",
+  "classification": "manual-recovery-diagnostic-not-cross-model-comparable",
+  "context_window_tokens": 131072,
+  "manual_continuation_handoffs": 2,
+  "segments": [
+    {
+      "name": "original",
+      "exit_status": "ContextWindowExceededError",
+      "api_attempts": 39,
+      "completed_responses": 38,
+      "elapsed_seconds": 376.7,
+      "prompt_tokens_cumulative": 2274391,
+      "completion_tokens_cumulative": 15017,
+      "maximum_observed_prompt_tokens": 97440,
+      "maximum_observed_completion_tokens": 4049,
+      "output_allowance_tokens": 32768,
+      "terminal_minimum_input_tokens": 98305,
+      "trajectory_sha256": "b4a557eeaf40249a77dc1f8a05aae37892a1d6e6720667a64380a3893e6ade57"
+    },
+    {
+      "name": "recovery-1",
+      "exit_status": "ContextWindowExceededError",
+      "api_attempts": 65,
+      "completed_responses": 64,
+      "elapsed_seconds": 1571.3,
+      "prompt_tokens_cumulative": 3879947,
+      "completion_tokens_cumulative": 48800,
+      "maximum_observed_prompt_tokens": 122767,
+      "maximum_observed_completion_tokens": 6726,
+      "output_allowance_tokens": 8192,
+      "terminal_minimum_input_tokens": 122881,
+      "trajectory_sha256": "5b94e83d0ee98679319032b70590c1c4140f2a589709555da04d4d3d3449a8a7"
+    },
+    {
+      "name": "recovery-2",
+      "exit_status": "Submitted",
+      "api_attempts": 87,
+      "completed_responses": 87,
+      "elapsed_seconds": 1255.1,
+      "prompt_tokens_cumulative": 5093238,
+      "completion_tokens_cumulative": 54047,
+      "maximum_observed_prompt_tokens": 113523,
+      "maximum_observed_completion_tokens": 6117,
+      "output_allowance_tokens": 8192,
+      "terminal_minimum_input_tokens": null,
+      "trajectory_sha256": "14fb3c3d48c4680d302ff013b13e39341bbc04f7a931288b7d05cb518bbce057"
+    }
+  ],
+  "candidate": {
+    "base_commit": "bb5ac53755cf220aba2473bb3cd58e42509d190a",
+    "commit": "c1954bef145d936eeca5b086da44c31b56c6e38c",
+    "tree": "beafb949d0813930db3c74e1ddccb6f6ed4887de",
+    "tracker_sha256": "0d6d338e27f26db678e4baabc9290a40c26ac7bc3a7647a4382bac40b1617c31",
+    "git_diff_sha256": "a0c079d864d6a10da48cb38398e3baf3d18665b65ef0b1c39cab602f4a096bf8",
+    "public_tests_reported": 1077,
+    "public_failures": 0,
+    "public_skipped": 11,
+    "hidden_checks_passed": 4,
+    "hidden_checks_total": 5
+  },
+  "score": {
+    "boundary": 1,
+    "partition": 1,
+    "evidence": 1,
+    "meta_control": 1,
+    "state": 0,
+    "total": 4,
+    "fatal": true,
+    "qualified": false,
+    "fatal_reason": "specialized helper and caller guards preserved an incomplete shared reader representation"
+  },
+  "unavailable_metrics": [
+    "transport_http_attempt_count",
+    "transport_retry_statuses",
+    "transport_retry_latency",
+    "durable_checkpoint_hash_per_original_segment"
+  ]
+}

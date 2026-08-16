@@ -1,0 +1,148 @@
+# Boundary-driven refactoring tracker — SINGLE SOURCE OF TRUTH for status.
+#
+# Issue tracker role: an ID registry and a write-up archive. File once, never mutate.
+# An issue's remote state is permanently "open" and permanently meaningless. Read `status:` here.
+#
+# status: fixed | split | blocked | dormant | open
+#   fixed   - unreachable, with a test that fails if reverted
+#   split   - part fixed; remainder filed under its own ID. Parent is DONE.
+#   blocked - implemented, inert until a NAMED dependency lands
+#   dormant - implemented but NOT WIRED. Reads as done, does nothing. Treat as open.
+#   open    - not started
+# A slice may close with `split` and `blocked`. It may NOT close with `dormant` or `open`.
+#
+# `--check` printing "consistent" means "against the rules it contains", nothing more.
+# `--rules` was read and `--selftest` passed (19 rules, all proven to fire) before this file
+# was filled in, on 2026-08-15.
+
+meta:
+  project: "ingress gateway — channel-of-arrival boundary"
+  branch: "main"
+  repo: "local:/workspace/repo (dev.bat.examples.ingress)"
+  findings_filed: 1
+  findings_from_review: 1      # the security-review report
+  findings_from_execution: 0   # none yet; EXPOSE/SATURATE may add
+  last_updated: "2026-08-15"
+  merge_blocking_slices: [0]
+  optional_slices: []
+
+# ---------------------------------------------------------------------------
+# FOREIGN FACTS — every third-party semantic the design depends on.
+# Empty, deliberately: the design depends on no third-party code. The component is pure JDK
+# (String, enum, record, lambda); after the fix the code no longer even depends on
+# String.endsWith. Gate question asked at the planning boundary: "what did this phase newly
+# assume about code I do not own?" — nothing. Re-ask at every later phase boundary.
+# ---------------------------------------------------------------------------
+foreign_facts: []
+
+# ---------------------------------------------------------------------------
+# The working record. Group by the MISSING FACT, not by file or symptom.
+# ---------------------------------------------------------------------------
+findings:
+  1:
+    slice: 0
+    status: open
+    severity: "high — security: content policy bypass"
+    found: review
+    k: "which channel did this message arrive on — internal or external?"
+    k_kind: value
+    what: >
+      At MessageRouter.route (MessageRouter.java:11), the code needs to know which channel the
+      message arrived on (K), and instead infers K from the sender's email suffix
+      (I: !sender.endsWith("@corp.test")). The gateway knows the channel — it is the method that
+      was called — but drops it when it builds the Message, so an external caller who sets the
+      sender to anything ending in "@corp.test" is treated as internal and the ContentScanner is
+      never consulted.
+    where: "src/main/java/dev/bat/examples/ingress/MessageRouter.java:11-13 (inference); IngressGateway.java:11,15 (channel dropped)"
+    fix: >
+      The message carries its channel of arrival as a value: a Channel (INTERNAL | EXTERNAL)
+      stamped by the gateway entry point that received it. MessageRouter decides by
+      message.channel() and never reads the sender string for trust. The sender stays data;
+      the channel is authority.
+
+slices:
+  - id: 0
+    name: "MessageRouter assumes it can tell internal from external by the sender string"
+    status: pending
+    depends_on: []
+    loop_applies: true
+    boundary: >
+      MessageRouter must know which channel (internal or external) the message arrived on, and
+      nothing tells it: IngressGateway knows the channel — it is the method that was called —
+      but builds an identical Message either way, and the router infers the channel from the
+      sender's email suffix, which an external caller controls.
+    merge_blocking: true
+    kill_list: [1]
+    representation: >
+      A Channel value (INTERNAL | EXTERNAL) carried by Message, stamped by the gateway entry
+      point that received the message (Message.internal(sender, body) /
+      Message.external(sender, body)). The routing decision becomes a pure function of
+      (channel, scanner verdict). REPRESENT is purely additive: the old 2-arg Message
+      constructor survives as a thin adapter that preserves today's sender-suffix inference, so
+      no behaviour changes and both pre-existing tests still pass; the adapter's death is
+      COLLAPSE evidence.
+    collapse_claim:
+      # Derived from finding #1's stated fix direction ("router decides by channel, never by
+      # sender string"), not from a build plan.
+      predictions:
+        - >
+          The inference itself dies: `boolean scanRequired =
+          !message.sender().endsWith("@corp.test")` and the `if (!scanRequired) return
+          ACCEPTED` branch in MessageRouter.route are replaced by a decision on
+          message.channel().
+        - >
+          The REPRESENT adapter that preserved the old inference (2-arg Message constructor /
+          Channel.fromSender) dies once IngressGateway routes through the channel-stamped
+          factories — no caller of the sender-suffix inference remains.
+      unpredicted: []
+    purity_claim: >
+      The routing decision is a pure function of (Channel, scanner verdict). SATURATE covers
+      all 8 cells of the input space with plain values — no I/O, no threads, no mocks (a lambda
+      ContentScanner is a value, not a mock).
+    done_bar: >
+      acceptExternal with a sender ending in "@corp.test" and a body the scanner rejects returns
+      REJECTED with the scanner consulted; both pre-existing tests pass unchanged (internal corp
+      sender still bypasses the scanner with 0 calls; external non-corp sender still scanned
+      with 1 call); no sender-string-based trust inference remains anywhere in MessageRouter.
+    blast_radius: []
+    input_space: >
+      channel {internal, external} x sender {ends with "@corp.test", does not} x scanner
+      {allows, rejects} = 8 cells. Measured on 2026-08-15 against the current code (scratch
+      probe, repo read-only): the defect manifests in the two external x corp-suffix cells —
+      ACCEPTED with scannerCalls=0 in both, i.e. the scanner is never consulted, so the verdict
+      is irrelevant there. Pinned behaviours that must survive the fix: internal x corp-suffix
+      -> ACCEPTED, 0 scanner calls (test internalCorporateSenderBypassesScanner); external x
+      non-corp -> scanner consulted exactly once, verdict decides (test
+      externalInternetSenderIsScanned). DECISION D1 (surfaced, see report): internal x
+      non-corp currently IS scanned (REJECTED when the scanner rejects); under channel-based
+      trust it will no longer be scanned. That is the consequence of making the channel the
+      authority — keeping the scan would leave sender-string inference in the decision, which
+      is the patch this slice exists to remove. SATURATE must pin the new semantics of that
+      cell explicitly.
+    expose_plan: >
+      One test, one finding, in the repo's existing main-based style
+      (IngressGatewayPublicTest): RecordingScanner(false), then
+      acceptExternal("mallory@corp.test", "blockedBody") must return REJECTED. Assert the
+      PROPERTY (the decision is REJECTED), not the mechanism (scanner call count) — the call
+      count is recorded as secondary evidence. Probe already run in /workspace/scratch against
+      a copy of the current code: it fails AT ITS ASSERTION (AssertionError "expected REJECTED
+      but was ACCEPTED", scannerCalls=0), not in setup — the boundary is observable with no
+      infrastructure, no threads, no seam-building needed. The test is not yet in the repo
+      (read-only this stage); the implementation session adds it as the first EXPOSE act and
+      must watch it go red before REPRESENT. If ROUTE forces the test to change, the changed
+      test does not count as green until re-run against the pre-fix code.
+    phases:
+      expose:    {status: pending}
+      represent: {status: pending}
+      route:
+        status: pending
+        # Planned introduction, to be confirmed or corrected when ROUTE actually runs. If ROUTE
+        # reaches for anything beyond this list, REPRESENT was incomplete — go back.
+        introduced:
+          - what: "Channel enum (INTERNAL | EXTERNAL) + 3-arg Message with internal()/external() factories; 2-arg Message kept as inference-preserving adapter until COLLAPSE"
+            blast_radius: "single package, 4 files; no shared mutable state; Message is a record so no existing caller can observe the new component until the gateway switches"
+            riskier_than_the_defect: "no — the defect's blast radius is the entire external content policy; the addition is one enum and one record component"
+            deviates_from_stated_fix: false
+      collapse:  {status: pending}
+      saturate:  {status: pending}
+      falsify:   {status: pending, siblings_confirmed_unreachable: []}

@@ -1,0 +1,15 @@
+Discovery and planning only; product source and tests are read-only in this stage.
+
+Security review reports:
+
+  acceptExternal("mallory@corp.test", blockedBody)
+
+can be accepted without ContentScanner authorization even when the scanner rejects the body.
+
+Use the supplied BDR methodology to inspect the repository, establish a valid EXPOSE plan, discover
+the information boundary, and prepare slices_progress.yaml through REPRESENT planning. Run
+slices.py --rules, --selftest, and --check as instructed by the methodology. Do not implement the
+repair yet.
+
+Stop only when the tracker is ready for an autonomous implementation session and your final report
+contains the six semantic checkpoints requested by the experiment prompt.

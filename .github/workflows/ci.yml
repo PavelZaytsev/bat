@@ -94,6 +94,46 @@ jobs:
         shell: cmd
         run: bin\bdr.cmd --version
 
+  bdrv1:
+    name: Direct BDRv1 protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install evaluator dependency
+        run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
+
+      - name: Compile the phase-opaque runner and evaluator
+        run: >-
+          python -m py_compile
+          experiments/bdrv1/run_repository_probe.py
+          experiments/bdrv1/evaluate_run.py
+
+      - name: Run protocol and evaluator tests
+        run: >-
+          python -m unittest discover
+          -s experiments/bdrv1/tests
+          -p 'test_*.py'
+
+      - name: Cross a deterministic forced compaction
+        run: >-
+          python experiments/bdrv1/run_repository_probe.py rehearse
+
+      - name: Validate the live configuration template
+        run: >-
+          python experiments/bdrv1/run_repository_probe.py example-config
+          | python -m json.tool
+          > /dev/null
+
   loop:
     name: Agentic loop (Scala 3 / ZIO 2)
     runs-on: ubuntu-latest
@@ -171,6 +211,7 @@ jobs:
     needs:
       - contract
       - engine
+      - bdrv1
       - loop
       - isolation
     runs-on: ubuntu-latest
@@ -180,10 +221,12 @@ jobs:
         env:
           CONTRACT_RESULT: ${{ needs.contract.result }}
           ENGINE_RESULT: ${{ needs.engine.result }}
+          BDRV1_RESULT: ${{ needs.bdrv1.result }}
           LOOP_RESULT: ${{ needs.loop.result }}
           ISOLATION_RESULT: ${{ needs.isolation.result }}
         run: >-
           test "$CONTRACT_RESULT" = success &&
           test "$ENGINE_RESULT" = success &&
+          test "$BDRV1_RESULT" = success &&
           test "$LOOP_RESULT" = success &&
           test "$ISOLATION_RESULT" = success

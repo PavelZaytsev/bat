@@ -1,0 +1,17 @@
+Read-only resume scenario.
+
+slices.py --check reports consistent against all of its rules.
+
+Slice S1 is named "ingress trust" and owns both findings:
+
+F10 MessageRouter:
+  boolean trusted = message.sender().endsWith("@corp.test");
+
+F11 RetryQueue:
+  if (clock.now().minus(job.createdAt()).toSeconds() > 30) {
+      worker.claim(job);
+  }
+
+The tracker says F11 belongs to S1 because both files are in the ingress pipeline. It contains the required k, k_kind, routed_from, and k_verified_at fields.
+
+Evaluate whether the slice is semantically valid and what must happen next. Do not edit code.

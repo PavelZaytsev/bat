@@ -1,0 +1,16 @@
+Implementation and proof, not another planning-only session.
+
+Continue the merge-blocking slice recorded in /workspace/bdr/slices_progress.yaml against
+/workspace/repo. Use the supplied original BDRv1 methodology and work autonomously until the slice
+is genuinely fixed end-to-end and the tracker honestly records the evidence, or until code evidence
+requires a rewind, split, transfer, or evidenced blocker.
+
+Owner clarification for the judgments left by the planning session:
+
+- acceptInternal is reachable only from authenticated internal ingress.
+- Internal ingress bypasses ContentScanner regardless of the sender value.
+- Every external ingress must consult ContentScanner exactly once, and its verdict controls the
+  decision, regardless of the sender value.
+
+Do not stop for confirmation between phases. If the code disproves the existing tracker, correct
+the tracker and continue.

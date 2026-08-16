@@ -1,0 +1,34 @@
+diff --git a/src/main/java/canary/PairKey.java b/src/main/java/canary/PairKey.java
+index 94b0e90..eaeff64 100644
+--- a/src/main/java/canary/PairKey.java
++++ b/src/main/java/canary/PairKey.java
+@@ -4,6 +4,9 @@ public final class PairKey {
+     private PairKey() {}
+ 
+     public static String join(final String left, final String right) {
++        if (left.isEmpty()) {
++            return right;
++        }
+         return left + ":" + right;
+     }
+ }
+diff --git a/src/test/java/canary/PairKeyTest.java b/src/test/java/canary/PairKeyTest.java
+index 80a72a1..c2ab165 100644
+--- a/src/test/java/canary/PairKeyTest.java
++++ b/src/test/java/canary/PairKeyTest.java
+@@ -2,7 +2,15 @@ package canary;
+ 
+ public final class PairKeyTest {
+     public static void main(final String[] args) {
++        // EXPOSE: an empty left must not produce a leading separator
++        assertEquals("beta", PairKey.join("", "beta"));
++        // existing behavior: a non-empty left keeps the separator
+         assertEquals("alpha:beta", PairKey.join("alpha", "beta"));
++        // SATURATE: dense value-level cases, no mocks / IO / threads
++        assertEquals("alpha:", PairKey.join("alpha", ""));
++        assertEquals("", PairKey.join("", ""));
++        assertEquals("a:b", PairKey.join("", "a:b"));
++        assertEquals("a:b:c", PairKey.join("a:b", "c"));
+         System.out.println("PairKeyTest passed");
+     }
+ 
