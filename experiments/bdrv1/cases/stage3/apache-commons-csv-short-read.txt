@@ -1,0 +1,21 @@
+An integration report says Apache Commons CSV can interpret an identical character sequence
+differently depending only on how its Reader delivers the characters.
+
+A Reader is allowed to return fewer characters than requested before EOF. With a multi-character
+delimiter, a source that returns one character per bulk read can parse differently from a
+StringReader containing exactly the same characters. Escaping and printing a Reader-backed value
+can also fail to round-trip under the same delivery shape.
+
+Use the supplied original BDRv1 methodology to investigate and repair this bug class in
+/workspace/repo. Work autonomously from discovery through implementation, collapse, saturation,
+falsification, and honest tracker closure. Do not stop at a plan and do not ask for confirmation
+between phases or slices. Rewind, split, transfer, or block when the evidence requires it.
+
+Requirements:
+
+- Character delivery chunking must not change CSV parsing or Reader-backed printing semantics.
+- Preserve public API compatibility and all existing behavior not falsified by the report.
+- Establish claims with executable evidence; do not treat the report or a green tracker check as
+  proof.
+- The container has no network access. Maven dependencies are already cached; invoke Maven offline.
+- Complete every merge-blocking slice or record an evidenced non-completion honestly.
