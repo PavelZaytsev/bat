@@ -21,6 +21,7 @@ from run_repository_probe import (  # noqa: E402
     AdapterCapabilities,
     ArtifactInput,
     AssistantTurn,
+    BASH_TOOL_SCHEMA,
     CompactionSummary,
     ConfigurationError,
     ContextWindowOverflow,
@@ -733,6 +734,104 @@ class StreamAndAdapterTests(unittest.TestCase):
         self.assertEqual(fingerprint(expected_response_format), policy_format[
             "response_format_sha256"
         ])
+
+    def test_named_bash_tool_choice_is_work_only_and_policy_bound(self) -> None:
+        adapter = self.adapter(work_tool_choice="bash")
+        captured: list[dict[str, Any]] = []
+        summary_value = {
+            "summary": "preserved",
+            "evidence": [],
+            "unresolved_judgments": [],
+            "latest_model_plan": "continue",
+        }
+        work_events = [
+            {
+                "id": "work-response-1",
+                "model": "candidate",
+                "system_fingerprint": "test-system-fingerprint",
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call-1",
+                            "function": {
+                                "name": "bash",
+                                "arguments": json.dumps({"command": "pwd"}),
+                            },
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+            },
+            {
+                "id": "work-response-1",
+                "model": "candidate",
+                "system_fingerprint": "test-system-fingerprint",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                },
+            },
+        ]
+        work_lines = [
+            ("data: " + json.dumps(event, separators=(",", ":")) + "\n").encode(
+                "utf-8"
+            )
+            for event in work_events
+        ]
+        work_lines.append(b"data: [DONE]\n")
+        responses = iter([
+            FakeStreamingHTTPResponse(work_lines),
+            self.compact_stream(json.dumps(summary_value)),
+        ])
+
+        def fake_urlopen(request: Any, **keywords: Any) -> FakeStreamingHTTPResponse:
+            captured.append({"request": request, "keywords": keywords})
+            return next(responses)
+
+        with patch("run_repository_probe.urlopen", side_effect=fake_urlopen):
+            adapter.generate([{"role": "user", "content": "work"}], max_tokens=128)
+            adapter.compact(
+                [{"role": "user", "content": "maintain"}],
+                instruction="compact",
+                max_tokens=128,
+            )
+
+        work_body = json.loads(captured[0]["request"].data.decode("utf-8"))
+        maintenance_body = json.loads(captured[1]["request"].data.decode("utf-8"))
+        named_choice = {"type": "function", "function": {"name": "bash"}}
+        self.assertEqual(named_choice, work_body["tool_choice"])
+        self.assertEqual([BASH_TOOL_SCHEMA], work_body["tools"])
+        self.assertFalse(work_body["parallel_tool_calls"])
+        self.assertNotIn("tools", maintenance_body)
+        self.assertNotIn("tool_choice", maintenance_body)
+        self.assertNotIn("parallel_tool_calls", maintenance_body)
+        self.assertEqual(named_choice, adapter.policy_value()["work_tool_choice"])
+        self.assertEqual("auto", self.adapter().policy_value()["work_tool_choice"])
+        self.assertNotEqual(
+            fingerprint(adapter.policy_value()),
+            fingerprint(self.adapter().policy_value()),
+        )
+        estimation_messages = [{"role": "user", "content": "same prompt"}]
+        default_adapter = self.adapter()
+        for mode in ("work", "compaction"):
+            self.assertEqual(
+                default_adapter.estimate_tokens(estimation_messages, mode=mode),
+                adapter.estimate_tokens(estimation_messages, mode=mode),
+            )
+
+        with patch(
+            "run_repository_probe.urlopen",
+            return_value=self.compact_stream("no tool call"),
+        ), self.assertRaises(ModelProtocolError):
+            adapter.generate([{"role": "user", "content": "work"}], max_tokens=128)
+
+    def test_work_tool_choice_rejects_unregistered_values(self) -> None:
+        for value in (None, "none", "required", "bash ", {"name": "bash"}):
+            with self.subTest(value=value), self.assertRaises(ConfigurationError):
+                self.adapter(work_tool_choice=value)
 
     def test_context_maintenance_extra_body_is_isolated_and_policy_bound(self) -> None:
         maintenance_extra_body = {
@@ -1564,6 +1663,7 @@ class DockerExecSecurityTests(unittest.TestCase):
             "/workspace/repo/src/main",
             example["workspace"]["manifest"]["source"][0]["model_path"],
         )
+        self.assertEqual("auto", example["model"]["work_tool_choice"])
 
 
 class ServedIdentityAndEnvelopeTests(unittest.TestCase):
@@ -1811,6 +1911,9 @@ class ControlOpacityAndConfigurationTests(unittest.TestCase):
             config_path.write_text(json.dumps(config), encoding="utf-8")
 
             with patch.dict("os.environ", {"PROBE_PROVIDER_KEY": "must-not-reach-tool"}):
+                default_runner = runner_from_config(config_path)
+                config["model"]["work_tool_choice"] = "bash"
+                config_path.write_text(json.dumps(config), encoding="utf-8")
                 runner = runner_from_config(config_path)
                 environment_observation = runner.process.execute(ToolAction(
                     "environment-check",
@@ -1825,6 +1928,12 @@ class ControlOpacityAndConfigurationTests(unittest.TestCase):
         self.assertFalse(runner.policy["process"]["inherit_environment"])
         self.assertIn("PROBE_PROVIDER_KEY", runner.policy["process"]["scrub_environment_names"])
         self.assertEqual("reasoning_content", runner.policy["model"]["replay_reasoning_field"])
+        self.assertEqual("auto", default_runner.policy["model"]["work_tool_choice"])
+        self.assertEqual(
+            {"type": "function", "function": {"name": "bash"}},
+            runner.policy["model"]["work_tool_choice"],
+        )
+        self.assertEqual("bash", runner.model.work_tool_choice)
         self.assertEqual("medium", runner.policy["model"]["work_reasoning_effort"])
         self.assertIsNone(
             runner.policy["model"]["context_maintenance_reasoning_effort"]

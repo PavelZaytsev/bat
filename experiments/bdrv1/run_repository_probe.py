@@ -866,6 +866,7 @@ class OpenAICompatibleAdapter:
     token_estimate_fixed_overhead: int = 256
     json_response_format: bool = True
     replay_reasoning_field: str | None = "reasoning_content"
+    work_tool_choice: str = "auto"
     extra_body: dict[str, Any] = field(default_factory=dict)
     context_maintenance_extra_body: dict[str, Any] = field(default_factory=dict)
 
@@ -938,6 +939,13 @@ class OpenAICompatibleAdapter:
             raise ConfigurationError("token estimate overhead must be non-negative")
         if self.replay_reasoning_field not in {"reasoning_content", "reasoning"}:
             raise ConfigurationError("protocol-v2 requires a replayable reasoning field")
+        if (
+            not isinstance(self.work_tool_choice, str)
+            or self.work_tool_choice not in {"auto", "bash"}
+        ):
+            raise ConfigurationError(
+                "work_tool_choice must be auto or the named bash function"
+            )
         if not isinstance(self.extra_body, dict):
             raise ConfigurationError("extra_body must be an object")
         if not isinstance(self.context_maintenance_extra_body, dict):
@@ -1003,6 +1011,7 @@ class OpenAICompatibleAdapter:
             "estimated_bytes_per_token": self.estimated_bytes_per_token,
             "token_estimate_fixed_overhead": self.token_estimate_fixed_overhead,
             "json_response_format": self.json_response_format,
+            "work_tool_choice": self._work_tool_choice_value(),
             "context_maintenance_response_format": {
                 "protocol": "openai-compatible-json-schema/v1",
                 "name": COMPACTION_RESPONSE_FORMAT["json_schema"]["name"],
@@ -1030,6 +1039,11 @@ class OpenAICompatibleAdapter:
         byte_count = len(canonical_json(material))
         return math.ceil(byte_count / self.estimated_bytes_per_token) + self.token_estimate_fixed_overhead
 
+    def _work_tool_choice_value(self) -> str | dict[str, Any]:
+        if self.work_tool_choice == "bash":
+            return {"type": "function", "function": {"name": "bash"}}
+        return self.work_tool_choice
+
     def generate(
         self,
         messages: Sequence[Mapping[str, Any]],
@@ -1045,7 +1059,14 @@ class OpenAICompatibleAdapter:
             context_maintenance=False,
             on_sample_started=on_sample_started,
         )
-        return self._assistant_turn(result)
+        turn = self._assistant_turn(result)
+        if self.work_tool_choice == "bash" and (
+            len(turn.tool_calls) != 1 or turn.tool_calls[0].name != "bash"
+        ):
+            raise ModelProtocolError(
+                "named bash tool choice response did not contain exactly one bash call"
+            )
+        return turn
 
     def compact(
         self,
@@ -1199,7 +1220,7 @@ class OpenAICompatibleAdapter:
         if with_tools:
             body.update({
                 "tools": [BASH_TOOL_SCHEMA],
-                "tool_choice": "auto",
+                "tool_choice": self._work_tool_choice_value(),
                 "parallel_tool_calls": False,
             })
         if json_mode:
@@ -3648,6 +3669,7 @@ def runner_from_config(path: Path) -> RepositoryProbeRunner:
         token_estimate_fixed_overhead=model_config.get("token_estimate_fixed_overhead", 256),
         json_response_format=model_config.get("json_response_format", True),
         replay_reasoning_field=model_config.get("replay_reasoning_field", "reasoning_content"),
+        work_tool_choice=model_config.get("work_tool_choice", "auto"),
         extra_body=_mapping(model_config.get("extra_body", {}), "model.extra_body"),
         context_maintenance_extra_body=_mapping(
             model_config.get("context_maintenance_extra_body", {}),
@@ -3946,6 +3968,7 @@ def _example_config() -> dict[str, Any]:
             "temperature": 0.2,
             "estimated_bytes_per_token": 2.0,
             "replay_reasoning_field": "reasoning_content",
+            "work_tool_choice": "auto",
         },
         "limits": {
             "context_window_tokens": 131072,
