@@ -1009,6 +1009,11 @@ BASH_TOOL_SCHEMA = {
     "function": {
         "name": "bash",
         "description": "Run one shell command in the configured repository workspace.",
+        # vLLM 0.27+ uses this opt-in for schema-constrained structural-tag
+        # decoding when tool_choice is auto. Named choice is constrained as
+        # well, but keeping the intent explicit prevents a later policy change
+        # from silently returning to unconstrained GPT-OSS tool arguments.
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
@@ -1201,6 +1206,12 @@ class OpenAICompatibleAdapter:
             "token_estimate_fixed_overhead": self.token_estimate_fixed_overhead,
             "json_response_format": self.json_response_format,
             "work_tool_choice": self._work_tool_choice_value(),
+            "work_tool_schema": {
+                "protocol": "openai-compatible-function-tool/v1",
+                "name": BASH_TOOL_SCHEMA["function"]["name"],
+                "strict": BASH_TOOL_SCHEMA["function"]["strict"],
+                "schema_sha256": fingerprint(BASH_TOOL_SCHEMA),
+            },
             "context_maintenance_response_format": {
                 "protocol": "openai-compatible-json-schema/v1",
                 "name": COMPACTION_RESPONSE_FORMAT["json_schema"]["name"],

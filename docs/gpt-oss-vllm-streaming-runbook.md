@@ -106,9 +106,46 @@ This is not the PR #37958 crash and not the empty-tool-list failure:
 - the client received a complete argument string rather than an absent tool call; and
 - no rejected command was parsed or executed.
 
-The vLLM GPT-OSS parser validates the Harmony message with `json.loads`. On `JSONDecodeError`, both
-vLLM 0.20.1 and current upstream log the error and forward the raw malformed text as
+The vLLM 0.20.1 GPT-OSS parser validates the Harmony message with `json.loads`. On
+`JSONDecodeError`, it logs the error and forwards the raw malformed text as
 `function.arguments`. The client must therefore validate it again and fail closed.
+
+### Attempt L: the non-streaming experiment isolated the server bug
+
+Attempt L changed only the preregistered Chat Completions transport from streaming to one complete
+JSON response. Its synthetic named-tool gate passed, as did the forced pause after one repository
+tool and the new-process cold resume. At logical work turn 12, however, all three bounded attempts
+to emit the first real multiline patch ended with the same invalid suffix:
+
+```text
+*** End Patch\nPATCH"]}
+```
+
+The required one-string argument object ends with `PATCH"}`, not `PATCH"]}`. vLLM logged
+`JSONDecodeError: Expecting ',' delimiter` for the same response while still returning HTTP 200.
+The runner rejected all three complete responses before parsing any tool intent, executed no
+rejected command, and left the candidate repository byte-unchanged. Non-streaming therefore ruled
+out SSE chunk reconstruction as the cause; the unconstrained Harmony tool payload was already
+malformed at the server boundary.
+
+### Upstream root cause and containing release
+
+[vLLM PR #45560](https://github.com/vllm-project/vllm/pull/45560), merged on 2026-08-01, adds
+schema-constrained GPT-OSS/Harmony tool-call decoding and wires `HarmonyParser.adjust_request` into
+the OpenAI-compatible request path. The failed deployment used vLLM 0.20.1, whose 2026-05-04 tag
+predates that repair. Release 0.27.0 is the first release containing the merge; the next canary pins
+0.27.1 rather than applying an unversioned site-package patch.
+
+Current vLLM strict-tool behavior is mode-sensitive:
+
+- named or `required` tool choice is schema constrained;
+- `auto` is constrained only when at least one function declares `strict: true`; and
+- the object schema should require every property and set `additionalProperties: false`.
+
+The BDR harness now declares `strict: true` on its single `bash` function and policy-binds the
+complete schema hash. The runner still validates the returned JSON independently. Constrained
+generation prevents the known malformed shape; fail-closed client validation remains the final
+boundary and never repairs a response.
 
 ### Safe response
 
@@ -157,7 +194,7 @@ same attempt.
 | --- | --- | --- |
 | `IndexError` at `prev_tool_call_arr[index]` | Old vLLM streaming generator | Upgrade or apply PR #37958's bounds guard to the exact pinned legacy runtime. |
 | `finish_reason=tool_calls`, empty tool list, coarse interval configured | vLLM streaming cadence/parser interaction | Remove the non-default stream interval and rerun a synthetic probe. |
-| Complete `function.arguments`, strict JSON parse fails | Generated Harmony payload or unconstrained parser path | Fail closed; preserve; bounded pre-tool retry; test non-streaming/Responses or a pinned newer runtime. |
+| Complete `function.arguments`, strict JSON parse fails on vLLM <0.27 | Unconstrained GPT-OSS Harmony tool payload | Fail closed; preserve; upgrade to a pinned release containing PR #45560; require strict schema and a synthetic patch-shaped gate. |
 | Stream ends before `[DONE]`, usage, or terminal metadata | Transport is indeterminate | Do not retry as a completed response and do not execute any partial tool payload. |
 | Served model identity differs from the pin | Provider/runtime identity | Reject before inference or tool execution. |
 
@@ -172,6 +209,8 @@ Before starting paid repository inference, record affirmative evidence for every
 - [ ] Pod and template contain no non-default coarse stream interval.
 - [ ] Anonymous identity requests are rejected and an authenticated request returns the exact model.
 - [ ] Synthetic named-tool arguments are strict JSON and conform to the one-string command schema.
+- [ ] GPT-OSS Harmony deployment contains PR #45560 (vLLM 0.27.0 or newer) and the function tool
+      declares `strict: true` with a policy-bound schema hash.
 - [ ] Tool-result continuation and context maintenance pass using the selected dialect.
 - [ ] Partial-stream, malformed-response, retry-exhaustion, and restart tests fail closed locally.
 - [ ] The candidate repository is clean, isolated, and still at its preregistered tree.

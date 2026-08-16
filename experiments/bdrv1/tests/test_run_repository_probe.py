@@ -64,8 +64,10 @@ from run_repository_probe import (  # noqa: E402
 
 class BashToolContractTests(unittest.TestCase):
     def test_command_is_explicitly_a_single_string_even_for_multiline_patches(self) -> None:
+        function_schema = BASH_TOOL_SCHEMA["function"]
         command_schema = BASH_TOOL_SCHEMA["function"]["parameters"]["properties"]["command"]
 
+        self.assertIs(True, function_schema["strict"])
         self.assertEqual("string", command_schema["type"])
         self.assertIn("multiline", command_schema["description"])
         self.assertIn("never an array", command_schema["description"])
@@ -1675,6 +1677,11 @@ class StreamAndAdapterTests(unittest.TestCase):
         self.assertNotIn("parallel_tool_calls", maintenance_body)
         self.assertEqual(named_choice, adapter.policy_value()["work_tool_choice"])
         self.assertEqual("auto", self.adapter().policy_value()["work_tool_choice"])
+        policy_schema = adapter.policy_value()["work_tool_schema"]
+        self.assertEqual("openai-compatible-function-tool/v1", policy_schema["protocol"])
+        self.assertEqual("bash", policy_schema["name"])
+        self.assertIs(True, policy_schema["strict"])
+        self.assertEqual(fingerprint(BASH_TOOL_SCHEMA), policy_schema["schema_sha256"])
         self.assertNotEqual(
             fingerprint(adapter.policy_value()),
             fingerprint(self.adapter().policy_value()),
