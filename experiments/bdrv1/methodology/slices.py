@@ -430,6 +430,72 @@ def r19_split_findings_name_their_remainder(doc, src):
     return out
 
 
+PLACEHOLDER_MARKERS = (
+    "<name>",
+    "<working branch>",
+    "<host/org/repo>",
+    "<library>",
+    "<use your own vocabulary>",
+    "<the one missing fact",
+    "<site>",
+    "<boundary stated as an assumption someone holds>",
+    "<axis>",
+)
+PLACEHOLDER_SENTINELS = {
+    "YYYY-MM-DD",
+    "File.java:123",
+    "the value that makes K explicit",
+    "Party A must know K about party B, and nothing tells it.",
+    "the value being introduced",
+    "specific code that must become dead",
+    "what becomes testable with no mocks / IO / threads",
+    "a falsifiable statement",
+}
+
+
+def _placeholder_paths(value, path):
+    out = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            out.extend(_placeholder_paths(child, f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            out.extend(_placeholder_paths(child, f"{path}[{index}]"))
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if any(marker in value for marker in PLACEHOLDER_MARKERS) \
+                or stripped in PLACEHOLDER_SENTINELS:
+            out.append((path, stripped))
+    return out
+
+
+def r20_done_slices_contain_no_template_placeholders(doc, src):
+    """A done slice cannot retain literal template facts in its completion record."""
+    out = []
+    findings = doc.get("findings") or {}
+    done = [sl for sl in doc.get("slices") or [] if sl.get("status") == "done"]
+    if not done:
+        return out
+
+    inspected = [("meta", doc.get("meta") or {})]
+    for sl in done:
+        sid = sl.get("id")
+        inspected.append((f"slices[{sid}]", sl))
+        for fid in sl.get("kill_list") or []:
+            inspected.append((f"findings[{fid}]", findings.get(fid) or {}))
+        for index, fact in enumerate(doc.get("foreign_facts") or []):
+            if sid in (fact.get("depended_on_by") or []):
+                inspected.append((f"foreign_facts[{index}]", fact))
+
+    for root, value in inspected:
+        for path, placeholder in _placeholder_paths(value, root):
+            out.append(
+                f"{path} still contains template placeholder {placeholder!r} while a slice is "
+                f"done — replace every claimed completion fact with evidence from this codebase"
+            )
+    return out
+
+
 RULES = [
     ("R1", r1_kill_list_resolves,
      "a kill_list naming a finding that does not exist, or that the finding disowns",
@@ -528,6 +594,12 @@ RULES = [
      "prose in their own `remaining:` field, under no issue number — so 'the parent is done' was "
      "asserted while the work it split off was untracked by anything. Same shape as R4: a "
      "disposition recorded but not carried out"),
+    ("R20", r20_done_slices_contain_no_template_placeholders,
+     "a done slice, its owned findings, dependent foreign facts, or completion metadata still "
+     "containing literal template placeholders",
+     "GPT-OSS completed a live canary by changing every status to done while leaving `<name>`, "
+     "`File.java:123`, `<the one missing fact>`, and the template boundary unchanged. All prior "
+     "rules passed, so the tracker was structurally consistent and semantically empty"),
 ]
 
 # What this validator DELIBERATELY does not check. Read this before trusting a green run.
@@ -538,6 +610,8 @@ NOT_CHECKED = [
     "whether a `died` entry actually died — verify by building at the parent commit",
     "whether a test would fail if its fix were reverted; SATURATE claims are taken on trust",
     "whether the tracker describes the same codebase you are looking at",
+    "whether non-placeholder prose is TRUE. R20 rejects literal template residue in a done slice; "
+    "a plausible but false concrete statement still requires code and test evidence",
     "whether the foreign_facts ledger is COMPLETE. R12/R13 check the entries that exist; "
     "nothing detects a dependency you never wrote down. Ask at every phase boundary: what did "
     "this phase newly assume about code I do not own?",
@@ -861,6 +935,13 @@ def _mut_split_without_remainder(d, src):
     return d, src
 
 
+def _mut_done_with_template_placeholder(d, src):
+    _first_slice(d, lambda s: s.get("status") == "done")["name"] = (
+        "<boundary stated as an assumption someone holds>"
+    )
+    return d, src
+
+
 def _mut_two_homes(d, src):
     s = _first_slice(d)
     s.setdefault("collapse_claim", {})["outcome"] = "confirmed"
@@ -892,6 +973,7 @@ MUTATIONS = [
     ("temporal K with no represented window", _mut_temporal_without_window, "R18"),
     ("temporal K with no runtime check", _mut_temporal_without_check, "R18"),
     ("split finding with no remainder_filed_as", _mut_split_without_remainder, "R19"),
+    ("done slice retaining a template placeholder", _mut_done_with_template_placeholder, "R20"),
 ]
 
 

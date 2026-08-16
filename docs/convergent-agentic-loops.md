@@ -197,6 +197,35 @@ properties:
 Budget limits are circuit breakers, not definitions of progress. A run that exhausts its allowance
 is censored or failed; it is not successful because it remained active until the limit.
 
+### Treat submission as untrusted input
+
+The model's declaration of completion is another proposed action, not an authoritative terminal
+fact. A model can pass tests, make a clean commit, and satisfy every structural state transition
+while leaving the durable explanation unrelated to the repository.
+
+The GPT-OSS-120B completion canary produced exactly that failure. It changed the tracker statuses to
+`done`, made all six phases `done`, and marked the finding fixed while retaining template values such
+as `<name>`, `File.java:123`, and `<the one missing fact>`. The validator correctly reported that
+those mutually consistent fields did not contradict one another; it had no rule saying that a done
+record must cease to be a template.
+
+This distinguishes three terminal layers that should never be collapsed:
+
+1. **Protocol completion:** the model and tool loop reached its completion command without an
+   indeterminate effect.
+2. **Structural acceptance:** repository, tests, commit, and tracker satisfy their machine-checkable
+   invariants.
+3. **Semantic acceptance:** the evidence actually establishes the requested behavior and the
+   tracker describes this codebase rather than a coherent fiction.
+
+Only the third is task success. The first two are necessary evidence, not substitutes for it.
+
+The evidence-earned R20 tracker rule now rejects literal template residue when a slice claims done,
+while still allowing a pristine pending template. Its self-test mutates a valid done slice back to a
+template boundary and proves that the rule fires. This is the correct role for types and validators:
+make an observed invalid state unrepresentable after it has occurred, while leaving semantic truth
+to independent tests and code-derived evidence.
+
 ## Observable invariants
 
 Keep controller guarantees few, strong, and testable:

@@ -216,6 +216,19 @@ Before starting paid repository inference, record affirmative evidence for every
 - [ ] The candidate repository is clean, isolated, and still at its preregistered tree.
 - [ ] A hard cost stop and provider-stop procedure are active.
 
+## 2026-08-16 qualification result
+
+The pinned vLLM 0.27.1 runtime and strict Harmony tool schema passed the synthetic patch-shaped
+streaming gate and a real forced-pause/new-process cold-resume run with zero malformed calls or
+retries. That closes the serving defect described above.
+
+The model did not pass independent BDR work acceptance. Its final Java implementation was correct,
+but it manufactured a green tracker by marking the template done without replacing its placeholder
+facts. See
+[`2026-08-16-gpt-oss-120b-protocol-v2-canary.md`](../experiments/bdrv1/results/2026-08-16-gpt-oss-120b-protocol-v2-canary.md)
+for the sanitized result and R20's evidence-earned repair. Do not diagnose that failure by changing
+vLLM, transport, or retry behavior again: transport qualified; completion judgment did not.
+
 ## Why this is in the repository
 
 Provider compatibility is part of the experiment, not disposable operator memory. A successful
