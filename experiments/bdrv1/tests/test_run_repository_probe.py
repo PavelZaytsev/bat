@@ -22,6 +22,7 @@ from run_repository_probe import (  # noqa: E402
     ArtifactInput,
     AssistantTurn,
     BASH_TOOL_SCHEMA,
+    COMPACTION_RESPONSE_FORMAT,
     CompactionSummary,
     ConfigurationError,
     ContextWindowOverflow,
@@ -1332,6 +1333,107 @@ class StreamAndAdapterTests(unittest.TestCase):
         for value in (None, 0, 1, "false", []):
             with self.subTest(value=value), self.assertRaises(ConfigurationError):
                 self.adapter(stream=value)
+
+    def test_ollama_native_transport_requires_complete_responses(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "requires stream=false"):
+            self.adapter(transport="ollama_native_chat", stream=True)
+
+    def test_ollama_native_work_normalizes_typed_tool_call(self) -> None:
+        adapter = self.adapter(
+            endpoint="http://127.0.0.1:1/api/chat",
+            transport="ollama_native_chat",
+            stream=False,
+            server_fingerprint="response-unavailable",
+            work_tool_choice="bash",
+        )
+        captured: dict[str, Any] = {}
+        native_response = canonical_json({
+            "model": "candidate",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "thinking": "Inspect the repository.",
+                "tool_calls": [{
+                    "function": {
+                        "name": "bash",
+                        "arguments": {"command": "pwd"},
+                    },
+                }],
+            },
+            "done": True,
+            "done_reason": "stop",
+            "prompt_eval_count": 100,
+            "eval_count": 20,
+        })
+
+        def fake_urlopen(request: Any, **keywords: Any) -> FakeJSONHTTPResponse:
+            del keywords
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeJSONHTTPResponse(native_response)
+
+        with patch("run_repository_probe.urlopen", side_effect=fake_urlopen):
+            turn = adapter.generate(
+                [{"role": "user", "content": "inspect"}], max_tokens=128
+            )
+
+        self.assertEqual(
+            (ToolAction(turn.tool_calls[0].call_id, "bash", {"command": "pwd"}),),
+            turn.tool_calls,
+        )
+        self.assertTrue(turn.tool_calls[0].call_id.startswith("ollama-"))
+        self.assertEqual("Inspect the repository.", turn.reasoning)
+        self.assertTrue(captured["body"]["think"])
+        self.assertEqual(128, captured["body"]["options"]["num_predict"])
+        self.assertEqual([BASH_TOOL_SCHEMA], captured["body"]["tools"])
+        self.assertNotIn("tool_choice", captured["body"])
+        self.assertEqual("ollama-native-chat/v1", adapter.policy_value()["adapter"])
+
+    def test_ollama_native_compaction_uses_schema_and_disables_thinking(self) -> None:
+        adapter = self.adapter(
+            endpoint="http://127.0.0.1:1/api/chat",
+            transport="ollama_native_chat",
+            stream=False,
+            server_fingerprint="response-unavailable",
+        )
+        summary_value = {
+            "summary": "preserved",
+            "evidence": ["focused test passed"],
+            "unresolved_judgments": [],
+            "latest_model_plan": "continue",
+        }
+        native_response = canonical_json({
+            "model": "candidate",
+            "message": {
+                "role": "assistant",
+                "content": canonical_json(summary_value).decode("utf-8"),
+            },
+            "done": True,
+            "done_reason": "stop",
+            "prompt_eval_count": 100,
+            "eval_count": 20,
+        })
+        captured: dict[str, Any] = {}
+
+        def fake_urlopen(request: Any, **keywords: Any) -> FakeJSONHTTPResponse:
+            del keywords
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeJSONHTTPResponse(native_response)
+
+        with patch("run_repository_probe.urlopen", side_effect=fake_urlopen):
+            summary = adapter.compact(
+                [{"role": "user", "content": "maintain"}],
+                instruction="compact",
+                max_tokens=128,
+            )
+
+        self.assertEqual(summary_value, summary.to_json())
+        self.assertFalse(captured["body"]["think"])
+        self.assertEqual(
+            COMPACTION_RESPONSE_FORMAT["json_schema"]["schema"],
+            captured["body"]["format"],
+        )
+        self.assertNotIn("response_format", captured["body"])
+        self.assertNotIn("tools", captured["body"])
 
     def test_nonstream_body_loss_after_response_acceptance_is_indeterminate(self) -> None:
         sample_starts: list[str] = []
