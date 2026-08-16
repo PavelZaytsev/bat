@@ -2,7 +2,8 @@
 
 Date: 2026-08-16
 
-Status: provider-blocked before inference; qualification remains pending.
+Status: RunPod runtime qualification stopped before inference; future work moves to exo or a local
+workstation deployment.
 
 This result belongs to issue #34 and draft PR #35. It records the exact
 deployment contract, pre-inference evidence, cost boundary, and current
@@ -14,9 +15,12 @@ provider failure so a later restart does not repeat deployment discovery.
 - revision: `842da3794eaa0b77d5f08bae87a17459d91ff475`
 - weights/activations: BF16
 - context window: 131,072 tokens
-- runtime: `vllm/vllm-openai:v0.27.1`
-- amd64 image digest:
+- initial runtime: `vllm/vllm-openai:v0.27.1`
+- initial amd64 image digest:
   `sha256:c2f3b1b964e47809b722b5e75b61b1e7b39a50f70388cf2bf2418f16a9f31da2`
+- post-fix runtime commit: `8efa13b700f1836657699cae2503dc2feab27fa0`
+- post-fix amd64 image digest:
+  `sha256:83be0b4f532c5a851c655e914dc3a276e52265e4045402d2e36316a11e4b5dc9`
 - hardware: one H200 SXM in RunPod Secure Cloud EUR-IS-4
 - persistent cache: 200 GB network volume mounted at `/workspace`
 
@@ -53,29 +57,45 @@ disks were removed and the independent network volume was preserved.
    image entrypoint already supplies it.
 4. `xre8ndqwd5p8pr`: the corrected command reached vLLM's API server and
    printed the exact expected non-default argument set.
+5. The original H200 later became unavailable. RunPod migrated the stopped pod to another H200 and
+   the provider DNS failure cleared.
+6. vLLM 0.27.1 then failed before weight loading with
+   `AmbiguousGlobalPerLayerAttributeError` while reading Gemma 4's heterogeneous `head_dim`.
+7. Upstream vLLM commit `70b84f0bcbb6` / PR #49797 fixes that exact mechanism by converting Gemma
+   4's sliding and global layers through per-layer configurations. A digest-pinned nightly at
+   `8efa13b700f1836657699cae2503dc2feab27fa0`, verified to descend from the fix, cleared the original
+   exception.
+8. The post-fix runtime progressed into engine initialization but failed while reparsing the model
+   repository configuration in the secondary engine process. A fresh cache directory reproduced
+   the failure, ruling out the earlier shared cache as the sole cause.
+9. A final preregistered attempt added vLLM's documented `--language-model-only` switch for the
+   text/tool-only workload. It was stopped during container-image extraction at the operator's cost
+   boundary, so it has no pass or failure verdict.
 
-No attempt reached model loading far enough to accept a prompt. No synthetic
+No attempt reached readiness or accepted a prompt. No synthetic
 transport request, context-maintenance request, repository prompt, or tool
 execution occurred.
 
-## Current provider blocker
+## Final RunPod disposition
 
-The corrected pod failed while resolving Hugging Face from EUR-IS-4:
+The first corrected pod failed while resolving Hugging Face from EUR-IS-4:
 
 ```text
 Error retrieving file list: [Errno -3] Temporary failure in name resolution
 httpx.ConnectError: [Errno -3] Temporary failure in name resolution
 ```
 
-The failure repeated after the pod was stopped, left idle, and restarted.
-The pod is now stopped at `$0.00/hr`; its ID is `xre8ndqwd5p8pr`.
+That failure repeated after a stop/idle/restart, then cleared after provider migration. It was
+therefore a real provider blocker but not the final runtime blocker.
 
-This is a provider/network gate failure, not evidence for or against the
-Gemma semantic hypothesis. The next authorized action is to restart this same
-pod after provider DNS recovery, require an authenticated `/v1/models`
-identity response, and then run the one-attempt synthetic tool/compaction
-probe. Do not create another deployment revision unless the frozen command
-itself is contradicted by new evidence.
+All Gemma pods are stopped at `$0.00/hr`. The final observed RunPod balance was `$9.11`. No rented
+GPU restart is authorized by this record. Future qualification should use the internal exo cluster
+or a local work-laptop model server, begin again at authenticated model identity, and run the
+one-shot synthetic tool/compaction probe before repository exposure.
+
+This result neither accepts nor semantically rejects Gemma 4. It rejects this RunPod deployment
+lineage as an economical qualification path: the serving stack never became ready, and repeated
+cloud image pulls consumed paid time without producing model evidence.
 
 ## Frozen offline canary
 
@@ -103,18 +123,18 @@ repository. It must not be run until authenticated model identity succeeds.
 ## Cost boundary
 
 - initial balance: `$10.89`;
-- stopped balance: `$9.90`;
-- observed spend: approximately `$0.99`;
+- final observed balance: `$9.11`;
+- observed spend across this recorded Gemma lineage: approximately `$1.78`;
 - preregistered maximum: 30 H200 minutes / `$2.30`;
 - current provider cost: `$0.00/hr`.
 
-The unused budget is preserved for the model identity gate and actual
-qualification, rather than being spent on a DNS restart loop.
+The remaining balance is preserved. No further rented deployment is part of this qualification
+plan.
 
 ## Decision rule
 
-Gemma remains the sole active Broadcom-eligible candidate. Its semantic
-hypothesis is neither accepted nor rejected. Acceptance still requires:
+Gemma remains a Broadcom-eligible candidate whose semantic hypothesis is neither accepted nor
+rejected. Any future exo/local acceptance still requires:
 
 1. exact served identity and 131,072-token context;
 2. synthetic named-tool and compaction transport success;
@@ -123,5 +143,6 @@ hypothesis is neither accepted nor rejected. Acceptance still requires:
 5. autonomous repository completion with real source/test changes;
 6. tracker evidence consistent with the repository diff and test results.
 
-Any transport failure is archived without repairing model output. Any semantic
-false convergence rejects the model for the Monday exo run.
+Any transport failure is archived without repairing model output. Any semantic false convergence
+rejects that exact model/deployment combination. No RunPod evidence may be represented as a Gemma
+capability result because no inference occurred.
