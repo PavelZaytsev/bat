@@ -1,5 +1,8 @@
 # Deployment conformance probes
 
+> **Historical evidence.** These immutable records were produced by the removed Scala/ZIO probe.
+> They remain useful transport evidence but are not an active runtime or model-quality claim.
+
 These are **deployment** records, not model benchmarks. Each directory holds one armed run of
 `bat.probe.LiveGptOssProbeApp` against one pinned endpoint, answering a single question: can that
 exact model, runtime, template, quantization, and topology complete BAT's fixed three-turn, two-tool
@@ -24,18 +27,15 @@ Each indexed run contains exactly:
 | `telemetry.json` | payload-free run, attempt, token, tool, timing, and terminal telemetry |
 
 The digests in `result.json` cover the exact UTF-8 bytes of the other two files, so a copied record
-stays internally bound. Validate the complete committed inventory with the Scala validator used by
-ordinary CI:
+stays internally bound. Validate the complete committed inventory with the repository artifact
+checker used by ordinary CI:
 
 ```bash
-scala-cli --power run --offline --server=false loop \
-  --main-class bat.probe.CommittedProbeValidatorApp -- benchmarks/probes
+python3 scripts/check_benchmark_artifacts.py
 ```
 
-The validator reconstructs telemetry through the production domain model, verifies causal flow and
-derived summaries, binds embedded and standalone documents byte-for-byte, checks SHA-256 digests,
-enforces verdict/terminal invariants, and rejects raw payload, secret, URL, hostname, and absolute
-path shapes. These records are immutable. Do not normalize whitespace, replace a run, or edit an
+The checker validates the committed artifact graph, exact hashes, bundle completeness, and journal
+integrity. These records are immutable. Do not normalize whitespace, replace a run, or edit an
 artifact—add a new indexed run instead. A failed, blocked, incompatible, or nonconformant run is a
 result and is preserved as one.
 

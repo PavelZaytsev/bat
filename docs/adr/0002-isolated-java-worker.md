@@ -1,5 +1,8 @@
 # ADR 0002: Run untrusted Java pull requests in a pinned isolated worker
 
+> **Historical ADR.** This records the removed Scala/ZIO worker. It is retained for architectural
+> evidence and is not an implementation claim for the current tree.
+
 - Status: accepted
 - Date: 2026-08-07
 - Issue: [#4](https://github.com/PavelZaytsev/bat/issues/4)

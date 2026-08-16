@@ -1,5 +1,8 @@
 # Six-phase Java quickstart
 
+> **Historical quickstart.** The Scala canary described here was removed from the active tree. Its
+> commands are not runnable at this revision; use [`direct-runtime.md`](direct-runtime.md).
+
 This quickstart executes BAT's complete controller/BDR contract against a tiny Java 17 regression.
 It is the portability canary that a real provider backend must pass before BAT spends time and
 tokens on a larger benchmark case.
