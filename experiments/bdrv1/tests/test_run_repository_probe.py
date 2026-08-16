@@ -96,6 +96,23 @@ class FakeStreamingHTTPResponse:
         return iter(self.lines)
 
 
+class FakeJSONHTTPResponse:
+    def __init__(self, body: bytes, *, read_error: OSError | None = None) -> None:
+        self.body = body
+        self.read_error = read_error
+
+    def __enter__(self) -> "FakeJSONHTTPResponse":
+        return self
+
+    def __exit__(self, *arguments: Any) -> None:
+        del arguments
+
+    def read(self) -> bytes:
+        if self.read_error is not None:
+            raise self.read_error
+        return self.body
+
+
 class ProbeFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="probe-runner-test-")
@@ -1245,6 +1262,194 @@ class StreamAndAdapterTests(unittest.TestCase):
         ]
         lines.append(b"data: [DONE]\n")
         return FakeStreamingHTTPResponse(lines)
+
+    @staticmethod
+    def complete_json_tool_response(arguments: str) -> bytes:
+        return canonical_json({
+            "id": "nonstream-response-1",
+            "model": "candidate",
+            "system_fingerprint": "test-system-fingerprint",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "Use the preregistered tool.",
+                    "tool_calls": [{
+                        "id": "nonstream-call-1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": arguments},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+            },
+        })
+
+    def test_nonstream_transport_is_policy_bound_and_omits_stream_options(self) -> None:
+        adapter = self.adapter(stream=False, work_tool_choice="bash")
+        captured: dict[str, Any] = {}
+        sample_starts: list[str] = []
+
+        def fake_urlopen(request: Any, **keywords: Any) -> FakeJSONHTTPResponse:
+            captured["request"] = request
+            captured["keywords"] = keywords
+            return FakeJSONHTTPResponse(
+                self.complete_json_tool_response(json.dumps({"command": "pwd"}))
+            )
+
+        with patch("run_repository_probe.urlopen", side_effect=fake_urlopen):
+            turn = adapter.generate(
+                [{"role": "user", "content": "inspect"}],
+                max_tokens=128,
+                on_sample_started=lambda: sample_starts.append("started"),
+            )
+
+        body = json.loads(captured["request"].data.decode("utf-8"))
+        self.assertFalse(body["stream"])
+        self.assertNotIn("stream_options", body)
+        self.assertEqual("application/json", captured["request"].headers["Accept"])
+        self.assertEqual(["started"], sample_starts)
+        self.assertEqual(
+            (ToolAction("nonstream-call-1", "bash", {"command": "pwd"}),),
+            turn.tool_calls,
+        )
+        self.assertEqual("candidate", turn.provider_metadata["model"])
+        self.assertFalse(adapter.capabilities.streaming)
+        self.assertFalse(adapter.policy_value()["stream"])
+        self.assertIsNone(adapter.policy_value()["stream_options"])
+        self.assertEqual(
+            "nonstream-dispatch-fail-closed",
+            adapter.policy_value()["transport_failure_policy"],
+        )
+
+    def test_nonstream_transport_rejects_non_boolean_configuration(self) -> None:
+        for value in (None, 0, 1, "false", []):
+            with self.subTest(value=value), self.assertRaises(ConfigurationError):
+                self.adapter(stream=value)
+
+    def test_nonstream_body_loss_after_response_acceptance_is_indeterminate(self) -> None:
+        sample_starts: list[str] = []
+        with (
+            patch(
+                "run_repository_probe.urlopen",
+                return_value=FakeJSONHTTPResponse(
+                    b"", read_error=OSError("connection reset")
+                ),
+            ),
+            self.assertRaises(IndeterminateModelResponseError),
+        ):
+            self.adapter(stream=False).generate(
+                [{"role": "user", "content": "inspect"}],
+                max_tokens=128,
+                on_sample_started=lambda: sample_starts.append("started"),
+            )
+        self.assertEqual(["started"], sample_starts)
+
+    def test_nonstream_connection_failure_after_dispatch_is_indeterminate(self) -> None:
+        sample_starts: list[str] = []
+        with (
+            patch(
+                "run_repository_probe.urlopen",
+                side_effect=OSError("connection refused"),
+            ),
+            self.assertRaises(IndeterminateModelResponseError),
+        ):
+            self.adapter(stream=False).generate(
+                [{"role": "user", "content": "inspect"}],
+                max_tokens=128,
+                on_sample_started=lambda: sample_starts.append("started"),
+            )
+        self.assertEqual([], sample_starts)
+
+    def test_nonstream_invalid_complete_json_is_terminal_and_hash_only(self) -> None:
+        private_body = b'{"private":"NONSTREAM_PRIVATE_SECRET"'
+        with (
+            patch(
+                "run_repository_probe.urlopen",
+                return_value=FakeJSONHTTPResponse(private_body),
+            ),
+            self.assertRaises(ModelProtocolError) as raised,
+        ):
+            self.adapter(stream=False).generate(
+                [{"role": "user", "content": "inspect"}], max_tokens=128
+            )
+
+        error = raised.exception
+        self.assertIs(type(error), ModelProtocolError)
+        self.assertNotIn("NONSTREAM_PRIVATE_SECRET", str(error))
+        self.assertEqual({
+            "response_sha256": sha256_bytes(private_body),
+            "response_length_bytes": len(private_body),
+            "transport": "non-streaming",
+        }, error.safe_diagnostics)
+
+    def test_nonstream_complete_malformed_tool_json_uses_pre_tool_recovery(self) -> None:
+        secret = "NONSTREAM_REJECTED_TOOL_ARGUMENT_SECRET"
+        response = self.complete_json_tool_response('{"command":"' + secret)
+        with (
+            patch(
+                "run_repository_probe.urlopen",
+                return_value=FakeJSONHTTPResponse(response),
+            ),
+            self.assertRaises(RetryableCompletedResponseError) as raised,
+        ):
+            self.adapter(stream=False).generate(
+                [{"role": "user", "content": "work"}], max_tokens=128
+            )
+
+        self.assertIn(
+            secret,
+            canonical_json(raised.exception.rejected_response).decode("utf-8"),
+        )
+        self.assertNotIn(secret, str(raised.exception))
+
+    def test_nonstream_compaction_uses_the_same_complete_json_transport(self) -> None:
+        summary_value = {
+            "summary": "The closed checkpoint is preserved.",
+            "evidence": ["The focused test passed."],
+            "unresolved_judgments": [],
+            "latest_model_plan": "Continue from the closed checkpoint.",
+        }
+        response = canonical_json({
+            "id": "nonstream-compaction-1",
+            "model": "candidate",
+            "system_fingerprint": "test-system-fingerprint",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": canonical_json(summary_value).decode("utf-8"),
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+            },
+        })
+        captured: dict[str, Any] = {}
+
+        def fake_urlopen(request: Any, **keywords: Any) -> FakeJSONHTTPResponse:
+            del keywords
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeJSONHTTPResponse(response)
+
+        with patch("run_repository_probe.urlopen", side_effect=fake_urlopen):
+            summary = self.adapter(stream=False).compact(
+                [{"role": "user", "content": "maintain"}],
+                instruction="compact",
+                max_tokens=128,
+            )
+
+        self.assertEqual(summary_value, summary.to_json())
+        self.assertFalse(captured["body"]["stream"])
+        self.assertNotIn("stream_options", captured["body"])
+        self.assertIn("response_format", captured["body"])
+        self.assertNotIn("tools", captured["body"])
 
     def test_compaction_request_uses_exact_strict_json_schema(self) -> None:
         adapter = self.adapter()
@@ -2662,6 +2867,9 @@ class ControlOpacityAndConfigurationTests(unittest.TestCase):
                 config["model"]["work_tool_choice"] = "bash"
                 config_path.write_text(json.dumps(config), encoding="utf-8")
                 runner = runner_from_config(config_path)
+                config["model"]["stream"] = False
+                config_path.write_text(json.dumps(config), encoding="utf-8")
+                nonstream_runner = runner_from_config(config_path)
                 environment_observation = runner.process.execute(ToolAction(
                     "environment-check",
                     "bash",
@@ -2671,6 +2879,11 @@ class ControlOpacityAndConfigurationTests(unittest.TestCase):
         self.assertIsInstance(runner.model, OpenAICompatibleAdapter)
         self.assertIsInstance(runner.process, LocalShellProcess)
         self.assertTrue(runner.model.capabilities.streaming)
+        self.assertFalse(nonstream_runner.model.capabilities.streaming)
+        self.assertEqual(
+            "nonstream-dispatch-fail-closed",
+            nonstream_runner.policy["model"]["transport_failure_policy"],
+        )
         self.assertEqual("absent", environment_observation.output)
         self.assertFalse(runner.policy["process"]["inherit_environment"])
         self.assertIn("PROBE_PROVIDER_KEY", runner.policy["process"]["scrub_environment_names"])

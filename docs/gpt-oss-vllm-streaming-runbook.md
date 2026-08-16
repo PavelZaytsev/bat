@@ -128,6 +128,29 @@ Changing the endpoint dialect, streaming mode, or vLLM release is a protocol cha
 new canary with its own runtime identity and acceptance record; do not silently relabel an existing
 attempt.
 
+### Non-streaming Chat Completions experiment
+
+The direct BDRv1 runner now has a separately policy-bound non-streaming transport for isolating the
+vLLM streaming parser from the model's complete Chat Completions envelope. It is not a permissive
+fallback and must be selected explicitly with `stream: false` in a fresh preregistered canary.
+
+The transport contract is deliberately thin:
+
+- send `stream: false` and omit the streaming-only `stream_options` request field;
+- require one complete JSON response object with the pinned model identity and terminal usage;
+- parse the same strict one-string `bash` schema used by the streaming path;
+- retain a fully received malformed tool response privately and use only the existing bounded,
+  same-checkpoint, pre-tool retry policy;
+- treat invalid top-level JSON as a terminal protocol failure with hash-only public diagnostics; and
+- treat any uncertain network failure after dispatch as an indeterminate response, never as an
+  automatic retry.
+
+The local protocol suite qualifies these boundaries without a provider or GPU. A paid run still
+requires a single synthetic named-tool response with no repository exposed and no tool execution.
+Only after that gate passes may a new forced-pause/cold-resume repository canary use the transport.
+The synthetic result must be preserved even if it fails; do not switch back to streaming inside the
+same attempt.
+
 ## Diagnostic decision table
 
 | Observed failure | Likely layer | Required action |

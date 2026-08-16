@@ -1095,8 +1095,8 @@ class OpenAICompatibleAdapter:
             or any(ord(character) < 0x20 or ord(character) == 0x7F for character in self.user_agent)
         ):
             raise ConfigurationError("user_agent must be a non-empty HTTP header value")
-        if self.stream is not True:
-            raise ConfigurationError("protocol-v2 live runs require streaming transport")
+        if not isinstance(self.stream, bool):
+            raise ConfigurationError("stream must be a boolean")
         if self.json_response_format is not True:
             raise ConfigurationError(
                 "protocol-v2 context maintenance requires strict JSON Schema responses"
@@ -1191,7 +1191,11 @@ class OpenAICompatibleAdapter:
             "work_reasoning_effort": self.reasoning_effort,
             "context_maintenance_reasoning_effort": None,
             "stream": self.stream,
-            "stream_options": {"include_usage": True},
+            "stream_options": {"include_usage": True} if self.stream else None,
+            "transport_failure_policy": (
+                "stream-progress-aware"
+                if self.stream else "nonstream-dispatch-fail-closed"
+            ),
             "request_timeout_seconds": self.request_timeout_seconds,
             "estimated_bytes_per_token": self.estimated_bytes_per_token,
             "token_estimate_fixed_overhead": self.token_estimate_fixed_overhead,
@@ -1410,8 +1414,9 @@ class OpenAICompatibleAdapter:
             "temperature": self.temperature,
             "max_tokens": max_tokens,
             "stream": self.stream,
-            "stream_options": {"include_usage": True},
         }
+        if self.stream:
+            body["stream_options"] = {"include_usage": True}
         if not context_maintenance and self.reasoning_effort is not None:
             body["reasoning_effort"] = self.reasoning_effort
         if with_tools:
@@ -1439,16 +1444,24 @@ class OpenAICompatibleAdapter:
             headers=headers,
             method="POST",
         )
+        nonstream_request_dispatched = False
         try:
             open_keywords: dict[str, Any] = {"timeout": self.request_timeout_seconds}
             if urlsplit(self.endpoint).scheme == "https":
                 open_keywords["context"] = ssl.create_default_context(cafile=self.tls_ca_file)
+            nonstream_request_dispatched = not self.stream
             with urlopen(request, **open_keywords) as response:
                 if self.stream:
                     result = self._read_stream(response, on_sample_started=on_sample_started)
                     self._validate_response_identity(result)
                     return result
-                raw = response.read().decode("utf-8", errors="replace")
+                # Receiving successful response headers proves that the request was accepted.
+                # Mark sampling before reading the opaque JSON body so any subsequent I/O loss
+                # is terminal and cannot replay a possibly completed remote generation.
+                if on_sample_started is not None:
+                    on_sample_started()
+                raw_bytes = response.read()
+                raw = raw_bytes.decode("utf-8", errors="replace")
         except HTTPError as error:
             try:
                 detail = error.read().decode("utf-8", errors="replace")
@@ -1457,11 +1470,22 @@ class OpenAICompatibleAdapter:
             self._raise_transport(error.code, detail)
             raise AssertionError("unreachable")
         except (URLError, TimeoutError, OSError) as error:
+            if nonstream_request_dispatched:
+                raise IndeterminateModelResponseError(
+                    "non-streaming transport failed after request dispatch"
+                ) from error
             raise RetryableModelError("model transport failed: " + str(error)) from error
         try:
             result = strict_json_loads(raw)
-        except ValueError as error:
-            raise RetryableModelError("model returned invalid JSON: " + str(error)) from error
+        except ValueError:
+            raise ModelProtocolError(
+                "non-streaming model response is not strict JSON",
+                safe_diagnostics={
+                    "response_sha256": sha256_bytes(raw_bytes),
+                    "response_length_bytes": len(raw_bytes),
+                    "transport": "non-streaming",
+                },
+            ) from None
         if not isinstance(result, dict):
             raise ModelProtocolError("model response must be a JSON object")
         if "error" in result:
@@ -1486,11 +1510,11 @@ class OpenAICompatibleAdapter:
             raise ModelProtocolError("response server fingerprint is missing or has drifted")
         usage = result.get("usage")
         if not isinstance(usage, Mapping):
-            raise ModelProtocolError("stream response lacks required token usage")
+            raise ModelProtocolError("model response lacks required token usage")
         for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
             value = usage.get(name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ModelProtocolError("stream response token usage is malformed")
+                raise ModelProtocolError("model response token usage is malformed")
 
     def _openai_message(self, message: Mapping[str, Any]) -> dict[str, Any]:
         role = message.get("role")
