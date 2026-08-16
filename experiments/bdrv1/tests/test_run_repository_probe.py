@@ -248,6 +248,182 @@ class RunnerIntegrationTests(unittest.TestCase):
         self.assertEqual(["assistant", "tool"], [message["role"] for message in tail])
         self.assertEqual([], validate_continuation_manifest(manifest, current_policy=manifest["run_policy"]))
 
+    def test_pause_at_compaction_checkpoint_cold_resumes_without_tool_replay(self) -> None:
+        class ContextAwareAdapter:
+            capabilities = AdapterCapabilities()
+
+            def __init__(self) -> None:
+                self.work_requests: list[list[dict[str, Any]]] = []
+                self.compaction_requests: list[list[dict[str, Any]]] = []
+
+            def policy_value(self) -> dict[str, Any]:
+                return {
+                    "adapter": "context-aware-resume-test/v1",
+                    "capabilities": self.capabilities.policy_value(),
+                }
+
+            def estimate_tokens(
+                self, messages: Sequence[Mapping[str, Any]], *, mode: str,
+            ) -> int:
+                del messages, mode
+                return 64
+
+            def generate(
+                self, messages: Sequence[Mapping[str, Any]], *, max_tokens: int,
+                on_sample_started: Any = None,
+            ) -> AssistantTurn:
+                del max_tokens
+                if on_sample_started is not None:
+                    on_sample_started()
+                request = [dict(message) for message in messages]
+                self.work_requests.append(request)
+                if "repository_probe_continuation" in canonical_json(request).decode("utf-8"):
+                    return completion_turn()
+                return AssistantTurn(
+                    "I will inspect the subject before continuing.",
+                    (ToolAction("inspect-call", "bash", {"command": "inspect"}),),
+                    reasoning="The first evidence boundary must be inspected.",
+                )
+
+            def compact(
+                self, messages: Sequence[Mapping[str, Any]], *, instruction: str,
+                max_tokens: int, on_sample_started: Any = None,
+            ) -> CompactionSummary:
+                del instruction, max_tokens
+                if on_sample_started is not None:
+                    on_sample_started()
+                self.compaction_requests.append([dict(message) for message in messages])
+                return CompactionSummary(
+                    "The initial inspection completed.",
+                    ("inspect-call returned success",),
+                    (),
+                    "Continue from the durable packet and complete the task.",
+                )
+
+        class StatelessProcess:
+            def __init__(self) -> None:
+                self.calls: list[ToolAction] = []
+
+            def policy_value(self) -> dict[str, Any]:
+                return {"process": "stateless-resume-test/v1"}
+
+            def preflight(self) -> None:
+                return None
+
+            def execute(self, action: ToolAction) -> ToolObservation:
+                self.calls.append(action)
+                if action.call_id == "inspect-call" and action.arguments == {"command": "inspect"}:
+                    return ToolObservation("inspect-call", 0, output="observed\n")
+                if action.call_id == "complete-call" and action.arguments == {
+                    "command": DEFAULT_COMPLETION_COMMAND,
+                }:
+                    return completion_observation()
+                raise AssertionError("unexpected tool action")
+
+        class UnavailableProcess(StatelessProcess):
+            def __init__(self) -> None:
+                super().__init__()
+                self.preflight_calls = 0
+
+            def preflight(self) -> None:
+                self.preflight_calls += 1
+                raise ModelProtocolError("tool container is temporarily unavailable")
+
+        with ProbeFixture() as fixture:
+            configuration = fixture.configuration(
+                fixture.limits(force_compaction_after_turns=(1,))
+            )
+            first_model = ContextAwareAdapter()
+            first_process = StatelessProcess()
+            first_runner = RepositoryProbeRunner(configuration, first_model, first_process)
+
+            paused = first_runner.run(pause_after_compactions=1)
+            paused_state = read_json(first_runner.state_path)
+
+            duplicate_model = ContextAwareAdapter()
+            unavailable_process = UnavailableProcess()
+            duplicate_runner = RepositoryProbeRunner(
+                configuration, duplicate_model, unavailable_process,
+            )
+            duplicate_pause = duplicate_runner.run(pause_after_compactions=1)
+
+            resumed_model = ContextAwareAdapter()
+            resumed_process = StatelessProcess()
+            resumed_runner = RepositoryProbeRunner(configuration, resumed_model, resumed_process)
+            completed = resumed_runner.run()
+
+        self.assertEqual("running", paused["status"])
+        self.assertEqual("compaction_checkpoint", paused["pause"]["kind"])
+        self.assertTrue(paused["pause"]["safe_to_resume"])
+        self.assertEqual(paused, duplicate_pause)
+        self.assertEqual(0, unavailable_process.preflight_calls)
+        self.assertEqual(0, len(duplicate_model.work_requests))
+        self.assertEqual("compaction", paused_state["checkpoints"][-1]["kind"])
+        self.assertIsNone(paused_state["model_inflight"])
+        self.assertIsNone(paused_state["tool_inflight"])
+        self.assertEqual(["inspect-call"], [call.call_id for call in first_process.calls])
+        self.assertEqual("completed", completed["status"])
+        self.assertEqual(paused["run_id"], completed["run_id"])
+        self.assertEqual(paused["policy_sha256"], completed["policy_sha256"])
+        self.assertEqual(["complete-call"], [call.call_id for call in resumed_process.calls])
+        self.assertEqual(1, len(resumed_model.work_requests))
+        self.assertIn(
+            "repository_probe_continuation",
+            canonical_json(resumed_model.work_requests[0]).decode("utf-8"),
+        )
+
+    def test_pause_after_compactions_requires_positive_integer(self) -> None:
+        with ProbeFixture() as fixture:
+            runner = RepositoryProbeRunner(
+                fixture.configuration(),
+                ScriptedModelAdapter([completion_turn()], [], estimated_tokens=64),
+                ScriptedToolProcess([completion_observation()]),
+            )
+            for invalid in (0, -1, True):
+                with self.subTest(invalid=invalid), self.assertRaises(ConfigurationError):
+                    runner.run(pause_after_compactions=invalid)
+
+    def test_repeated_pause_rejects_workspace_drift_without_model_or_tool_replay(self) -> None:
+        with ProbeFixture() as fixture:
+            first = AssistantTurn(
+                "I will inspect the subject.",
+                (ToolAction("inspect-call", "bash", {"command": "inspect"}),),
+                reasoning="Establish the first durable evidence boundary.",
+            )
+            model = ScriptedModelAdapter(
+                turns=[first, completion_turn()],
+                summaries=[CompactionSummary(
+                    "The inspection completed.",
+                    ("inspect-call returned success",),
+                    (),
+                    "Continue from the compacted checkpoint.",
+                )],
+                estimated_tokens=64,
+            )
+            process = ScriptedToolProcess([
+                ToolObservation("inspect-call", 0, output="observed\n"),
+                completion_observation(),
+            ])
+            runner = RepositoryProbeRunner(
+                fixture.configuration(fixture.limits(force_compaction_after_turns=(1,))),
+                model,
+                process,
+            )
+
+            paused = runner.run(pause_after_compactions=1)
+            (fixture.source / "subject.txt").write_text("external drift\n", encoding="utf-8")
+
+            with self.assertRaises(WorkspaceDriftError):
+                runner.run(pause_after_compactions=1)
+            failed_state = read_json(runner.state_path)
+
+        self.assertEqual("running", paused["status"])
+        self.assertEqual(1, model.generate_calls)
+        self.assertEqual(1, model.compact_calls)
+        self.assertEqual(["inspect-call"], [call.call_id for call in process.calls])
+        self.assertEqual("failed", failed_state["status"])
+        self.assertEqual("workspace_drift", failed_state["failure"]["kind"])
+
     def test_compaction_preserves_reasoning_evidence_judgments_and_plan(self) -> None:
         with ProbeFixture() as fixture:
             first = AssistantTurn(

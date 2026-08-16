@@ -2177,7 +2177,16 @@ class RepositoryProbeRunner:
         self.policy = self._build_policy()
         self.policy_sha256 = fingerprint(self.policy)
 
-    def run(self) -> dict[str, Any]:
+    def run(self, *, pause_after_compactions: int | None = None) -> dict[str, Any]:
+        if (
+            pause_after_compactions is not None
+            and (
+                isinstance(pause_after_compactions, bool)
+                or not isinstance(pause_after_compactions, int)
+                or pause_after_compactions <= 0
+            )
+        ):
+            raise ConfigurationError("pause_after_compactions must be a positive integer")
         state = self._load_or_initialize()
         if state["status"] == "completed":
             return self._result(state)
@@ -2187,6 +2196,10 @@ class RepositoryProbeRunner:
 
         try:
             self._recover_transient_state(state)
+            if self._pause_checkpoint_reached(state, pause_after_compactions):
+                self._verify_inputs()
+                self._verify_workspace(state)
+                return self._paused_result(state)
             self.process.preflight()
             while state["status"] == "running":
                 counters = state["counters"]
@@ -2196,6 +2209,8 @@ class RepositoryProbeRunner:
                 self._verify_workspace(state)
                 if self._should_compact(state):
                     self._compact(state)
+                    if self._pause_checkpoint_reached(state, pause_after_compactions):
+                        return self._paused_result(state)
                     continue
                 self._work_once(state)
             return self._result(state)
@@ -2203,6 +2218,29 @@ class RepositoryProbeRunner:
             if not isinstance(error, (PolicyDriftError, StateIntegrityError)):
                 self._record_failure(state, error)
             raise
+
+    @staticmethod
+    def _pause_checkpoint_reached(
+        state: Mapping[str, Any], pause_after_compactions: int | None,
+    ) -> bool:
+        return bool(
+            pause_after_compactions is not None
+            and state["counters"]["compactions_completed"] >= pause_after_compactions
+            and state["checkpoints"][-1]["kind"] == "compaction"
+            and state.get("model_inflight") is None
+            and state.get("tool_inflight") is None
+        )
+
+    def _paused_result(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        result = self._result(state)
+        result["pause"] = {
+            "kind": "compaction_checkpoint",
+            "safe_to_resume": True,
+            "compactions_completed": state["counters"]["compactions_completed"],
+            "checkpoint_id": state["checkpoints"][-1]["checkpoint_id"],
+            "checkpoint_sha256": state["checkpoints"][-1]["checkpoint_sha256"],
+        }
+        return result
 
     def _build_policy(self) -> dict[str, Any]:
         inputs = [artifact.declaration() for artifact in self.configuration.methodology]
@@ -3283,11 +3321,16 @@ class RepositoryProbeRunner:
                 raise StateIntegrityError("checkpoint does not declare a closed boundary")
             history_count = _nonnegative_int(checkpoint.get("history_message_count"), "checkpoint history count")
             active_count = _nonnegative_int(checkpoint.get("active_message_count"), "checkpoint active count")
-            if history_count > len(state["transcript"]) or active_count > len(state["active_messages"]):
-                raise StateIntegrityError("checkpoint message count exceeds current state")
+            if history_count > len(state["transcript"]):
+                raise StateIntegrityError("checkpoint history count exceeds current state")
             if fingerprint(state["transcript"][:history_count]) != checkpoint.get("history_sha256"):
                 raise StateIntegrityError("checkpoint history prefix changed")
+            # Context maintenance deliberately discards older active contexts. Their counts and
+            # hashes remain committed by the checkpoint chain, but only the latest active context
+            # is still present and can be compared with the current state bytes.
             if sequence == len(state["checkpoints"]) - 1:
+                if active_count > len(state["active_messages"]):
+                    raise StateIntegrityError("latest checkpoint active count exceeds current state")
                 if fingerprint(state["active_messages"][:active_count]) != checkpoint.get("active_context_sha256"):
                     raise StateIntegrityError("checkpoint active context changed")
             checkpoint_counters = checkpoint.get("counters")
@@ -3959,6 +4002,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
     run_parser = subparsers.add_parser("run", help="run or safely resume a preregistered probe")
     run_parser.add_argument("--config", type=Path, required=True)
+    run_parser.add_argument(
+        "--pause-after-compactions",
+        type=int,
+        help=(
+            "exit successfully at the durable checkpoint after at least this many completed "
+            "context-maintenance calls; rerun without this option to resume"
+        ),
+    )
     rehearsal_parser = subparsers.add_parser(
         "rehearse", help="run the deterministic forced-compaction integration rehearsal"
     )
@@ -3976,7 +4027,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         if args.command == "run":
-            result = runner_from_config(args.config).run()
+            result = runner_from_config(args.config).run(
+                pause_after_compactions=args.pause_after_compactions,
+            )
         elif args.command == "rehearse":
             if args.directory is None:
                 with tempfile.TemporaryDirectory(prefix="bdrv1-probe-rehearsal-") as temporary:
