@@ -4,8 +4,8 @@ Date: 2026-08-16
 
 Issue: #38
 
-Status: transport diagnostic failed closed at the forced context-maintenance boundary; the
-repository was not modified.
+Status: the MLX transport diagnostic failed at context maintenance; a corrected GGUF/native
+attempt passed pause/cold-resume continuity but failed autonomous task closure.
 
 ## Why this run exists
 
@@ -83,3 +83,53 @@ weaken the runner by extracting JSON from prose or repairing malformed output.
 The 31B exo experiment remains independently necessary. It should use its pinned native Gemma tool
 and reasoning parsers and must pass a one-shot synthetic maintenance gate before receiving a
 repository prompt.
+
+## Root cause and typed correction
+
+Ollama issue [#17183](https://github.com/ollama/ollama/issues/17183) reproduces the exact failure:
+MLX models, explicitly including `gemma4:12b-mlx`, silently ignore structured-output schemas while
+the equivalent GGUF model honors them. The runner was therefore correct to reject the prose.
+
+The follow-up did not parse prose or relax validation. Commit `b051ba9` added an explicit
+`ollama_native_chat` transport. It uses complete native `/api/chat` responses, maps the exact
+maintenance schema to native `format`, disables thinking only for maintenance, normalizes native
+typed tool calls into the existing strict envelope, and preserves fail-closed retry/restart
+behavior. The full suite passed 96/96. The exact previously failed maintenance transcript then
+returned a valid four-field continuation packet.
+
+## Fresh GGUF/native repository canary
+
+The corrected attempt used dense 11.9B `gemma4:12b-131k`, GGUF Q4_K_M, with base digest
+`4eb23ef187e2c5462566d6a1d3bbbc2f1346d0b4327cbb66d58fffbcc9b2b05c` and derived 131K alias
+digest `d619e9ad5dc334919cd66c79db4832a966c04da7acb1ee9e9cc2de4f6e836c25`. Its frozen runner SHA-256
+was `4d606c669ad572ba55b39986b7a5e9b1003e8d029010516ad8adea24c34675ee`; the private root is
+`/private/tmp/bdrv1-v2-local-gemma12-canary-20260816d`.
+
+The fresh attempt completed one work/tool turn, forced strict maintenance, wrote a valid
+continuation, and paused with `safe_to_resume=true`. A new process cold-resumed the exact run with
+no lost or replayed action.
+
+The resumed model completed 23 work/tool turns. It found the correct source and tests, implemented
+the empty-left behavior, and added both required assertions. The resulting repository test passed
+when independently rerun. The implementation formatting was poor but semantically correct.
+
+The model did not close the task:
+
+1. it created an untracked `canary/` compilation-output directory;
+2. it accidentally truncated `slices_progress.yaml` to one byte;
+3. it repeatedly misread `ls -l` output and failed to understand that the tracker file was writable
+   while its parent methodology directory was read-only;
+4. it attempted rename-based `sed -i`, which failed on the read-only directory;
+5. the next logical work call produced no required tool call on all three complete attempts,
+   exhausting the frozen two-retry budget and terminating as `model_protocol_error`.
+
+Final counters were 23 completed turns, 23 completed tool calls, one completed compaction, two
+retries, and zero task-completion calls. State SHA-256 was
+`6b29a0f7febdcf0a73f0d0a8a4f79dd1d9bc46276e244e6b4c0f9519053ac793`. The candidate was not
+committed, the tracker was invalid, and this exact 12B deployment is rejected for autonomous BDR.
+
+The compatibility correction exposed the model's real capability: it can implement the tiny Java
+requirement and continue across forced pause/resume, but it could not reliably manage durable BDR
+state or recover from its filesystem mistake. The 31B exo gate should reuse the enforced-schema
+lesson and treat durable-state recovery as a first-class capability. Do not generalize this 12B
+failure to 31B, and do not hide it with controller-side tracker repair.
