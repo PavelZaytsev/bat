@@ -285,6 +285,7 @@ still stop a run. Ordinary review and CI remain the merge authority.
 | [`docs/live-gpt-oss-probe.md`](docs/live-gpt-oss-probe.md) | opt-in live GPT-OSS conformance and evidence capture |
 | [`docs/live-java-acceptance.md`](docs/live-java-acceptance.md) | supervised restart-aware GPT-OSS Java worker and evaluator acceptance run |
 | [`docs/experiments/java-six-phase-120b-20260814.md`](docs/experiments/java-six-phase-120b-20260814.md) | sanitized postmortem of the first GPT-OSS-120B live Java attempt lineage |
+| [`docs/convergent-agentic-loops.md`](docs/convergent-agentic-loops.md) | architecture blueprint for autonomous loops that converge |
 | [`docs/exo-efficiency.md`](docs/exo-efficiency.md) | measured throughput, prefix-cache behaviour, and the 120B readiness checklist |
 | [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
 | [`docs/quickstart.md`](docs/quickstart.md) | executable six-phase Java canary and provider portability contract |
