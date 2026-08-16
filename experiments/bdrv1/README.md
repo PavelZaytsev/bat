@@ -27,6 +27,12 @@ qualification scorecard. A laptop 31B result is also a distinct deployment unles
 precision or quantization, context limit, serving stack, and host topology all match the frozen
 Gemma 4 31B candidate record.
 
+A dense Gemma 4 12B MLX/Ollama proxy is also permitted only as a local transport diagnostic. Its
+first protocol-v2 canary completed one named-tool turn but returned non-JSON content at the forced
+context-maintenance boundary. See
+`results/2026-08-16-gemma4-12b-local-canary.md`. This does not qualify or semantically reject either
+12B or 31B; it requires a synthetic maintenance gate before another repository run.
+
 Through the Monday CorfuDB PR run, optimize for reliable live evidence rather than minimum GPU
 spend. Record dollars, node-hours, and wall time, and ask for a balance replenishment if funding
 would otherwise stop a useful run. Do not multiply runs without a concrete readiness question.
@@ -146,6 +152,11 @@ prompts, methodology, or qualification tests around the CorfuDB review oracle.
   commit, an independently green test, and a production-only revert that failed as expected. This
   completes the protocol-v2 reference continuity gate; it does not qualify Qwen or select the
   Monday GPT-OSS/Gemma deployment.
+- A free local dense Gemma 4 12B canary completed its first named-tool turn with valid identity and
+  usage, then failed closed because its forced context-maintenance response was not strict JSON.
+  The repository, tracker, and scratch remained unchanged. This isolates an Ollama/Gemma
+  maintenance-format incompatibility and earns a repository-free synthetic diagnostic; it does
+  not answer the Gemma 4 31B semantic hypothesis.
 
 ## Capability scorecard
 
