@@ -10,251 +10,203 @@
   <p><strong>"It's time to kill bugs and chew bubble gum... and I'm all outta gum" - BAT</strong></p>
 </div>
 
-Point BAT at a pull request. It does not merely ask a model to “find bugs.” It makes the code stop
-guessing.
+BAT is an autonomous refactoring runtime built around **Boundary-Driven Refactoring (BDR)**, an
+evidence-backed methodology for finding missing information-flow boundaries in code, making the
+required facts explicit, routing them from their authority to the decisions that need them, and
+removing the obsolete inference.
 
-BAT is an agentic refactoring loop that implements **Boundary-Driven Refactoring (BDR)**: an
-evidence-backed method for finding facts that code is inferring, representing those facts explicitly
-at their authority boundary, routing them to the decisions that need them, and deleting the obsolete
-inference.
-
-> **A bug is code acting on something it does not know.**
+The repository contains the portable BDR method, its deterministic state/evidence engine, host
+adapters for Claude Code, ChatGPT, and Codex, and the supported phase-opaque direct runtime for
+OpenAI-compatible local or exo inference.
 
 ## Run it
 
-Open the repository at the pull-request head, start a supported coding agent, and invoke the skill:
+### Prerequisites
 
-| host | invocation |
-|---|---|
-| Claude Code | `/refactor this PR` on current collision-free installs or with the team shim; `/bat:refactor this PR` always |
-| ChatGPT | `@refactor this PR` |
-| Codex | `$refactor this PR` |
+For the current `main` branch:
 
-`/bat:refactor` is the canonical collision-free entrypoint. Claude Code can also expose a plugin
-skill's bare name when it does not collide, so `/refactor` works directly on clients with that
-behavior.
-[`adapters/claude-bare/refactor/`](adapters/claude-bare/refactor/) is a tiny standalone
-personal/managed compatibility skill that delegates `/refactor` on clients that do not expose it.
-BAT uses `bat` as its canonical plugin ID. Pre-BAT plugin installations named `bdr`
-must be uninstalled and reinstalled as BAT; `/bdr:refactor` is not a supported alias.
+- Git
+- Python 3.10 or newer
+- the target repository's normal build/test toolchain
+- a clean checkout or isolated worktree at the PR head
+- for live autonomous runs, an approved OpenAI-compatible model endpoint and an isolated execution
+  container
 
-The `bdr` command, `.bdr/` workspace state, and BDR evidence identifiers retain the methodology's
-name intentionally.
+See [`INSTALLATION.md`](INSTALLATION.md) for host-specific installation and permissions.
 
-See [`INSTALLATION.md`](INSTALLATION.md) for private team installation, prerequisites, permissions,
-and host-specific setup.
+### Smoke-test the BDR engine
 
-The deterministic BDR state engine is dependency-free and supports Python 3.10 or newer. To smoke
-test it locally:
+From the BAT repository root:
 
 ```bash
 bin/bdr rules
 bin/bdr selftest
 ```
 
-The supported autonomous runtime is the dependency-free, phase-opaque direct runner. It keeps the
-model's repository interface familiar while enforcing identity, isolation, durable checkpoints,
-replay safety, context maintenance, and budgets at the host boundary:
+The BDR engine is dependency-free and maintains the repository-local `.bdr/` state used by the
+methodology.
+
+### Smoke-test the autonomous runtime
+
+`bin/bat-direct` is the supported autonomous model-driven runtime on current `main`.
+
+Run the deterministic, network-free rehearsal:
 
 ```bash
 bin/bat-direct rehearse
-bin/bat-direct example-config
 ```
 
-The live adapter uses an explicitly configured OpenAI-compatible Chat Completions endpoint and
-preserves reasoning continuation only when the configured server exposes it. Before serving
-GPT-OSS with vLLM, read
-[`docs/gpt-oss-vllm-streaming-runbook.md`](docs/gpt-oss-vllm-streaming-runbook.md) for the previously
-diagnosed upstream parser crash, the coarse-streaming trap, the exact legacy patch, and the
-fail-closed decision table for malformed tool arguments.
+Generate a configuration template:
 
-See [`docs/direct-runtime.md`](docs/direct-runtime.md) for the supported exo/local execution path,
-preregistration boundary, cold-resume gate, and current model evidence. Ordinary CI uses a
-deterministic adapter and makes no live model call.
-
-Inside a target Git repository, its normal lifecycle is:
-
-```text
-preflight → init/resume → status --next → evidence-backed operations → completion-check
+```bash
+bin/bat-direct example-config > /tmp/bat-direct-config.json
 ```
 
-Do not hand-edit `.bdr/progress.yaml`; see
-[`skills/refactor/references/tracker.md`](skills/refactor/references/tracker.md) for the exact
-operation and phase-gate schemas.
+The generated file is only a template. Before a live run, replace every placeholder and pin the
+task, methodology, target repository revision, model identity, context limit, server identity,
+container image, mounts, and execution budgets.
 
-## Why “find and fix all bugs” performs poorly
+Validate the configured container identity:
 
-That prompt has no unit of work, no causal model, and no definition of done. Even a capable model can
-produce a plausible local patch while leaving sibling failures, duplicated inferences, and the
-underlying illegal state intact.
+```bash
+bin/bat-direct container-identity --config /tmp/bat-direct-config.json
+```
 
-It also gives the model no durable way to answer:
+Then start the run:
 
-- What fact did this decision actually need?
-- Which component had authority to provide it?
-- Where else is the same fact being guessed?
-- Did the repair remove the cause or merely silence one test?
-- When has the search converged?
+```bash
+bin/bat-direct run --config /tmp/bat-direct-config.json
+```
 
-More model does not replace a protocol. The model supplies search and implementation ability; BDR
-supplies the diagnostic grammar, phase gates, durable state, counterfactual proof, and bounded
-stopping condition.
+The live runtime expects an explicitly configured OpenAI-compatible Chat Completions endpoint.
+Prefer loopback or an SSH tunnel and keep credentials in the configured environment variable rather
+than in the JSON file.
+
+For the full configuration contract, preregistration boundary, exo/local serving path, compaction,
+cold resume, retry policy, and terminal acceptance behavior, read
+[`docs/direct-runtime.md`](docs/direct-runtime.md).
+
+### Invoke BAT through a coding host
+
+The host adapters expose the same portable BDR workflow but do **not** automatically invoke
+`bin/bat-direct`.
+
+Check out the PR head in the target repository, start a new coding session, and invoke:
+
+| host | invocation |
+|---|---|
+| Claude Code | `/bat:refactor this PR` |
+| ChatGPT | `@refactor this PR` |
+| Codex | `$refactor this PR` |
+
+Claude Code may also expose `/refactor` when no command collision exists. The stable namespaced
+Claude entrypoint is `/bat:refactor`.
+
+See [`INSTALLATION.md`](INSTALLATION.md) for private marketplace installation, the Claude bare-name
+compatibility shim, ChatGPT/Codex plugin packaging, workspace permissions, and upgrade notes.
+
+## Why generic "find and fix all bugs" prompts perform poorly
+
+A broad bug-finding prompt does not define a stable unit of work, a causal model, an evidence
+contract, or a stopping condition. A capable model can produce a plausible local patch while
+leaving sibling failures, duplicated state, or the underlying information-flow defect intact.
+
+BDR instead makes the model answer concrete questions throughout the run:
+
+- What fact does this decision require?
+- Which component has authority to provide that fact?
+- Where is the code currently inferring or reconstructing it?
+- Which other decisions depend on the same missing information-flow edge?
+- What evidence proves the repair changed the intended boundary?
+- What evidence would falsify the repair?
+- Has the final code reached a fixed point, or is there still live work?
+
+The model supplies repository search, reasoning, implementation, and test-writing ability. BDR
+supplies the diagnostic grammar, durable state, evidence gates, counterfactual proof, and bounded
+convergence rules.
 
 ## What BDR does differently
 
-Every finding is forced into one sentence:
+BDR treats each finding as an information-flow boundary problem.
+
+Every boundary finding is written in this form:
 
 > At `<site>`, consumer **C** needs fact **K** from authority **A** to make decision **D**, but
 > instead infers K from **I**.
 
-Findings are grouped by the missing information-flow edge:
+Findings are grouped by the missing edge:
 
 ```text
-(fact authority, missing fact, consumer decision)
+(authority A, fact K, consumer decision C/D)
 ```
 
-They are not grouped merely by file, subsystem, symptom, severity, or a broad noun such as
-“ownership.”
+They are not grouped only because they appear in the same file, subsystem, symptom category, or
+share a broad label such as "ownership."
 
-This turns hidden procedural knowledge into explicit structure. Once the missing fact becomes data
-with invariants, its transfer can become mechanical, invalid states shrink, obsolete branches die,
-and an entire family of bugs can become unreachable.
+Before execution, BDR asks whether one representation at that edge would make all grouped findings
+impossible. If not, the group is split.
 
-When a finding initially looks temporal, BDR first tests whether the missing structure is ownership,
-borrowing, reservation, completion, generation, or a lease. Real deadlines, TTLs, happens-before
-obligations, fairness, and other genuinely temporal or concurrent properties remain temporal or
-concurrent; BDR does not assume every time-shaped defect dissolves into ownership.
+A finding may initially look like a value, temporal, concurrency, or direct defect. For
+time-shaped problems, BDR first checks whether the missing structure is actually ownership,
+borrowing, reservation, completion, generation, capability, projection, or a lease. Genuine
+real-time, lifecycle, fairness, ordering, and happens-before requirements remain temporal or
+concurrent; the method does not force them into an ownership model.
+
+BDR then repairs one bounded slice at a time. Each slice carries explicit findings, evidence,
+foreign facts, dependencies, decisions, and phase state in the `.bdr/` tracker. The tracker is not
+proof by itself: gate transitions require code-derived or execution-derived evidence.
+
+After all live slices are complete, the final code is rescanned against the pinned target and the
+broad verification suite is run at the fixed point. New merge-blocking findings enter another
+bounded pass. Exhausting the configured pass/attempt bound is non-convergence, not success.
 
 ## The six-phase kill chain
 
-Each boundary slice runs through the same six phases:
+Each boundary slice moves through the same six phases:
 
 | phase | purpose | gate |
 |---|---|---|
-| **EXPOSE** | Make one reachable defect visible with a focused regression test. | The test fails at the intended assertion. |
-| **REPRESENT** | Introduce the missing fact and its invariants without routing behavior through it yet. | The representation is explicit and existing behavior is preserved. |
-| **ROUTE** | Enumerate producers and consumers, then carry the fact from its authority to every decision that needs it. | Transfer is mechanical; no new policy was smuggled into routing. |
-| **COLLAPSE** | Delete the old inference, duplicate state, and branches that the new representation makes obsolete. | Actual structural deaths match the predictions recorded before routing. |
-| **SATURATE** | Exercise the adjacent decision algebra: illegal states, boundaries, precedence, sequences, and operational obligations. | The focused slice selection is green. |
-| **FALSIFY** | Remove only the repair and challenge the final code plus every sibling finding. | The focused counterfactual turns red and each sibling has a typed outcome. |
+| **EXPOSE** | Make one reachable defect observable with a focused regression test. | The test fails at the intended assertion against the recorded slice base. |
+| **REPRESENT** | Introduce the missing fact and its invariants without routing behavior through it yet. | The representation is explicit and the relevant baseline behavior is preserved. |
+| **ROUTE** | Enumerate producers and consumers and carry the fact from its authority to every decision that needs it. | Transfer is mechanical; routing does not invent unrelated policy. |
+| **COLLAPSE** | Remove the old inference, duplicate state, and mechanisms made obsolete by the new representation. | Actual structural deaths match the predictions recorded before routing. |
+| **SATURATE** | Exercise the adjacent decision algebra and any operational obligations. | The focused slice selection is green across the relevant boundary states. |
+| **FALSIFY** | Remove only the repair and challenge the final code plus every sibling finding. | The focused counterfactual turns red and each sibling has a typed, evidence-backed outcome. |
 
-After all live slices, BAT rescans the final code against the pinned target and runs the broad
-integration, chaos, benchmark, or public suite once. New merge-blocking findings enter another
-bounded pass. Reaching the pass bound is non-convergence, never success.
-
-## Evidence without verification theater
-
-BDR is strict about evidence and deliberately economical about test execution. It does not rerun the
-same broad suite because a phase number changed.
-
-For an ordinary run:
-
-- establish one deterministic baseline;
-- run one focused red test in **EXPOSE**;
-- use structural evidence in **REPRESENT**, **ROUTE**, and **COLLAPSE**;
-- run one focused green selection in **SATURATE**;
-- remove the repair and run one focused counterfactual red test in **FALSIFY**; and
-- run the broad suite once at the final fixed point.
-
-With `N` independent slices, the ordinary test budget is:
-
-```text
-2 + 3N
-```
-
-That is baseline plus final suite, and three focused invocations per slice. Extra runs require a
-concrete operational risk, workspace drift, or newly discovered work—not ritual.
-
-Expected red tests in EXPOSE and FALSIFY are evidence. They are not failed verification.
-
-The repository tracker is current state. Git, `.bdr/events.jsonl`, and digest-bound evidence records
-are history. GitHub is a projection, not a second editable source of truth.
-
-## BAT is the agentic loop; BDR is the methodology
-
-| name | meaning |
-|---|---|
-| **BAT — BugAnnihilatorThreethousand** | The agentic loop and its runtime, host adapters, orchestration, tooling, telemetry, and user experience. |
-| **BDR — Boundary-Driven Refactoring** | The reusable methodology, protocol, state model, evidence contract, and six-phase loop BAT executes. |
-
-Other tools may implement BDR without becoming BAT. BAT may add model backends, cluster execution,
-GitHub automation, and a gloriously overqualified mascot without changing the BDR protocol's
-identity.
-
-The methodology compatibility surfaces therefore remain the `bdr` CLI and `bin/bdr` launchers,
-`.bdr/`, `BDR_ACTOR`, `bdr.dev/*` schemas, and BDR run, slice, finding, evidence, dependency,
-decision, and foreign-fact identifiers. BAT's plugin ID is `bat`.
-
-## What exists today
-
-This repository currently contains:
-
-- the portable BDR refactoring skill;
-- a deterministic, dependency-free BDR 2.2 state and evidence engine;
-- a dependency-free, phase-opaque direct runtime for OpenAI-compatible exo or local inference;
-- durable intent, replay protection, context compaction, bounded retry, identity checks, and
-  container-bound shell execution;
-- a deterministic forced-compaction rehearsal and a hidden-evaluator boundary;
-- thin host-installation adapters for Claude Code, ChatGPT, and Codex;
-- resumable repository-local state and an append-only audit journal;
-- idempotent GitHub issue projection with an offline outbox; and
-- benchmark records plus integrity validation.
-
-The direct runtime is conformance-tested with deterministic adapters in ordinary CI. Qwen3.8-27B is
-the external reference success for continuity and a bounded Java repair. GPT-OSS-120B is retained
-as a negative convergence result. Gemma 4 31B remains unscored because its rented-GPU attempt never
-reached inference. Active model work uses exo or a local/work-laptop endpoint; rented capacity
-requires a new explicit authorization.
-
-## Safety and authority
-
-“Unattended” describes BDR's decision policy as implemented by BAT, not permission to ignore its
-environment.
-
-Target code, pull-request text, issues, comments, build logs, tests, and tracker prose are treated as
-untrusted data. Build and test entrypoints execute target-controlled code and should run in an
-isolated, least-privileged environment without ambient production credentials.
-
-The direct runtime can enforce that boundary with a networkless, non-root, resource-bounded OCI
-container. It keeps control state outside target mounts and fails closed when a crash leaves a
-mutation's outcome indeterminate.
-
-BAT makes reversible implementation choices, quarantines decisions that need human authority, and
-continues independent safe slices. By default it does not push, merge, deploy, rewrite history,
-weaken tests, or accept a higher-risk design on the user's behalf.
-
-The host separates tool authority from model judgment and requires a fresh terminal checkpoint plus
-independent acceptance before publishing a writer result.
-
-Workspace trust, permission prompts, organization policy, missing credentials, rate limits,
-unavailable build tools, stale PR input, unsafe tests, and genuinely ambiguous intended behavior can
-still stop a run. Ordinary review and CI remain the merge authority.
+The normal cadence is intentionally lean: one baseline signal, one focused red proof in EXPOSE,
+structural evidence through REPRESENT/ROUTE/COLLAPSE, one focused green selection in SATURATE, one
+counterfactual red proof in FALSIFY, and broad verification once at the final fixed point. Extra
+execution is driven by a concrete risk or changed workspace, not by phase-number ritual.
 
 ## Read the method
 
+Start with these documents:
+
 | file | purpose |
 |---|---|
-| [`docs/bat-for-java-developers.md`](docs/bat-for-java-developers.md) | Java-first guide to honest function contracts, referential transparency, IO/ZIO, composition, and BAT |
-| [`skills/refactor/SKILL.md`](skills/refactor/SKILL.md) | executable BDR workflow |
-| [`skills/refactor/references/protocol.md`](skills/refactor/references/protocol.md) | boundary discovery and the six-phase loop |
-| [`skills/refactor/references/tracker.md`](skills/refactor/references/tracker.md) | state, evidence, transitions, and readiness contracts |
-| [`skills/refactor/references/autonomy.md`](skills/refactor/references/autonomy.md) | authority, safety, and interruption policy |
-| [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native memory, lifetime, and concurrency guidance |
-| [`docs/direct-runtime.md`](docs/direct-runtime.md) | supported exo/local runtime, safety boundary, and cold-resume procedure |
-| [`docs/experiments/java-six-phase-120b-20260814.md`](docs/experiments/java-six-phase-120b-20260814.md) | sanitized postmortem of the first GPT-OSS-120B live Java attempt lineage |
-| [`docs/convergent-agentic-loops.md`](docs/convergent-agentic-loops.md) | architecture blueprint for autonomous loops that converge |
-| [`docs/exo-efficiency.md`](docs/exo-efficiency.md) | measured throughput, prefix-cache behaviour, and the 120B readiness checklist |
-| [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and recorded pilot evidence |
-| [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | BAT runtime and BDR methodology responsibility boundary |
+| [`skills/refactor/SKILL.md`](skills/refactor/SKILL.md) | executable BAT/BDR workflow and terminal behavior |
+| [`skills/refactor/references/protocol.md`](skills/refactor/references/protocol.md) | boundary discovery, evidence rules, six phases, rewinds, and convergence |
+| [`skills/refactor/references/tracker.md`](skills/refactor/references/tracker.md) | `.bdr/` state model, operations, evidence records, phase gates, and readiness contracts |
+| [`skills/refactor/references/autonomy.md`](skills/refactor/references/autonomy.md) | authority boundaries, safe execution, interruption policy, and decision quarantine |
+| [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native-memory lifetime, concurrency, and related boundary guidance |
+| [`docs/direct-runtime.md`](docs/direct-runtime.md) | current phase-opaque autonomous runtime, exo/local serving, isolation, compaction, cold resume, and acceptance |
+| [`INSTALLATION.md`](INSTALLATION.md) | installation, host adapters, permissions, and live-runtime prerequisites |
 
-## Status
+For the architecture and experimental evidence behind the current runtime:
 
-BAT and BDR are alpha. The workflow is promising and the state engine is designed to fail closed,
-but the method has not yet been independently validated across multiple domains or organizations.
-The supported direct runtime has deterministic protocol coverage and one external-reference repair
-success; deployment-candidate quality is still unresolved. Provider execution is not wired into the
-public host adapters. The next proof point is a fresh, preregistered Gemma run on exo or the work
-laptop—not another rented-GPU infrastructure attempt.
+| file | purpose |
+|---|---|
+| [`docs/convergent-agentic-loops.md`](docs/convergent-agentic-loops.md) | design rules for long-running autonomous loops and the phase-opaque host boundary |
+| [`docs/adr/0001-bat-bdr-boundary.md`](docs/adr/0001-bat-bdr-boundary.md) | runtime/methodology responsibility boundary |
+| [`docs/adr/0002-isolated-java-worker.md`](docs/adr/0002-isolated-java-worker.md) | isolated Java execution design |
+| [`docs/adr/0003-reasoning-backends.md`](docs/adr/0003-reasoning-backends.md) | reasoning backend decisions |
+| [`docs/adr/0004-run-telemetry.md`](docs/adr/0004-run-telemetry.md) | run telemetry contract |
+| [`docs/adr/0005-wire-dialect-seam.md`](docs/adr/0005-wire-dialect-seam.md) | provider/serving wire-dialect boundary |
+| [`docs/exo-efficiency.md`](docs/exo-efficiency.md) | measured exo throughput, prefix-cache behavior, and distributed-inference notes |
+| [`experiments/bdrv1/README.md`](experiments/bdrv1/README.md) | BDRv1 model/runtime qualification program |
+| [`experiments/bdrv1/results/`](experiments/bdrv1/results/) | recorded Qwen, GPT-OSS, and Gemma qualification results |
+| [`benchmarks/pilot/README.md`](benchmarks/pilot/README.md) | benchmark protocol and pilot evidence |
 
-Start with a supervised pilot, inspect the audit trail, and retain ordinary code review and CI as
-the final merge authority.
+`docs/quickstart.md` is retained as historical documentation for the removed Scala canary. Its
+commands are not the current execution path; use [`docs/direct-runtime.md`](docs/direct-runtime.md)
+for current `main`.
