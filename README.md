@@ -10,18 +10,10 @@
   <p><strong>"It's time to kill bugs and chew bubble gum... and I'm all outta gum" - BAT</strong></p>
 </div>
 
-BAT is an experimental autonomous refactoring system built around **Boundary-Driven Refactoring
-(BDR)**.
+BAT is an experimental autonomous agentic refactoring loop built around **Boundary-Driven Refactoring
+(BDR)**: a method for finding facts that code is inferring, representing those facts explicitly at their authority boundary, routing them to the decisions that need them, and deleting the obsolete inference.
 
-The current engineering path is deliberately small: a model works directly in a repository with
-the BDR methodology and tracker, while the surrounding runtime stays phase-opaque and owns only
-transport, isolation, durable checkpoints, context maintenance, integrity checks, budgets, and
-terminal acceptance.
 
-Recent development has focused on this direct runtime with open-weight models. Earlier BAT
-orchestration code, including the Scala/ZIO phase controller, was removed after live experiments
-showed that encoding BDR's semantic phases in the host added a second representation of the work
-without improving convergence.
 
 ## Run it
 
