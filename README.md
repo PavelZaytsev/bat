@@ -184,16 +184,16 @@ verification procedure.
 
 ## Read the method
 
-For the current implementation, start here:
+For the conceptual model and current implementation, start here:
 
 | file | purpose |
 |---|---|
+| [`docs/bat-for-java-developers.md`](docs/bat-for-java-developers.md) | **Start here.** Conceptual guide for Java developers: honest function contracts, effects, composition, the FP/ZIO design lens, and how those ideas lead to current BAT/BDR |
 | [`skills/refactor/SKILL.md`](skills/refactor/SKILL.md) | executable BDR workflow, autonomy contract, phase loop, stop conditions, and terminal behavior |
 | [`skills/refactor/references/protocol.md`](skills/refactor/references/protocol.md) | boundary discovery, grouping, evidence rules, six phases, rewinds, and convergence |
 | [`skills/refactor/references/tracker.md`](skills/refactor/references/tracker.md) | `.bdr/` state model, operations, evidence records, phase gates, and readiness contracts |
 | [`skills/refactor/references/autonomy.md`](skills/refactor/references/autonomy.md) | authority boundaries, safe execution, interruption policy, and decision quarantine |
 | [`skills/refactor/references/java-ownership.md`](skills/refactor/references/java-ownership.md) | Java ownership, native-memory lifetime, concurrency, and related boundary guidance |
-| [`docs/bat-for-java-developers.md`](docs/bat-for-java-developers.md) | conceptual guide for Java developers: honest function contracts, effects, composition, and how those ideas map to current phase-opaque BAT |
 | [`docs/direct-runtime.md`](docs/direct-runtime.md) | supported phase-opaque autonomous runtime, local/exo serving, compaction, cold resume, isolation, retries, and terminal acceptance |
 | [`INSTALLATION.md`](INSTALLATION.md) | prerequisites, package layout, host adapters, permissions, and rollout verification |
 
