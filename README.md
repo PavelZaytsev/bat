@@ -91,15 +91,7 @@ After auditing the closed checkpoint, restart the same logical run without the p
 
 The direct runtime expects an explicitly configured OpenAI-compatible Chat Completions endpoint.
 Recent live work has exercised this path with Qwen3.8-27B, GPT-OSS-120B, and Gemma-family
-deployments. The strongest current positive runtime result is the Qwen protocol-v2 completion
-canary: a repository repair completed through two validated context-maintenance boundaries, tests,
-falsification, tracker closure, commit, and exact terminal completion.
-
-GPT-OSS-120B separately qualified the transport and pause/cold-resume path, but failed independent
-work acceptance because the model declared completion while unresolved tracker state remained.
-Gemma 4 12B was useful as a local development canary but did not autonomously close the task. The
-Gemma 4 31B qualification remains unscored because the attempted cloud deployment never reached
-model inference.
+deployments. 
 
 See [`docs/direct-runtime.md`](docs/direct-runtime.md) for the current runtime contract and
 [`experiments/bdrv1/`](experiments/bdrv1/) for the recorded qualification evidence.
@@ -131,9 +123,13 @@ dependencies, evidence, foreign facts, decisions, and phase state in `.bdr/`. Tr
 treated as semantic proof: transitions require code-derived or execution-derived evidence, and the
 final repository is rescanned before completion.
 
-BDR also distinguishes a locally correct patch from an honestly completed repair. Recent model
-experiments exposed this distinction directly: a model can produce green tests and correct Java
-behavior while still failing completion because its representation or tracker remains unresolved.
+BDR distinguishes a locally correct patch from an honestly completed repair. 
+
+The theory behind BAT is that if each discovered boundary is taken honestly through that complete loop, then repeated discovery/repair/rescan passes should drive the repository toward a fixed point rather than accumulating a collection of locally plausible patches.
+
+Thus, BAT is not primarily trying to make an LLM better at fixing individual bugs. It is trying to make autonomous refactoring convergent by requiring each repair to satisfy BDR’s causal and evidentiary invariants before the model is allowed to treat that work as complete.
+
+Recent experiments demonstrated this directly: GPT-OSS-120B produced the correct Java behavior, but still declared completion while the BDR tracker contained unresolved template facts. BAT rejected the run because passing tests proved the local patch, not that the model had actually closed the tracked boundary.
 
 ## The six-phase kill chain
 
@@ -157,22 +153,6 @@ workspace, not by phase-number ritual.
 After all runnable slices are complete, BDR performs a bounded fixed-point rescan. New
 merge-blocking findings enter another bounded pass. Exhausting the configured pass/attempt bound is
 non-convergence, not success.
-
-## Host adapters
-
-The repository still contains packaging/metadata for Claude Code, ChatGPT, and Codex around the
-portable `skills/refactor/` workflow.
-
-These adapters are **not the recently qualified execution path**. Recent live experiments have
-focused on `bin/bat-direct` with open-weight inference, and the host integrations have not been
-re-qualified end-to-end since the recent runtime cleanup and removal of dead orchestration code.
-
-The repository CI validates the package manifests and the portable skill remains the source of the
-methodology, but installation and invocation through Claude Code, ChatGPT, or Codex should be
-treated as needing a fresh smoke test before relying on them.
-
-See [`INSTALLATION.md`](INSTALLATION.md) for the currently documented adapter packaging and rollout
-verification procedure.
 
 ## Read the method
 
