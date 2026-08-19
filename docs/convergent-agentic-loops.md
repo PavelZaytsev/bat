@@ -1,5 +1,12 @@
 # Designing autonomous agentic loops that converge
 
+**For autonomous LLM engineering, the harness should strongly constrain state, effects, and acceptance while weakly constraining the reasoning trajectory.**
+
+    State: tracker/FSM, checkpoints, replay, context continuity.
+    Effects: bounded tools, filesystem/Git/build isolation, authority.
+    Acceptance: evidence gates, exact completion, independent evaluation.
+    Reasoning trajectory: boundary discovery, phase progression, implementation strategy, debugging path — owned by the model.
+
 An autonomous coding loop is useful only when it can make evidence-backed progress across a long
 run, survive context loss, and stop with a result that can be independently checked. More
 controller machinery does not automatically improve those properties. A controller can be locally
