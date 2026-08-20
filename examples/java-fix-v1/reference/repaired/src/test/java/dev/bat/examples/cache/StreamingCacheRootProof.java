@@ -15,11 +15,15 @@ public final class StreamingCacheRootProof {
                 && cache.visible() instanceof CacheOutcome.Missing<?>;
 
         if (!staleRejected) {
-            throw new AssertionError(
-                    "stale completion must be rejected without changing the visible result");
+            fail("stale completion must be rejected without changing the visible result");
         }
         if (!missRemainedAValue) {
-            throw new AssertionError("expected backend miss must remain a domain value");
+            fail("expected backend miss must remain a domain value");
         }
+    }
+
+    private static void fail(String fingerprint) {
+        System.err.println("ROOT_PROOF_FAILURE: " + fingerprint);
+        throw new AssertionError(fingerprint);
     }
 }

@@ -46,7 +46,10 @@ def run_java(sources: list[str], expected_exit: int, fingerprint: str | None) ->
         if result.returncode != expected_exit:
             fail(f"fixture exit {result.returncode}, expected {expected_exit}: {output.strip()}")
         if fingerprint is not None and fingerprint not in output:
-            fail(f"fixture failure did not contain assertion fingerprint {fingerprint!r}")
+            fail(
+                f"fixture failure did not contain assertion fingerprint {fingerprint!r}: "
+                f"{output.strip()}"
+            )
 
 
 def main() -> int:
