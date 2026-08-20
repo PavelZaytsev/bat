@@ -45,12 +45,15 @@ Before opening or updating a pull request, run:
 ```bash
 python3 -m py_compile \
   scripts/bdr.py \
+  skills/fix/scripts/bdr.py \
   skills/refactor/scripts/bdr.py \
   scripts/check_plugin_manifests.py \
+  scripts/check_java_fix_fixture.py \
   scripts/check_benchmark_artifacts.py
 python3 scripts/bdr.py examples | python3 -m json.tool >/dev/null
 python3 scripts/bdr.py selftest
 python3 scripts/check_plugin_manifests.py
+python3 scripts/check_java_fix_fixture.py
 python3 scripts/check_benchmark_artifacts.py
 bin/bdr --version
 bin/bat-direct rehearse

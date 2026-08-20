@@ -1,14 +1,15 @@
 # Install BAT privately
 
 BAT (**BugAnnihilatorThreethousand**) is an agentic loop that implements BDR (**Boundary-Driven
-Refactoring**). BAT packages one portable BDR skill and three thin host adapters:
+Refactoring**). BAT packages two portable BDR workflows and thin host adapters:
 
 | layer | file | responsibility |
 |---|---|---|
-| portable BDR workflow | `skills/refactor/SKILL.md` | method routing, autonomy contract, and terminal behavior |
-| Claude Code adapter | `.claude-plugin/plugin.json` | BAT plugin identity and `/bat:refactor` namespace |
-| ChatGPT adapter | `skills/refactor/agents/openai.yaml` | `@refactor` presentation and invocation metadata |
-| Codex adapter | `.codex-plugin/plugin.json` | BAT plugin identity and `$refactor` skill discovery |
+| bounded issue workflow | `skills/fix/SKILL.md` | one pinned GitHub issue, root-reachable slices, and closure evidence |
+| broad BDR workflow | `skills/refactor/SKILL.md` | method routing, autonomy contract, and terminal behavior |
+| Claude Code adapter | `.claude-plugin/plugin.json` | BAT plugin identity and `/bat:fix` plus `/bat:refactor` namespaces |
+| ChatGPT adapter | `skills/refactor/agents/openai.yaml` | existing `@refactor` presentation metadata |
+| Codex adapter | `.codex-plugin/plugin.json` | BAT plugin identity and skill discovery |
 
 The host invocations documented below execute the portable skill and established BDR engine. The
 optional autonomous execution path is the dependency-free `bin/bat-direct` runtime documented in
@@ -27,7 +28,7 @@ now `bat`, the local marketplace ID is `bat-team`, and the Claude Code namespace
 `/bat:refactor`. The old `bdr`, `bdr-team`, and `/bdr:refactor` package entrypoints are not aliases.
 
 Remove the old package from the host's plugin manager, replace any copied marketplace descriptor
-with the 0.5.0 descriptor, install `bat`, and restart the host before starting a new session. Do not
+with the current descriptor, install `bat`, and restart the host before starting a new session. Do not
 leave both packages installed: they expose the same portable `refactor` skill and may collide.
 
 This migration does not rename the BDR methodology contract. The `bdr` engine command, `.bdr/`
@@ -106,11 +107,14 @@ each collaborator must still trust the repository and consent to installing exte
 Start a new session, check out the PR head, and run:
 
 ```text
+/bat:fix 123
 /bat:refactor this PR
 ```
 
-You may also pass a PR number or URL. `/bat:refactor` is the stable namespaced form. Claude Code can
-also expose bare `/refactor` when no other command has that name.
+Pass a same-repository GitHub issue number or URL to `/bat:fix`. It is the V1 path for a bounded,
+developer-selected bug and performs no GitHub writes. You may pass a PR number or URL to
+`/bat:refactor`. These are the stable namespaced forms. Claude Code can also expose bare names when
+there is no collision.
 
 For the exact short command on clients that do not expose it, deploy
 `adapters/claude-bare/refactor/` as a standalone personal or managed Claude skill named `refactor`
@@ -216,7 +220,7 @@ packet. It must not claim `ready_for_review` merely because the agent ran out of
 Pilot on a non-critical PR before broad deployment. Confirm that:
 
 1. the host exposes the expected BAT invocation and loads the same BDR workflow from
-   `skills/refactor/SKILL.md`;
+   `skills/fix/SKILL.md` or `skills/refactor/SKILL.md`, as invoked;
 2. `.bdr/progress.yaml` and `.bdr/events.jsonl` are created in the target repository, not in plugin
    cache or host configuration directories;
 3. a stopped session resumes from repository state without relying on chat prose;

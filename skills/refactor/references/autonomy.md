@@ -4,6 +4,10 @@ This is a provider-, model-, and host-neutral BDR contract. It applies to BAT an
 conforming BDR executor; BAT packaging does not broaden the authority granted by an
 invocation.
 
+For bounded fix runs, the developer chooses the objective; the model chooses the repair path; BDR
+determines what evidence constitutes closure. Autonomy to reason about the repair does not authorize
+repository-wide cleanup or make discovery itself a grant of scope.
+
 ## What unattended means
 
 A conforming BDR executor avoids discretionary questions and proceeds through every safe,
@@ -78,7 +82,11 @@ A global stop immediately ends source mutation and external writes. Preserve val
 - `ready_for_review`: all merge-blocking work is structurally and operationally verified, the final rescan is clean, state is valid, and required projections are synchronized.
 - `verification_pending`: code may be complete, but a configured verification or external projection is incomplete.
 - `needs_human`: safe independent work is exhausted and one or more explicit decisions remain.
-- `blocked_environment`: required tooling, authentication, permissions, or a safe test environment is unavailable.
+- `blocked`: an objective-level external contract, issue, artifact, service, or prerequisite
+  prevents root closure; record an open `objective_prerequisite` dependency.
+- `blocked_environment`: BAT's sandbox, toolchain, credentials, filesystem, container, or execution
+  substrate cannot proceed safely; record an open `execution_environment` dependency.
+- `not_reproduced`: no reliable executable root proof was obtained without behavioral repair.
 - `stale_input`: the pinned target changed.
 - `non_convergent`: the bounded rescan or phase retry limit was reached.
 - `failed_verification`: the result is not demonstrably no worse than baseline.

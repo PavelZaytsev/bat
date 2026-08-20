@@ -8,6 +8,7 @@
 - [Operation payloads](#operation-payloads)
 - [Entity and resolution shapes](#entity-and-resolution-shapes)
 - [Phase transitions and gate evidence](#phase-transitions-and-gate-evidence)
+- [Bounded fix objectives](#bounded-fix-objectives)
 - [Fixed point and readiness](#fixed-point-and-readiness)
 - [Migration](#migration)
 - [Audit and recovery](#audit-and-recovery)
@@ -75,11 +76,18 @@ a durable actor name.
   the command records now required by the fail-closed evidence rules. Claim-only legacy evidence
   must be re-verified before the run can continue. Using a 2.2 lean gate form in an existing
   tracker raises that floor before the new form is committed to the journal.
+- `bdr init --mode fix --issue NUMBER|URL` initializes a bounded issue objective. It requires a
+  clean checkout, resolves the same-repository issue read-only through authenticated `gh`, pins its
+  identity/update/content digest, binds base and starting head to current full `HEAD`, and forces
+  GitHub projection off. Fix initialization rejects PR inputs, remote writes, and manual base/head
+  overrides. Trackers with no `mode` retain legacy `refactor` semantics.
 - `bdr check [--json]` validates state, references, phase replay, readiness claims, repository
   binding, local Git lineage, and journal hashes. A ready state also has to match its final
   fixed-point workspace fingerprint. It validates evidence shape; it does not execute tests or
   prove evidence truth.
 - `bdr status` renders derived owners, progress, open findings, active operation, and next action.
+  In fix mode it is a compact human projection; `bdr status --json` emits
+  `bdr.dev/fix-status/v1`. Both derive activity mechanically from durable state and evidence.
   `bdr status --next` returns only revision, run state, and next action.
 - `bdr apply --expected-revision N operation.json` applies one operation. Use `-` instead of a
   path only when the host can safely supply strict JSON on standard input.
@@ -94,8 +102,9 @@ a durable actor name.
   payloads; summary prints sequence, revision, actor, operation type, timestamp, and event hash.
 - `bdr rules`, `bdr selftest`, and `bdr examples` describe validator claims, exercise the engine,
   and print a small payload sample.
-- `bdr stale-check` compares the pinned PR base/head with authenticated GitHub metadata. Exit 3
-  means the target changed; record `stale_input` and do not rebase automatically.
+- `bdr stale-check` compares the pinned PR base/head or fix-mode issue identity/content plus starting
+  revision with authenticated GitHub and local metadata. Exit 3 means the target changed; record
+  `stale_input` and do not rebase automatically.
 - `bdr github-outbox` renders issue mappings and pending idempotent projection operations.
 - `bdr recover-lock` removes an engine lock only when its PID is provably gone and state plus
   journal still validate. It is not journal repair.
@@ -116,7 +125,7 @@ value when writing the strict JSON operation.
   `{ "type":"add_evidence", "id":"E-0001"?, "evidence":{...} }`.
   The ID must be new. `kind` defaults to `observation`; `recorded_at` is added automatically.
 - Add dependency:
-  `{ "type":"add_dependency", "id":"D-0001"?, "dependency":{"kind":"external_contract|human_decision|external_issue|environment", "locator":"durable reference", ...} }`.
+  `{ "type":"add_dependency", "id":"D-0001"?, "dependency":{"kind":"external_contract|human_decision|external_issue|environment", "locator":"durable reference", "blocking_scope":"objective_prerequisite|execution_environment"?, ...} }`.
   The engine adds `status:"open"` and `created_at`.
 - Resolve dependency:
   `{ "type":"resolve_dependency", "id":"D-0001", "evidence":"E-dependency-landed" }`.
@@ -134,7 +143,7 @@ value when writing the strict JSON operation.
   Allowed change keys are `claim`, `consequence_if_wrong`, `disposition`, `depended_on_by`, and
   `revalidation_trigger`.
 - Add slice:
-  `{ "type":"add_slice", "id":"S-0001"?, "name":"..."?, "merge_policy":"required|optional"?, "boundary":BOUNDARY, "depends_on":["S-..."], "collapse_predictions":{"P-0001":"..."}, "operational_obligations":["..."] }`.
+  `{ "type":"add_slice", "id":"S-0001"?, "name":"..."?, "merge_policy":"required|optional"?, "boundary":BOUNDARY, "depends_on":["S-..."], "objective_scope":OBJECTIVE_SCOPE?, "collapse_predictions":{"P-0001":"..."}, "operational_obligations":["..."] }`.
   Defaults are required merge policy and empty lists/maps.
 - Configure slice:
   `{ "type":"configure_slice", "id":"S-0001", "changes":{...} }`.
@@ -142,11 +151,15 @@ value when writing the strict JSON operation.
   `operational_obligations`. Boundary, predictions, and obligations freeze once REPRESENT has
   passed; rewind before changing them.
 - Add finding:
-  `{ "type":"add_finding", "id":"F-0001"?, "title":"..."?, "site":"..."?, "severity":"..."?, "merge_blocking":true?, "found_by":"review|execution|..."?, "missing_fact":MISSING_FACT, "fix_direction":"..."?, "origin":OBJECT_OR_NULL?, "unassigned_reason":"..."? }`.
+  `{ "type":"add_finding", "id":"F-0001"?, "title":"..."?, "site":"..."?, "severity":"..."?, "merge_blocking":true?, "found_by":"review|execution|..."?, "missing_fact":MISSING_FACT, "objective_scope":OBJECTIVE_SCOPE?, "fix_direction":"..."?, "origin":OBJECT_OR_NULL?, "unassigned_reason":"..."? }`.
 - Update unresolved finding:
   `{ "type":"update_finding", "id":"F-0001", "changes":{...} }`.
   Allowed keys are `title`, `site`, `severity`, `merge_blocking`, `missing_fact`, `fix_direction`,
   and `unassigned_reason`. Resolved findings are immutable; create a remainder instead.
+- Promote an observed fix finding:
+  `{ "type":"promote_finding_to_required", "finding":"F-0002", "objective_scope":{"classification":"required", "parent":"S-0001", "relation":"dependency|same_boundary", "evidence":"E-root-necessity"} }`.
+  Only an unresolved, unowned out-of-scope finding may be promoted. The evidence must explain why a
+  named root acceptance obligation cannot otherwise be proven.
 
 When `status --next` says `discover_boundaries`, run `bdr examples` for a concrete discovery batch,
 replace every sample value from code-read evidence, then apply that one batch. Its order is:
@@ -199,8 +212,11 @@ the later children refer to objects created earlier in the same atomic mutation.
 - Set run state:
   `{ "type":"set_run_state", "state":RUN_STATE, "reason":"..."?, "evidence":"E-resume"? }`.
   States are `preflighting`, `auditing`, `executing`, `verifying`, `ready_for_review`,
-  `verification_pending`, `needs_human`, `blocked_environment`, `stale_input`, `non_convergent`,
-  and `failed_verification`. Intervention/failure states require a reason. Only `verifying` may
+  `verification_pending`, `needs_human`, `blocked`, `blocked_environment`, `not_reproduced`,
+  `stale_input`, `non_convergent`, and `failed_verification`. Intervention/failure states require a
+  reason. Fix-mode `blocked` requires an open `objective_prerequisite`; `blocked_environment`
+  requires an open `execution_environment` dependency; `needs_human` requires an open decision;
+  and `not_reproduced` requires executable attempt evidence and no behavioral delivery. Only `verifying` may
   advance to `ready_for_review`. Resuming an intervention state (or reopening a completed run) into
   `auditing` requires existing evidence with `kind:"resume"`; other active-state transitions are
   owned by baseline and phase operations.
@@ -402,6 +418,100 @@ commandless REPRESENT/ROUTE/COLLAPSE gate, a FALSIFY `saturate_evidence` referen
 `foreign_fact_review` raises `minimum_validator_version` to 2.2.0. Reusing a SATURATE gate for a
 fixed/split resolution or delivery, or recording command-backed final-suite evidence, raises the
 same floor. Older validators must refuse that tracker rather than reinterpret the lean evidence.
+
+## Bounded fix objectives
+
+Fix mode keeps tracker schema V2 and adds `mode:"fix"`, one `objective`, and root scope on findings
+and slices. `source.starting_head_sha` remains the pinned code revision. The objective pins the
+same-repository GitHub issue by repository and node identity, number, URL, update time, and content
+digest.
+
+`OBJECTIVE_SCOPE` is:
+
+```json
+{
+  "classification": "root|required|out_of_scope",
+  "parent": "O-0001|S-0001",
+  "relation": "root|dependency|same_boundary|observed",
+  "evidence": "E-0001"
+}
+```
+
+Executable slices may be only `root` or `required`, are always merge-required, and must form an
+acyclic graph reachable from `O-0001`. Dependency slices also use `depends_on`; same-boundary slices
+cite a required slice sharing their authority/fact edge. Out-of-scope findings are unowned,
+unresolved, non-merge-blocking, non-executable, and do not block closure.
+
+Before production behavior changes, finish a root EXPOSE gate and apply:
+
+```json
+{
+  "type": "record_objective_exposure",
+  "proof_id": "root-regression-test",
+  "assertion_fingerprint": "expected X but was Y",
+  "evidence": "E-root-expose",
+  "behavioral_production_unchanged": true
+}
+```
+
+REPRESENT and later phases remain unavailable until this durable proof binding exists. Every passed
+fix-mode FALSIFY gate includes:
+
+```json
+{
+  "objective_scope_review": {
+    "performed": true,
+    "attributed_findings": ["F-0001"],
+    "out_of_scope_changes": []
+  },
+  "failure_channel_review": {
+    "performed": true,
+    "expected_failures": [
+      {"site":"...", "representation":"domain value", "evidence":"E-..."}
+    ],
+    "introduced_or_broadened_exceptions": []
+  }
+}
+```
+
+After all required slices have current deliveries, record a bounded rescan:
+
+```json
+{
+  "type": "record_objective_rescan",
+  "rescan": {
+    "new_required_findings": [],
+    "out_of_scope_findings": ["F-0017"],
+    "unresolved_required": 0,
+    "evidence": "E-root-rescan"
+  }
+}
+```
+
+If required work appears it re-enters the ordinary phase loop; exhausting the configured pass bound
+with required work open is `non_convergent`. A zero-unresolved rescan enables closure:
+
+```json
+{
+  "type": "record_objective_closure",
+  "closure": {
+    "proof_id": "root-regression-test",
+    "root_passing_evidence": "E-root-green",
+    "regression_evidence": "E-regressions-green",
+    "aggregate_counterfactual_evidence": "E-aggregate-red",
+    "stale_check_evidence": "E-pins-current"
+  }
+}
+```
+
+The proof identity must match EXPOSE. The counterfactual removes every root-reachable behavioral
+repair while keeping the proof harness, restores the original assertion failure, and records exact
+final-workspace restoration. Its evidence names `removed_root_reachable_slices`, sets
+`proof_harness_retained:true`, and binds the original `assertion_fingerprint`, `proof_id`, and
+restored workspace digest. Stale-check evidence sets `stale:false` and binds the pinned
+`issue_content_sha256` and `starting_head_sha`. Closure also requires fresh deliveries, complete
+commit attribution, resolved required prerequisites, clean workspace, passing regressions, and
+complete FALSIFY reviews. Unresolved out-of-scope findings do not block it.
 
 ## Fixed point and readiness
 

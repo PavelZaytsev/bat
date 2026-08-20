@@ -30,12 +30,20 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Set up Java 25 fixture runtime
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
       - name: Compile repository Python
         run: >-
           python -m py_compile
           scripts/bdr.py
+          skills/fix/scripts/bdr.py
           skills/refactor/scripts/bdr.py
           scripts/check_plugin_manifests.py
+          scripts/check_java_fix_fixture.py
           scripts/check_benchmark_artifacts.py
 
       - name: Validate tracked JSON and generated examples
@@ -53,6 +61,9 @@ jobs:
 
       - name: Validate benchmark artifact graph
         run: python scripts/check_benchmark_artifacts.py
+
+      - name: Validate bounded Java fix fixture
+        run: python scripts/check_java_fix_fixture.py
 
   engine:
     name: Engine (${{ matrix.label }})

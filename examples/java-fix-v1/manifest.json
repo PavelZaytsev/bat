@@ -1,0 +1,67 @@
+{
+  "schema": "bat.dev/java-fix-v1-fixture/v1",
+  "fixture_id": "java25-streaming-cache-root-001",
+  "java_release": 25,
+  "objective": {
+    "kind": "github_issue",
+    "claim": "An old streaming-cache completion can overwrite the newest generation and an expected backend miss can escape as an exception.",
+    "proof_id": "StreamingCacheRootProof#staleCompletionCannotCommitAndMissRemainsAValue",
+    "failure_fingerprint": "stale completion must be rejected without changing the visible result"
+  },
+  "trees": {
+    "buggy": "subject/buggy",
+    "repaired": "reference/repaired"
+  },
+  "required_slices": [
+    {
+      "id": "S-0001",
+      "name": "completion authority",
+      "classification": "root",
+      "parent": "O-0001",
+      "relation": "root",
+      "boundary": {
+        "authority": "StreamingCache active generation",
+        "fact": "generation authorized to change the visible cache outcome",
+        "consumer_decision": "commit or reject a completion"
+      },
+      "symptoms": [
+        "an older value overwrites the active generation",
+        "an older expected miss is treated as an exceptional failure"
+      ]
+    },
+    {
+      "id": "S-0002",
+      "name": "retry generation",
+      "classification": "required",
+      "parent": "S-0001",
+      "relation": "dependency",
+      "depends_on": ["S-0001"],
+      "boundary": {
+        "authority": "StreamingCache.beginRefresh",
+        "fact": "LoadAttempt generation",
+        "consumer_decision": "which callback generation RetryCoordinator completes"
+      }
+    }
+  ],
+  "out_of_scope": [
+    {
+      "id": "F-0017",
+      "site": "StreamingCache.debugEntryCount",
+      "claim": "diagnostic naming could be clearer",
+      "expected_disposition": "recorded, unassigned, unchanged, non-blocking"
+    }
+  ],
+  "failure_channel": {
+    "expected_failure_site": "CacheOutcome.Missing",
+    "required_representation": "sealed domain value",
+    "forbidden_repair": "throwing merely to convert Missing into apparent failure",
+    "introduced_or_broadened_exceptions": []
+  },
+  "expected": {
+    "buggy_exit_code": 1,
+    "repaired_exit_code": 0,
+    "aggregate_counterfactual_exit_code": 1,
+    "aggregate_counterfactual_retains_proof_harness": true,
+    "final_workspace_restored_exactly": true
+  }
+}

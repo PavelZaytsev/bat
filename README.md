@@ -42,6 +42,21 @@ bin/bdr selftest
 The engine maintains repository-local `.bdr/` state and enforces the methodology's tracker,
 evidence, transition, delivery, and completion invariants.
 
+For one developer-selected GitHub issue, initialize the bounded primitive with:
+
+```bash
+bin/bdr init --mode fix --issue 123
+bin/bdr status
+bin/bdr status --json
+```
+
+The issue and current revision are pinned read-only. Root and causally required slices use the
+existing six phases; unrelated findings remain visible without being repaired or blocking closure.
+Activity is projected mechanically from durable state rather than model-authored telemetry.
+
+> The developer chooses the objective; the model chooses the repair path; BDR determines what
+> evidence constitutes closure.
+
 ### Direct autonomous runtime
 
 The supported model-driven runtime on current `main` is:
@@ -161,6 +176,7 @@ For the conceptual model and current implementation, start here:
 | file | purpose |
 |---|---|
 | [`docs/bat-for-java-developers.md`](docs/bat-for-java-developers.md) | **Start here.** Conceptual guide for Java developers: honest function contracts, effects, composition, the FP/ZIO design lens, and how those ideas lead to current BAT/BDR |
+| [`skills/fix/SKILL.md`](skills/fix/SKILL.md) | bounded `/fix` workflow for one pinned GitHub issue and root-evidenced closure |
 | [`skills/refactor/SKILL.md`](skills/refactor/SKILL.md) | executable BDR workflow, autonomy contract, phase loop, stop conditions, and terminal behavior |
 | [`skills/refactor/references/protocol.md`](skills/refactor/references/protocol.md) | boundary discovery, grouping, evidence rules, six phases, rewinds, and convergence |
 | [`skills/refactor/references/tracker.md`](skills/refactor/references/tracker.md) | `.bdr/` state model, operations, evidence records, phase gates, and readiness contracts |

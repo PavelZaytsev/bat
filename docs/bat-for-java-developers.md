@@ -184,6 +184,18 @@ sealed interface LookupResult<V> {
 }
 ```
 
+For BAT fix runs this is a review rule, not a mandate to introduce a framework-wide effect type.
+Expected domain and business outcomes should be represented as values where practical, using the
+repository's existing conventions or the smallest appropriate domain-specific representation.
+Do not add a universal BAT `Result`/`Either` type or a new functional-programming dependency.
+
+Exceptions remain appropriate for programmer defects, violated invariants, genuinely exceptional
+infrastructure failures, and API contracts that explicitly require throwing. Translate a
+value-based domain failure into an exception only at such a boundary. Every fix-mode FALSIFY gate
+records expected-failure representations and every newly introduced or broadened exception path,
+including its classification, justification, and evidence. An exception used merely to turn an
+expected condition into apparent failure is not a valid repair.
+
 The goal is not to rewrite Java in a functional language. The goal is to make computational boundaries truthful:
 
 ```text
@@ -213,7 +225,11 @@ runSlice : (repository, slice, tools, model) -> SliceOutcome or ExecutionFailure
 
 Expected conclusions such as repaired, falsified, blocked, or requiring authority are legitimate domain outcomes. Execution failure means BAT could not produce a trustworthy conclusion.
 
-Slices may have dependencies. Completing one slice can reveal another, so BDR repeatedly discovers, executes, and rescans until it reaches a validated fixed point or its bounded pass/attempt policy declares non-convergence.
+Slices may have dependencies. In refactor mode, BDR repeatedly discovers, executes, and rescans
+until it reaches a validated fixed point or its bounded pass/attempt policy declares
+non-convergence. In fix mode, discovery does not automatically expand scope: only root-required
+dependency or same-boundary slices execute, and the run stops when the developer-selected root is
+causally and evidentially closed.
 
 ## 6. The six phases progressively repair one arrow
 
