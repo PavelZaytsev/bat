@@ -10,9 +10,14 @@ public final class StreamingCacheRootProof {
         var stale = coordinator.complete(cache, oldAttempt, new CacheOutcome.Found<>("old"));
         var staleRejected = stale == CompletionDisposition.STALE
                 && cache.visible() instanceof CacheOutcome.Missing<?>;
-        var committed = coordinator.complete(cache, activeAttempt, new CacheOutcome.Missing<>());
-        var missRemainedAValue = committed == CompletionDisposition.COMMITTED
-                && cache.visible() instanceof CacheOutcome.Missing<?>;
+        var missRemainedAValue = false;
+        try {
+            var committed = coordinator.complete(cache, activeAttempt, new CacheOutcome.Missing<>());
+            missRemainedAValue = committed == CompletionDisposition.COMMITTED
+                    && cache.visible() instanceof CacheOutcome.Missing<?>;
+        } catch (java.util.NoSuchElementException expectedDomainFailureWasThrown) {
+            missRemainedAValue = false;
+        }
 
         if (!staleRejected) {
             fail("stale completion must be rejected without changing the visible result");

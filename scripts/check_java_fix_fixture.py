@@ -83,6 +83,12 @@ def main() -> int:
         if not all((buggy_main, buggy_test, repaired_main, repaired_test)):
             fail("fixture trees must contain production and proof sources")
 
+        proof_path = Path("src/test/java/dev/bat/examples/cache/StreamingCacheRootProof.java")
+        buggy_proof = (buggy / proof_path).read_text(encoding="utf-8")
+        repaired_proof = (repaired / proof_path).read_text(encoding="utf-8")
+        if buggy_proof != repaired_proof:
+            fail("root proof harness must remain identical across buggy and repaired trees")
+
         buggy_cache = (buggy / "src/main/java/dev/bat/examples/cache/StreamingCache.java").read_text()
         repaired_cache = (repaired / "src/main/java/dev/bat/examples/cache/StreamingCache.java").read_text()
         if "NoSuchElementException" not in buggy_cache or "NoSuchElementException" in repaired_cache:
