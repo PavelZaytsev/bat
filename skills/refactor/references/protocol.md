@@ -21,6 +21,12 @@ Write every boundary finding as:
 
 Group by the information-flow edge `(A, K, C/D)`. A shared word such as ownership or authority is not enough. Ask whether one representation at that edge would make every grouped finding impossible. Split before execution if not.
 
+For a bounded fix objective, discovery is not scope expansion. Classify the developer-selected bug's
+findings as root. Admit a dependency or same-boundary slice only when evidence identifies a root
+acceptance obligation that cannot otherwise be proven. Record every other observation as out of
+scope without repairing it. The developer chooses the objective; the model chooses the repair path;
+BDR determines what evidence constitutes closure.
+
 Classify the finding's initial shape as `value`, `temporal`, `concurrency`, or `direct`. Temporal is a normalization prompt, not proof that time is unreal. Try ownership, borrow, lease, capability, work ownership, reservation, projection, or completion. Preserve `real_time`, `concurrency_order`, and `external_lifecycle` when they are genuine operational properties.
 
 ## Lean verification cadence
@@ -96,5 +102,12 @@ chaos, benchmark, or public suite once. A clean pass establishes the fixed point
 merge-blocking findings, execute them and rescan, up to the configured bound. Rerun the broad suite
 only if later semantic or code work invalidates its result. The fixed-point gate records successful
 commands for that final run. Never translate reaching the bound into success.
+
+Fix mode instead performs a root-focused rescan limited to the aggregate repair diff, repaired
+information-flow edges, changed interfaces and relevant neighbors, sibling decisions at those
+boundaries, and paths needed to challenge the original proof. Closure requires the original proof
+green on final code and an aggregate counterfactual that restores the original root assertion
+failure, followed by exact workspace restoration. Unrelated findings remain visible and do not
+block closure.
 
 If the pinned target changes, the oracle becomes unsafe or nondeterministic, tracker recovery is ambiguous, target-controlled execution escapes its safety boundary, or repository policy conflicts with the work, stop mutation globally. Preserve evidence and enter the corresponding terminal state; do not silently rebase or continue on a different target. Host cancellation may prevent that final transition, in which case the next invocation must validate and resume the non-terminal run.

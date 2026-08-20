@@ -27,7 +27,7 @@ from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
 
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 SCHEMA = "bdr.dev/tracker"
 SCHEMA_VERSION = 2
 LEAN_GATE_MINIMUM_VERSION = "2.2.0"
@@ -36,11 +36,18 @@ STRUCTURAL_PHASES = {"represent", "route", "collapse"}
 RUN_STATES = {
     "preflighting", "auditing", "executing", "verifying", "ready_for_review",
     "verification_pending", "needs_human", "blocked_environment", "stale_input",
-    "non_convergent", "failed_verification",
+    "non_convergent", "failed_verification", "not_reproduced", "blocked",
 }
 INTERVENTION_RUN_STATES = {
     "verification_pending", "needs_human", "blocked_environment", "stale_input",
-    "non_convergent", "failed_verification",
+    "non_convergent", "failed_verification", "not_reproduced", "blocked",
+}
+MODES = {"refactor", "fix"}
+OBJECTIVE_SCOPE_CLASSIFICATIONS = {"root", "required", "out_of_scope"}
+OBJECTIVE_SCOPE_RELATIONS = {"root", "dependency", "same_boundary", "observed"}
+BLOCKING_SCOPES = {"objective_prerequisite", "execution_environment"}
+EXCEPTION_CLASSIFICATIONS = {
+    "programmer_defect", "violated_invariant", "infrastructure", "api_contract",
 }
 SLICE_KINDS = {"boundary"}
 DELIVERY_KINDS = {"commit", "no_code_change"}
@@ -357,6 +364,28 @@ def valid_pr_selector(value: Any) -> bool:
         and not parsed.query
         and not parsed.fragment
         and re.fullmatch(r"/[^/\s]+/[^/\s]+/pull/[1-9][0-9]*/?", parsed.path) is not None
+    )
+
+
+def valid_issue_selector(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if re.fullmatch(r"[1-9][0-9]*", value):
+        return True
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname is not None
+        and parsed.username is None
+        and parsed.password is None
+        and (port is None or 1 <= port <= 65535)
+        and not parsed.query
+        and not parsed.fragment
+        and re.fullmatch(r"/[^/\s]+/[^/\s]+/issues/[1-9][0-9]*/?", parsed.path) is not None
     )
 
 
@@ -917,10 +946,13 @@ def new_state(root: Path, args: argparse.Namespace) -> dict[str, Any]:
     tracker_path = state_path(getattr(args, "state", ".bdr/progress.yaml"), root)
     audit_dir = tracker_path.parent.relative_to(root).as_posix()
     tracker_relative = tracker_path.relative_to(root).as_posix()
-    return {
+    mode = getattr(args, "mode", "refactor")
+    issue = copy.deepcopy(getattr(args, "issue", None))
+    state = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "minimum_validator_version": VERSION,
+        "mode": mode,
         "revision": 0,
         "semantic_revision": 0,
         "source": {
@@ -960,6 +992,17 @@ def new_state(root: Path, args: argparse.Namespace) -> dict[str, Any]:
         "fixed_point": {"passes": []},
         "github": {"mappings": {}, "outbox": []},
     }
+    if mode == "fix":
+        state["objective"] = {
+            "id": "O-0001",
+            "kind": "github_issue",
+            "issue": issue,
+            "root_findings": [],
+            "exposure": None,
+            "rescans": [],
+            "closure": None,
+        }
+    return state
 
 
 def current_owner(finding: Any) -> str | None:
@@ -1516,7 +1559,122 @@ def phase_gate_errors(state: dict[str, Any], sid: str, slice_: dict[str, Any], a
                         )
         if not isinstance(gate.get("rescan"), dict) or gate["rescan"].get("performed") is not True:
             errors.append("FALSIFY must record a performed slice rescan")
+        if tracker_mode(state) == "fix":
+            scope_review = gate.get("objective_scope_review")
+            owned = sorted(required_findings_for_slice(state, sid))
+            if (
+                not isinstance(scope_review, dict)
+                or set(scope_review) != {"performed", "attributed_findings", "out_of_scope_changes"}
+                or scope_review.get("performed") is not True
+                or scope_review.get("attributed_findings") != owned
+                or scope_review.get("out_of_scope_changes") != []
+            ):
+                errors.append(
+                    "fix-mode FALSIFY must attribute exactly the slice findings and report no out-of-scope changes"
+                )
+            failure_review = gate.get("failure_channel_review")
+            if not isinstance(failure_review, dict) or set(failure_review) != {
+                "performed", "expected_failures", "introduced_or_broadened_exceptions",
+            }:
+                errors.append("fix-mode FALSIFY requires a complete failure_channel_review")
+            elif failure_review.get("performed") is not True:
+                errors.append("failure_channel_review must be performed")
+            else:
+                expected = failure_review.get("expected_failures")
+                exceptions = failure_review.get("introduced_or_broadened_exceptions")
+                if not isinstance(expected, list) or not isinstance(exceptions, list):
+                    errors.append("failure_channel_review lists must be arrays")
+                else:
+                    for item in expected:
+                        if (
+                            not isinstance(item, dict)
+                            or set(item) != {"site", "representation", "evidence"}
+                            or not is_nonempty_string(item.get("site"))
+                            or not is_nonempty_string(item.get("representation"))
+                            or not evidence_exists(state, item.get("evidence"))
+                        ):
+                            errors.append("expected failure review entries require site, representation, and evidence")
+                    for item in exceptions:
+                        if (
+                            not isinstance(item, dict)
+                            or set(item) != {"site", "classification", "justification", "evidence"}
+                            or not is_nonempty_string(item.get("site"))
+                            or item.get("classification") not in EXCEPTION_CLASSIFICATIONS
+                            or not is_nonempty_string(item.get("justification"))
+                            or not evidence_exists(state, item.get("evidence"))
+                        ):
+                            errors.append("exception review entries require a permitted classification and evidence")
     return errors
+
+
+def tracker_mode(state: dict[str, Any]) -> str:
+    """Old V2 trackers predate modes and retain refactor semantics."""
+
+    return state.get("mode", "refactor")
+
+
+def objective_scope_errors(
+    state: dict[str, Any], owner_id: str, scope: Any, *, executable: bool,
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(scope, dict):
+        return [f"{owner_id} requires objective_scope in fix mode"]
+    allowed = {"classification", "parent", "relation", "evidence"}
+    unknown = set(scope) - allowed
+    if unknown:
+        errors.append(f"{owner_id}.objective_scope contains unknown keys: {sorted(unknown)}")
+    classification = scope.get("classification")
+    relation = scope.get("relation")
+    parent = scope.get("parent")
+    if classification not in OBJECTIVE_SCOPE_CLASSIFICATIONS:
+        errors.append(f"{owner_id}.objective_scope has invalid classification")
+    if executable and classification not in {"root", "required"}:
+        errors.append(f"executable {owner_id} must be root or required")
+    if relation not in OBJECTIVE_SCOPE_RELATIONS:
+        errors.append(f"{owner_id}.objective_scope has invalid relation")
+    expected_relations = {
+        "root": {"root"},
+        "required": {"dependency", "same_boundary"},
+        "out_of_scope": {"observed"},
+    }
+    if classification in expected_relations and relation not in expected_relations[classification]:
+        errors.append(f"{owner_id}.objective_scope relation does not match its classification")
+    if classification == "root":
+        if parent != "O-0001":
+            errors.append(f"root {owner_id} must be parented by O-0001")
+    elif classification == "out_of_scope" and parent == "O-0001":
+        pass
+    elif not isinstance(parent, str) or parent not in state.get("slices", {}):
+        errors.append(f"{owner_id}.objective_scope must name an existing parent slice")
+    if not evidence_exists(state, scope.get("evidence")):
+        errors.append(f"{owner_id}.objective_scope lacks existing scope evidence")
+    else:
+        record = state["evidence"].get(scope.get("evidence"))
+        if classification == "required" and (
+            not isinstance(record, dict) or not is_nonempty_string(record.get("claim"))
+        ):
+            errors.append(
+                f"{owner_id}.objective_scope requires evidence explaining why root closure needs it"
+            )
+    return errors
+
+
+def latest_passed_gate(state: dict[str, Any], sid: str, phase: str) -> dict[str, Any] | None:
+    slice_ = state.get("slices", {}).get(sid)
+    if not isinstance(slice_, dict):
+        return None
+    live = live_passed_attempt_positions(slice_)
+    for position in reversed(range(len(slice_.get("phase_attempts", [])))):
+        attempt = slice_["phase_attempts"][position]
+        if position not in live or attempt.get("result") != "passed" or attempt.get("phase") != phase:
+            continue
+        gate = state.get("evidence", {}).get(attempt.get("gate_evidence"))
+        if isinstance(gate, dict):
+            result = dict(gate)
+            result["_evidence_id"] = attempt.get("gate_evidence")
+            return result
+        return None
+    return None
 
 
 def validate_state(state: Any) -> list[tuple[str, str]]:
@@ -1525,13 +1683,16 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
         add_error(errors, "V001", "tracker root must be an object")
         return errors
     reject_unknown_keys(errors, "V001", "tracker", state, {
-        "schema", "schema_version", "minimum_validator_version", "revision", "semantic_revision", "source", "policy", "run",
+        "schema", "schema_version", "minimum_validator_version", "mode", "objective", "revision", "semantic_revision", "source", "policy", "run",
         "active_operation", "checkpoints", "evidence", "dependencies", "decisions", "foreign_facts", "findings",
         "slices", "fixed_point", "github", "migration",
     })
     if state.get("schema") != SCHEMA or state.get("schema_version") != SCHEMA_VERSION:
         add_error(errors, "V001", f"expected {SCHEMA} schema_version {SCHEMA_VERSION}")
         return errors
+    mode = tracker_mode(state)
+    if mode not in MODES:
+        add_error(errors, "V001", f"mode must be one of {sorted(MODES)}")
     if not is_json_integer(state.get("revision"), 0):
         add_error(errors, "V001", "revision must be a non-negative integer")
     if not is_json_integer(state.get("semantic_revision"), 0):
@@ -1570,6 +1731,8 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
         for key in ("base_sha", "starting_head_sha"):
             if not is_canonical_commit_oid(source.get(key)):
                 add_error(errors, "V001", f"source.{key} must be a canonical full commit object ID")
+        if mode == "fix" and source.get("base_sha") != source.get("starting_head_sha"):
+            add_error(errors, "V001", "fix mode must bind base and starting head to the same revision")
         pr = source.get("pr")
         if isinstance(pr, str):
             if not valid_pr_selector(pr):
@@ -1633,6 +1796,41 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
         for key in ("max_fixed_point_passes", "max_phase_attempts"):
             if not is_json_integer(policy.get(key), 1):
                 add_error(errors, "V001", f"policy.{key} must be a positive integer")
+        if mode == "fix" and policy.get("github_projection") != "off":
+            add_error(errors, "V001", "fix mode requires read-only GitHub projection mode off")
+
+    objective = state.get("objective")
+    if mode == "refactor":
+        if objective is not None:
+            add_error(errors, "V001", "refactor mode may not contain a fix objective")
+    elif not isinstance(objective, dict):
+        add_error(errors, "V001", "fix mode requires a root objective")
+    else:
+        reject_unknown_keys(errors, "V001", "objective", objective, {
+            "id", "kind", "issue", "root_findings", "exposure", "rescans", "closure",
+        })
+        if objective.get("id") != "O-0001" or objective.get("kind") != "github_issue":
+            add_error(errors, "V001", "fix objective must be O-0001 with kind github_issue")
+        issue = objective.get("issue")
+        if not isinstance(issue, dict):
+            add_error(errors, "V001", "fix objective requires pinned issue metadata")
+        else:
+            reject_unknown_keys(errors, "V001", "objective.issue", issue, {
+                "repository", "repository_id", "number", "node_id", "url", "updated_at", "content_sha256",
+            })
+            if any(not is_nonempty_string(issue.get(key)) for key in (
+                "repository", "repository_id", "node_id", "url", "updated_at",
+            )):
+                add_error(errors, "V001", "objective issue identity is incomplete")
+            if not is_json_integer(issue.get("number"), 1) or not valid_issue_selector(issue.get("url")):
+                add_error(errors, "V001", "objective issue number or URL is invalid")
+            if not is_sha256(issue.get("content_sha256")):
+                add_error(errors, "V001", "objective issue content_sha256 is invalid")
+        root_findings = objective.get("root_findings")
+        if not isinstance(root_findings, list) or any(not isinstance(fid, str) for fid in root_findings):
+            add_error(errors, "V001", "objective.root_findings must be a finding ID list")
+        if not isinstance(objective.get("rescans"), list):
+            add_error(errors, "V001", "objective.rescans must be a list")
     for key in ("checkpoints", "evidence", "dependencies", "decisions", "foreign_facts", "findings", "slices"):
         if not isinstance(state.get(key), dict):
             add_error(errors, "V001", f"{key} must be a mapping keyed by stable IDs")
@@ -1641,6 +1839,8 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
         add_error(errors, "V001", "fixed_point.passes must be a list")
     else:
         reject_unknown_keys(errors, "V001", "fixed_point", fixed_point, {"passes"})
+        if mode == "fix" and fixed_point.get("passes"):
+            add_error(errors, "V008", "fix mode may not record repository-wide fixed-point passes")
     github = state.get("github")
     if not isinstance(github, dict) or not isinstance(github.get("mappings"), dict) or not isinstance(github.get("outbox"), list):
         add_error(errors, "V001", "github must contain mappings and outbox")
@@ -1676,7 +1876,10 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
                 "route": {"producers", "consumers", "predictions_frozen", "new_abstraction_introduced", "introduced"},
                 "collapse": {"prediction_verdicts", "died", "no_death_expected"},
                 "saturate": {"structural_tests", "operational_proofs", "input_space_covered"},
-                "falsify": {"finding_verdicts", "rescan", "saturate_evidence"},
+                "falsify": {
+                    "finding_verdicts", "rescan", "saturate_evidence",
+                    "objective_scope_review", "failure_channel_review",
+                },
             }
             if not is_enum(phase, PHASES):
                 add_error(errors, "V005", f"phase gate {evidence_id} has invalid phase {phase!r}")
@@ -1714,11 +1917,17 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
         reject_unknown_keys(errors, "V001", f"slice {sid}", slice_, {
             "name", "kind", "merge_policy", "boundary", "depends_on", "collapse_predictions",
             "operational_obligations", "phase_attempts", "deliveries", "created_at", "legacy", "notes",
+            "objective_scope",
         })
         if not is_nonempty_string(slice_.get("name")):
             add_error(errors, "V001", f"slice {sid} must have a name")
         if not is_enum(slice_.get("kind"), SLICE_KINDS) or not is_enum(slice_.get("merge_policy"), MERGE_POLICIES):
             add_error(errors, "V001", f"slice {sid} has invalid kind or merge_policy")
+        if mode == "fix":
+            for message in objective_scope_errors(state, sid, slice_.get("objective_scope"), executable=True):
+                add_error(errors, "V002", message)
+            if slice_.get("merge_policy") != "required":
+                add_error(errors, "V008", f"fix-mode slice {sid} must be required")
         boundary = slice_.get("boundary")
         if not isinstance(boundary, dict) or any(not is_nonempty_string(boundary.get(k)) for k in ("authority", "fact", "consumer_decision")):
             add_error(errors, "V001", f"slice {sid} must state authority, fact, and consumer_decision")
@@ -1736,6 +1945,20 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
             if dep == sid:
                 add_error(errors, "V002", f"slice {sid} depends on itself")
         graph[sid] = list(deps)
+        if mode == "fix" and isinstance(slice_.get("objective_scope"), dict):
+            scope = slice_["objective_scope"]
+            if scope.get("relation") == "dependency" and scope.get("parent") not in deps:
+                add_error(errors, "V002", f"dependency slice {sid} must depend_on its objective parent")
+            if scope.get("relation") == "same_boundary":
+                parent = slices.get(scope.get("parent"))
+                parent_boundary = parent.get("boundary") if isinstance(parent, dict) else None
+                if not isinstance(boundary, dict) or not isinstance(parent_boundary, dict) or any(
+                    boundary.get(key) != parent_boundary.get(key) for key in ("authority", "fact")
+                ):
+                    add_error(
+                        errors, "V002",
+                        f"same-boundary slice {sid} must share its parent's authority and fact edge",
+                    )
         predictions = slice_.get("collapse_predictions")
         if not isinstance(predictions, dict) or any(
             not is_nonempty_string(key) or not is_nonempty_string(value) for key, value in predictions.items()
@@ -1897,6 +2120,26 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
     for sid in graph:
         visit(sid, [])
 
+    if mode == "fix":
+        scope_graph = {
+            sid: scope.get("parent")
+            for sid, slice_ in slices.items()
+            for scope in [slice_.get("objective_scope") if isinstance(slice_, dict) else None]
+            if isinstance(scope, dict) and scope.get("classification") != "root"
+        }
+        for sid in scope_graph:
+            seen: set[str] = set()
+            current = sid
+            while current in scope_graph:
+                if current in seen:
+                    add_error(errors, "V002", f"objective scope cycle includes {current}")
+                    break
+                seen.add(current)
+                parent = scope_graph[current]
+                if not isinstance(parent, str):
+                    break
+                current = parent
+
     # Finding ownership and resolutions.
     split_edges: dict[str, list[str]] = {}
     for fid, finding in findings.items():
@@ -1906,12 +2149,28 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
         reject_unknown_keys(errors, "V001", f"finding {fid}", finding, {
             "title", "site", "severity", "merge_blocking", "found_by", "missing_fact",
             "fix_direction", "origin", "ownership", "unassigned_reason", "resolution",
-            "resolution_history", "created_at", "legacy", "notes",
+            "resolution_history", "created_at", "legacy", "notes", "objective_scope",
         })
         if any(not is_nonempty_string(finding.get(key)) for key in ("title", "site", "severity", "found_by", "fix_direction")):
             add_error(errors, "V001", f"finding {fid} lacks title, site, severity, found_by, or fix_direction")
         if not isinstance(finding.get("merge_blocking"), bool):
             add_error(errors, "V001", f"finding {fid}.merge_blocking must be boolean")
+        if mode == "fix":
+            for message in objective_scope_errors(state, fid, finding.get("objective_scope"), executable=False):
+                add_error(errors, "V002", message)
+            scope = finding.get("objective_scope") if isinstance(finding.get("objective_scope"), dict) else {}
+            if scope.get("classification") == "out_of_scope":
+                if (
+                    finding.get("merge_blocking") is not False
+                    or current_owner(finding) is not None
+                    or finding.get("resolution") is not None
+                ):
+                    add_error(
+                        errors, "V008",
+                        f"out-of-scope finding {fid} must be unresolved, unowned, and non-blocking",
+                    )
+            elif finding.get("merge_blocking") is not True:
+                add_error(errors, "V008", f"root-required finding {fid} must be merge-blocking")
         missing = finding.get("missing_fact")
         if not isinstance(missing, dict) or any(
             not is_nonempty_string(missing.get(k)) for k in ("authority", "fact", "consumer_decision", "inferred_from")
@@ -1919,6 +2178,18 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
             add_error(errors, "V001", f"finding {fid} has no complete information-flow edge")
         elif not is_enum(missing.get("initial_shape"), FINDING_SHAPES) or not is_enum(missing.get("normalized_as"), NORMALIZED_KINDS):
             add_error(errors, "V001", f"finding {fid} has invalid initial_shape or normalized_as")
+        if mode == "fix" and isinstance(finding.get("objective_scope"), dict):
+            scope = finding["objective_scope"]
+            if scope.get("relation") == "same_boundary":
+                parent = slices.get(scope.get("parent"))
+                parent_boundary = parent.get("boundary") if isinstance(parent, dict) else None
+                if not isinstance(missing, dict) or not isinstance(parent_boundary, dict) or any(
+                    missing.get(key) != parent_boundary.get(key) for key in ("authority", "fact")
+                ):
+                    add_error(
+                        errors, "V002",
+                        f"same-boundary finding {fid} must share its parent's authority and fact edge",
+                    )
         ownership = finding.get("ownership", [])
         if not isinstance(ownership, list):
             add_error(errors, "V003", f"finding {fid}.ownership must be a list")
@@ -2085,12 +2356,14 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
             continue
         reject_unknown_keys(errors, "V001", f"dependency {did}", dependency, {
             "kind", "locator", "owner", "description", "status", "created_at", "notes",
-            "resolution_evidence", "resolved_at",
+            "resolution_evidence", "resolved_at", "blocking_scope",
         })
         if not is_nonempty_string(dependency.get("locator")):
             add_error(errors, "V002", f"dependency {did} has no durable locator")
         if dependency.get("status") == "resolved" and not evidence_exists(state, dependency.get("resolution_evidence")):
             add_error(errors, "V002", f"resolved dependency {did} lacks evidence")
+        if dependency.get("blocking_scope") is not None and dependency.get("blocking_scope") not in BLOCKING_SCOPES:
+            add_error(errors, "V001", f"dependency {did} has invalid blocking_scope")
     for qid, decision in decisions.items():
         if not qid.startswith("Q-") or not isinstance(decision, dict) or not is_enum(decision.get("status"), DECISION_STATUSES):
             add_error(errors, "V001", f"decision {qid} has invalid ID or status")
@@ -2229,6 +2502,7 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
             if not isinstance(active.get("pre_checkpoint"), str) or active.get("pre_checkpoint") not in state["checkpoints"]:
                 add_error(errors, "V010", "active_operation has no pre-checkpoint")
 
+    validate_fix_objective(state, errors)
     validate_readiness(state, errors)
     return errors
 
@@ -2286,6 +2560,181 @@ def slice_complete(state: dict[str, Any], sid: str) -> bool:
         if current_owner(finding) == sid and not is_enum(resolution_kind, {"fixed", "split", "superseded"}):
             return False
     return True
+
+
+def validate_fix_objective(state: dict[str, Any], errors: list[tuple[str, str]]) -> None:
+    if tracker_mode(state) != "fix":
+        return
+    objective = state.get("objective")
+    if not isinstance(objective, dict):
+        return
+    findings = state.get("findings", {})
+    slices = state.get("slices", {})
+    evidence = state.get("evidence", {})
+    root_ids = objective.get("root_findings")
+    if not isinstance(root_ids, list):
+        root_ids = []
+    classified_roots = sorted(
+        fid for fid, finding in findings.items()
+        if isinstance(finding, dict)
+        and isinstance(finding.get("objective_scope"), dict)
+        and finding["objective_scope"].get("classification") == "root"
+    )
+    if sorted(root_ids) != classified_roots:
+        add_error(errors, "V008", "objective.root_findings must exactly name every root finding")
+
+    exposure = objective.get("exposure")
+    if exposure is not None:
+        if not isinstance(exposure, dict) or set(exposure) != {
+            "proof_id", "assertion_fingerprint", "evidence", "behavioral_production_unchanged", "recorded_at",
+        }:
+            add_error(errors, "V008", "objective exposure is malformed")
+        else:
+            gate = evidence.get(exposure.get("evidence"))
+            gate_slice = slices.get(gate.get("slice")) if isinstance(gate, dict) else None
+            gate_scope = gate_slice.get("objective_scope") if isinstance(gate_slice, dict) else None
+            if (
+                not is_nonempty_string(exposure.get("proof_id"))
+                or not is_nonempty_string(exposure.get("assertion_fingerprint"))
+                or exposure.get("behavioral_production_unchanged") is not True
+                or not isinstance(gate, dict)
+                or gate.get("kind") != "phase_gate"
+                or gate.get("phase") != "expose"
+                or gate.get("assertion_fingerprint") != exposure.get("assertion_fingerprint")
+                or gate.get("finding_id") not in root_ids
+                or not isinstance(gate_scope, dict)
+                or gate_scope.get("classification") != "root"
+            ):
+                add_error(errors, "V008", "objective exposure must bind a root EXPOSE assertion without a prior repair")
+
+    rescans = objective.get("rescans")
+    if not isinstance(rescans, list):
+        rescans = []
+    for position, record in enumerate(rescans, 1):
+        if not isinstance(record, dict) or set(record) != {
+            "number", "evidence", "new_required_findings", "out_of_scope_findings",
+            "unresolved_required", "semantic_revision", "at",
+        }:
+            add_error(errors, "V008", f"objective rescan {position} is malformed")
+            continue
+        if record.get("number") != position or not is_json_integer(record.get("unresolved_required"), 0):
+            add_error(errors, "V008", f"objective rescan {position} has invalid number or unresolved count")
+        if not evidence_has_kind(state, record.get("evidence"), {"rescan"}):
+            add_error(errors, "V008", f"objective rescan {position} lacks typed rescan evidence")
+        for key, classification in (("new_required_findings", {"root", "required"}), ("out_of_scope_findings", {"out_of_scope"})):
+            ids = record.get(key)
+            if not isinstance(ids, list) or len(ids) != len(set(ids)):
+                add_error(errors, "V008", f"objective rescan {position}.{key} must be a unique list")
+                continue
+            for fid in ids:
+                finding = findings.get(fid)
+                scope = finding.get("objective_scope") if isinstance(finding, dict) else None
+                if not isinstance(scope, dict) or scope.get("classification") not in classification:
+                    add_error(errors, "V008", f"objective rescan {position} misclassifies finding {fid}")
+
+    closure = objective.get("closure")
+    if closure is not None:
+        if not isinstance(closure, dict) or set(closure) != {
+            "proof_id", "root_passing_evidence", "regression_evidence",
+            "aggregate_counterfactual_evidence", "stale_check_evidence", "rescan_evidence", "semantic_revision",
+            "workspace_sha256", "at",
+        }:
+            add_error(errors, "V008", "objective closure is malformed")
+        else:
+            counterfactual = evidence.get(closure.get("aggregate_counterfactual_evidence"))
+            required_slice_ids = sorted(
+                sid for sid, slice_ in slices.items()
+                if isinstance(slice_, dict)
+                and isinstance(slice_.get("objective_scope"), dict)
+                and slice_["objective_scope"].get("classification") in {"root", "required"}
+            )
+            if not isinstance(exposure, dict) or closure.get("proof_id") != exposure.get("proof_id"):
+                add_error(errors, "V008", "objective closure does not use the exposed root proof")
+            if not standalone_passing_verification_evidence(state, closure.get("root_passing_evidence")):
+                add_error(errors, "V008", "objective closure lacks a passing final root proof")
+            else:
+                root_record = evidence.get(closure.get("root_passing_evidence"))
+                if not isinstance(root_record, dict) or root_record.get("proof_id") != closure.get("proof_id"):
+                    add_error(errors, "V008", "final root proof evidence does not match the objective proof identity")
+            if not standalone_passing_verification_evidence(state, closure.get("regression_evidence")):
+                add_error(errors, "V008", "objective closure lacks passing relevant regressions")
+            if not counterfactual_verification_evidence(state, closure.get("aggregate_counterfactual_evidence")):
+                add_error(errors, "V008", "objective closure lacks aggregate counterfactual evidence")
+            elif (
+                not isinstance(counterfactual, dict)
+                or counterfactual.get("proof_id") != closure.get("proof_id")
+                or counterfactual.get("assertion_fingerprint") != exposure.get("assertion_fingerprint")
+                or counterfactual.get("removed_root_reachable_slices") != required_slice_ids
+                or counterfactual.get("proof_harness_retained") is not True
+                or counterfactual.get("workspace_restored") is not True
+                or counterfactual.get("restored_worktree_sha256") != closure.get("workspace_sha256")
+            ):
+                add_error(errors, "V008", "aggregate counterfactual is not bound to the root proof and restored workspace")
+            stale_record = evidence.get(closure.get("stale_check_evidence"))
+            if (
+                not isinstance(stale_record, dict)
+                or stale_record.get("kind") != "stale_check"
+                or stale_record.get("stale") is not False
+                or stale_record.get("issue_content_sha256")
+                != objective.get("issue", {}).get("content_sha256")
+                or stale_record.get("starting_head_sha") != state.get("source", {}).get("starting_head_sha")
+                or not successful_command_records(stale_record.get("commands"))
+            ):
+                add_error(errors, "V008", "objective closure lacks a successful stale check")
+            if not rescans or rescans[-1].get("unresolved_required") != 0:
+                add_error(errors, "V008", "objective closure requires a final zero-unresolved root rescan")
+            elif closure.get("rescan_evidence") != rescans[-1].get("evidence"):
+                add_error(errors, "V008", "objective closure does not reference the latest root rescan")
+            elif rescans[-1].get("semantic_revision") != state.get("semantic_revision"):
+                add_error(errors, "V008", "objective closure relies on a root rescan that predates semantic changes")
+            if closure.get("semantic_revision") != state.get("semantic_revision"):
+                add_error(errors, "V008", "objective closure predates semantic changes")
+            if not is_sha256(closure.get("workspace_sha256")):
+                add_error(errors, "V008", "objective closure lacks a final workspace digest")
+            open_dependency_ids = [
+                did for did, dependency in state.get("dependencies", {}).items()
+                if isinstance(dependency, dict) and dependency.get("status") == "open"
+            ]
+            open_decision_ids = [
+                qid for qid, decision in state.get("decisions", {}).items()
+                if isinstance(decision, dict) and decision.get("status") == "open"
+            ]
+            assumed_fact_ids = [
+                ffid for ffid, fact in state.get("foreign_facts", {}).items()
+                if isinstance(fact, dict)
+                and isinstance(fact.get("disposition"), dict)
+                and fact["disposition"].get("kind") == "assumed"
+                and fact.get("depended_on_by")
+            ]
+            if open_dependency_ids or open_decision_ids or assumed_fact_ids:
+                add_error(
+                    errors, "V008",
+                    "objective closure retains unresolved dependencies, decisions, or foreign facts",
+                )
+
+    run_state = state.get("run", {}).get("state")
+    open_dependencies = [
+        dependency for dependency in state.get("dependencies", {}).values()
+        if isinstance(dependency, dict) and dependency.get("status") == "open"
+    ]
+    if run_state == "blocked" and not any(
+        dependency.get("blocking_scope") == "objective_prerequisite" for dependency in open_dependencies
+    ):
+        add_error(errors, "V008", "blocked requires an open objective-prerequisite dependency")
+    if run_state == "blocked_environment" and not any(
+        dependency.get("blocking_scope") == "execution_environment" for dependency in open_dependencies
+    ):
+        add_error(errors, "V008", "blocked_environment requires an open execution-environment dependency")
+    if run_state == "not_reproduced":
+        if exposure is not None:
+            add_error(errors, "V008", "not_reproduced is invalid after root exposure")
+        if any(fresh_deliveries(state, sid) for sid in slices):
+            add_error(errors, "V008", "not_reproduced may not retain behavioral deliveries")
+        if not any(
+            isinstance(item, dict) and item.get("kind") in {"test", "observation", "verification"}
+            for item in evidence.values()
+        ):
+            add_error(errors, "V008", "not_reproduced requires attempted reproduction evidence")
 
 
 def validate_readiness(state: dict[str, Any], errors: list[tuple[str, str]]) -> None:
@@ -2353,21 +2802,27 @@ def validate_readiness(state: dict[str, Any], errors: list[tuple[str, str]]) -> 
             and state["slices"][sid].get("merge_policy") == "required"
         ):
             add_error(errors, "V008", f"required slice {sid} has open decision {qid}")
-    passes = (state.get("fixed_point") or {}).get("passes")
-    if (
-        not isinstance(passes, list) or not passes or not isinstance(passes[-1], dict)
-        or passes[-1].get("new_merge_blocking_findings") != 0
-    ):
-        add_error(errors, "V008", "ready_for_review without a clean final fixed-point pass")
-    elif passes[-1].get("semantic_revision") != state.get("semantic_revision"):
-        add_error(errors, "V008", "final fixed-point pass predates semantic changes")
-    elif (
-        version_tuple(state.get("minimum_validator_version")) is not None
-        and version_tuple(state.get("minimum_validator_version"))
-        >= version_tuple(LEAN_GATE_MINIMUM_VERSION)  # type: ignore[operator]
-        and not successful_command_records(passes[-1].get("commands"))
-    ):
-        add_error(errors, "V008", "final fixed-point pass lacks successful final-suite commands")
+    if tracker_mode(state) == "fix":
+        objective = state.get("objective")
+        closure = objective.get("closure") if isinstance(objective, dict) else None
+        if not isinstance(closure, dict):
+            add_error(errors, "V008", "ready_for_review without root-objective closure")
+    else:
+        passes = (state.get("fixed_point") or {}).get("passes")
+        if (
+            not isinstance(passes, list) or not passes or not isinstance(passes[-1], dict)
+            or passes[-1].get("new_merge_blocking_findings") != 0
+        ):
+            add_error(errors, "V008", "ready_for_review without a clean final fixed-point pass")
+        elif passes[-1].get("semantic_revision") != state.get("semantic_revision"):
+            add_error(errors, "V008", "final fixed-point pass predates semantic changes")
+        elif (
+            version_tuple(state.get("minimum_validator_version")) is not None
+            and version_tuple(state.get("minimum_validator_version"))
+            >= version_tuple(LEAN_GATE_MINIMUM_VERSION)  # type: ignore[operator]
+            and not successful_command_records(passes[-1].get("commands"))
+        ):
+            add_error(errors, "V008", "final fixed-point pass lacks successful final-suite commands")
     github_mode = (state.get("policy") or {}).get("github_projection")
     if github_mode == "outbox":
         add_error(errors, "V008", "ready_for_review is unavailable in outbox-only mode; synchronize or explicitly turn projection off")
@@ -2661,7 +3116,10 @@ def apply_one(
             raise BdrError("batch operation may not be empty")
         durable_controls = {
             child.get("type") for child in operations if isinstance(child, dict)
-        } & {"begin_phase", "finish_phase", "rewind_phase", "set_run_state"}
+        } & {
+            "begin_phase", "finish_phase", "rewind_phase", "set_run_state",
+            "record_objective_exposure", "record_objective_rescan", "record_objective_closure",
+        }
         if durable_controls:
             raise BdrError(
                 "phase and run-state transitions must be durable standalone operations, not batch children"
@@ -2769,6 +3227,24 @@ def apply_one(
         if not isinstance(slice_id, str) or not slice_id.startswith("S-") or slice_id in state["slices"]:
             raise BdrError(f"slice ID must be a new S-* ID, got {slice_id!r}")
         boundary = require_mapping(operation, "boundary")
+        objective_scope = copy.deepcopy(operation.get("objective_scope"))
+        if tracker_mode(state) == "fix":
+            candidate_scope_errors = objective_scope_errors(
+                state, slice_id, objective_scope, executable=True,
+            )
+            if candidate_scope_errors:
+                raise BdrError("; ".join(candidate_scope_errors))
+            if operation.get("merge_policy", "required") != "required":
+                raise BdrError("fix mode permits only required executable slices")
+            if objective_scope.get("relation") == "same_boundary":
+                parent = state["slices"].get(objective_scope.get("parent"))
+                parent_boundary = parent.get("boundary") if isinstance(parent, dict) else None
+                if not isinstance(parent_boundary, dict) or any(
+                    boundary.get(key) != parent_boundary.get(key) for key in ("authority", "fact")
+                ):
+                    raise BdrError(
+                        "same-boundary slices must share the parent authority and fact edge"
+                    )
         state["slices"][slice_id] = {
             "name": operation.get("name") or slice_id,
             "kind": "boundary",
@@ -2781,6 +3257,8 @@ def apply_one(
             "deliveries": [],
             "created_at": utc_now(),
         }
+        if tracker_mode(state) == "fix":
+            state["slices"][slice_id]["objective_scope"] = objective_scope
         return {"slice_id": slice_id}
 
     if kind == "configure_slice":
@@ -2809,23 +3287,84 @@ def apply_one(
         if not isinstance(finding_id, str) or not finding_id.startswith("F-") or finding_id in state["findings"]:
             raise BdrError(f"finding ID must be a new F-* ID, got {finding_id!r}")
         missing_fact = require_mapping(operation, "missing_fact")
+        objective_scope = copy.deepcopy(operation.get("objective_scope"))
+        if tracker_mode(state) == "fix":
+            candidate_scope_errors = objective_scope_errors(
+                state, finding_id, objective_scope, executable=False,
+            )
+            if candidate_scope_errors:
+                raise BdrError("; ".join(candidate_scope_errors))
+            if objective_scope.get("relation") == "same_boundary":
+                parent = state["slices"].get(objective_scope.get("parent"))
+                parent_boundary = parent.get("boundary") if isinstance(parent, dict) else None
+                if not isinstance(parent_boundary, dict) or any(
+                    missing_fact.get(key) != parent_boundary.get(key) for key in ("authority", "fact")
+                ):
+                    raise BdrError(
+                        "same-boundary findings must share the parent authority and fact edge"
+                    )
+        out_of_scope = (
+            tracker_mode(state) == "fix"
+            and isinstance(objective_scope, dict)
+            and objective_scope.get("classification") == "out_of_scope"
+        )
         finding = {
             "title": operation.get("title") or finding_id,
             "site": operation.get("site", "unknown"),
             "severity": operation.get("severity", "unspecified"),
-            "merge_blocking": operation.get("merge_blocking", True),
+            "merge_blocking": False if out_of_scope else operation.get("merge_blocking", True),
             "found_by": operation.get("found_by", "review"),
             "missing_fact": copy.deepcopy(missing_fact),
             "fix_direction": operation.get("fix_direction", "not_yet_derived"),
             "origin": copy.deepcopy(operation.get("origin")),
             "ownership": [],
-            "unassigned_reason": operation.get("unassigned_reason", "awaiting boundary assignment"),
+            "unassigned_reason": operation.get(
+                "unassigned_reason", "observed outside root objective" if out_of_scope else "awaiting boundary assignment",
+            ),
             "resolution": None,
             "resolution_history": [],
             "created_at": utc_now(),
         }
+        if tracker_mode(state) == "fix":
+            finding["objective_scope"] = objective_scope
         state["findings"][finding_id] = finding
+        if (
+            tracker_mode(state) == "fix"
+            and objective_scope.get("classification") == "root"
+        ):
+            state["objective"]["root_findings"].append(finding_id)
         return {"finding_id": finding_id}
+
+    if kind == "promote_finding_to_required":
+        if tracker_mode(state) != "fix":
+            raise BdrError("finding promotion is available only in fix mode")
+        finding_id = operation.get("finding")
+        finding = require_entity(state["findings"], finding_id, "finding")
+        old_scope = finding.get("objective_scope")
+        if not isinstance(old_scope, dict) or old_scope.get("classification") != "out_of_scope":
+            raise BdrError("only an out-of-scope finding may be promoted")
+        if current_owner(finding) is not None or finding.get("resolution") is not None:
+            raise BdrError("promotion requires an unresolved, unowned finding")
+        scope = copy.deepcopy(require_mapping(operation, "objective_scope"))
+        if scope.get("classification") != "required":
+            raise BdrError("promotion must classify the finding as required")
+        candidate_scope_errors = objective_scope_errors(state, finding_id, scope, executable=False)
+        if candidate_scope_errors:
+            raise BdrError("; ".join(candidate_scope_errors))
+        if scope.get("relation") == "same_boundary":
+            parent = state["slices"].get(scope.get("parent"))
+            parent_boundary = parent.get("boundary") if isinstance(parent, dict) else None
+            missing_fact = finding.get("missing_fact")
+            if not isinstance(missing_fact, dict) or not isinstance(parent_boundary, dict) or any(
+                missing_fact.get(key) != parent_boundary.get(key) for key in ("authority", "fact")
+            ):
+                raise BdrError(
+                    "same-boundary findings must share the parent authority and fact edge"
+                )
+        finding["objective_scope"] = scope
+        finding["merge_blocking"] = True
+        finding["unassigned_reason"] = "promoted; awaiting boundary assignment"
+        return {"finding_id": finding_id, "classification": "required"}
 
     if kind == "update_finding":
         finding_id = operation.get("id")
@@ -2846,7 +3385,13 @@ def apply_one(
         finding_id = operation.get("finding")
         slice_id = operation.get("slice")
         finding = require_entity(state["findings"], finding_id, "finding")
-        require_entity(state["slices"], slice_id, "slice")
+        slice_ = require_entity(state["slices"], slice_id, "slice")
+        if tracker_mode(state) == "fix":
+            scope = finding.get("objective_scope")
+            if isinstance(scope, dict) and scope.get("classification") == "out_of_scope":
+                raise BdrError("out-of-scope findings cannot be assigned or repaired")
+            if not isinstance(slice_.get("objective_scope"), dict):
+                raise BdrError("fix-mode findings require a root-reachable slice")
         if finding.get("resolution") is not None:
             raise BdrError(f"resolved finding {finding_id} cannot be reassigned")
         previous = current_owner(finding)
@@ -2936,6 +3481,10 @@ def apply_one(
         slice_id = operation.get("slice")
         phase = operation.get("phase")
         slice_ = require_entity(state["slices"], slice_id, "slice")
+        if tracker_mode(state) == "fix" and state["objective"].get("exposure") is None:
+            scope = slice_.get("objective_scope")
+            if phase != "expose" or not isinstance(scope, dict) or scope.get("classification") != "root":
+                raise BdrError("fix mode requires a passed root EXPOSE proof before other phase work")
         progress = slice_progress(slice_)
         if progress["errors"]:
             raise BdrError(f"slice {slice_id} has invalid attempt history")
@@ -3051,6 +3600,221 @@ def apply_one(
         })
         state["run"]["state"] = "executing"
         return {"slice_id": slice_id, "rewind_to": target}
+
+    if kind == "record_objective_exposure":
+        if tracker_mode(state) != "fix":
+            raise BdrError("objective exposure is available only in fix mode")
+        if state.get("active_operation") is not None:
+            raise BdrError("finish the active phase before recording objective exposure")
+        objective = state["objective"]
+        if objective.get("exposure") is not None:
+            raise BdrError("root objective exposure is already recorded")
+        proof_id = operation.get("proof_id")
+        assertion = operation.get("assertion_fingerprint")
+        evidence_id = operation.get("evidence")
+        gate = state["evidence"].get(evidence_id)
+        gate_slice = (
+            state["slices"].get(gate.get("slice")) if isinstance(gate, dict) else None
+        )
+        gate_scope = gate_slice.get("objective_scope") if isinstance(gate_slice, dict) else None
+        if (
+            not is_nonempty_string(proof_id)
+            or not is_nonempty_string(assertion)
+            or operation.get("behavioral_production_unchanged") is not True
+            or not isinstance(gate, dict)
+            or gate.get("kind") != "phase_gate"
+            or gate.get("phase") != "expose"
+            or gate.get("assertion_fingerprint") != assertion
+            or gate.get("finding_id") not in objective.get("root_findings", [])
+            or not isinstance(gate_scope, dict)
+            or gate_scope.get("classification") != "root"
+            or live_phase_attempt_for_evidence(state, evidence_id, "expose", gate.get("slice")) is None
+        ):
+            raise BdrError("objective exposure requires a live passed root EXPOSE assertion and no prior behavioral repair")
+        objective["exposure"] = {
+            "proof_id": proof_id,
+            "assertion_fingerprint": assertion,
+            "evidence": evidence_id,
+            "behavioral_production_unchanged": True,
+            "recorded_at": utc_now(),
+        }
+        return {"objective": objective["id"], "proof_id": proof_id}
+
+    if kind == "record_objective_rescan":
+        if tracker_mode(state) != "fix":
+            raise BdrError("objective rescan is available only in fix mode")
+        if state.get("active_operation") is not None:
+            raise BdrError("finish the active phase before rescanning the root objective")
+        objective = state["objective"]
+        if not isinstance(objective.get("exposure"), dict):
+            raise BdrError("root objective must be exposed before its closure rescan")
+        rescans = objective.setdefault("rescans", [])
+        maximum = int(state["policy"].get("max_fixed_point_passes", 3))
+        if len(rescans) >= maximum:
+            raise BdrError("configured root-rescan pass bound reached")
+        record = copy.deepcopy(require_mapping(operation, "rescan"))
+        evidence_id = record.get("evidence")
+        if not evidence_has_kind(state, evidence_id, {"rescan"}):
+            raise BdrError("objective rescan requires existing typed rescan evidence")
+        for key, allowed in (
+            ("new_required_findings", {"root", "required"}),
+            ("out_of_scope_findings", {"out_of_scope"}),
+        ):
+            ids = record.get(key, [])
+            if not isinstance(ids, list) or len(ids) != len(set(ids)):
+                raise BdrError(f"objective rescan {key} must be a unique finding list")
+            for fid in ids:
+                finding = state["findings"].get(fid)
+                scope = finding.get("objective_scope") if isinstance(finding, dict) else None
+                if not isinstance(scope, dict) or scope.get("classification") not in allowed:
+                    raise BdrError(f"objective rescan {key} misclassifies {fid}")
+            record[key] = ids
+        if not is_json_integer(record.get("unresolved_required"), 0):
+            raise BdrError("objective rescan requires a non-negative unresolved_required count")
+        open_required = sorted(
+            fid for fid, finding in state["findings"].items()
+            if isinstance(finding.get("objective_scope"), dict)
+            and finding["objective_scope"].get("classification") in {"root", "required"}
+            and finding_open(finding)
+        )
+        if record["unresolved_required"] != len(open_required):
+            raise BdrError(
+                "objective rescan unresolved_required must equal the current open root-required "
+                f"finding count ({len(open_required)}: {open_required})"
+            )
+        if record["unresolved_required"] == 0:
+            incomplete = [
+                sid for sid in state["slices"]
+                if not slice_complete(state, sid) or not fresh_deliveries(state, sid)
+            ]
+            if incomplete:
+                raise BdrError(
+                    f"zero-unresolved objective rescan has incomplete required slices={incomplete}"
+                )
+            attribution = delivery_attribution_errors(state, root, require_complete=True)
+            if attribution:
+                raise BdrError(
+                    "zero-unresolved objective rescan requires full commit attribution: "
+                    + "; ".join(attribution)
+                )
+        record["number"] = len(rescans) + 1
+        record["semantic_revision"] = state["semantic_revision"]
+        record["at"] = utc_now()
+        rescans.append(record)
+        state["run"]["state"] = "verifying"
+        if record["unresolved_required"] and len(rescans) >= maximum:
+            state["run"]["state"] = "non_convergent"
+            state["run"]["terminal_reason"] = "root-focused rescan bound exhausted with required work unresolved"
+        return {"objective": objective["id"], "rescan": record["number"]}
+
+    if kind == "record_objective_closure":
+        if tracker_mode(state) != "fix":
+            raise BdrError("objective closure is available only in fix mode")
+        if state.get("active_operation") is not None:
+            raise BdrError("finish the active phase before closing the root objective")
+        objective = state["objective"]
+        exposure = objective.get("exposure")
+        if not isinstance(exposure, dict) or objective.get("closure") is not None:
+            raise BdrError("root objective must be exposed and not already closed")
+        rescans = objective.get("rescans", [])
+        if (
+            not rescans
+            or rescans[-1].get("unresolved_required") != 0
+            or rescans[-1].get("semantic_revision") != state.get("semantic_revision")
+        ):
+            raise BdrError("objective closure requires a final zero-unresolved root rescan")
+        incomplete = [
+            sid for sid in state["slices"]
+            if not slice_complete(state, sid) or not fresh_deliveries(state, sid)
+        ]
+        unresolved = [
+            fid for fid, finding in state["findings"].items()
+            if finding.get("merge_blocking", True) and finding_open(finding)
+        ]
+        if incomplete or unresolved:
+            raise BdrError(f"objective closure is premature; incomplete={incomplete}, unresolved={unresolved}")
+        open_dependencies = [
+            did for did, dependency in state["dependencies"].items()
+            if dependency.get("status") == "open"
+        ]
+        open_decisions = [
+            qid for qid, decision in state["decisions"].items()
+            if decision.get("status") == "open"
+        ]
+        assumed_facts = [
+            ffid for ffid, fact in state["foreign_facts"].items()
+            if isinstance(fact.get("disposition"), dict)
+            and fact["disposition"].get("kind") == "assumed"
+            and fact.get("depended_on_by")
+        ]
+        if open_dependencies or open_decisions or assumed_facts:
+            raise BdrError(
+                "objective closure has unresolved prerequisites: "
+                f"dependencies={open_dependencies}, decisions={open_decisions}, foreign_facts={assumed_facts}"
+            )
+        attribution = delivery_attribution_errors(state, root, require_complete=True)
+        if attribution:
+            raise BdrError("objective closure requires full commit attribution: " + "; ".join(attribution))
+        closure_input = copy.deepcopy(require_mapping(operation, "closure"))
+        if closure_input.get("proof_id") != exposure.get("proof_id"):
+            raise BdrError("objective closure must use the exposed proof identity")
+        root_pass = closure_input.get("root_passing_evidence")
+        regression = closure_input.get("regression_evidence")
+        counterfactual_id = closure_input.get("aggregate_counterfactual_evidence")
+        stale_check = closure_input.get("stale_check_evidence")
+        if not standalone_passing_verification_evidence(state, root_pass):
+            raise BdrError("objective closure requires a passing final root proof")
+        if not standalone_passing_verification_evidence(state, regression):
+            raise BdrError("objective closure requires passing relevant regressions")
+        root_record = state["evidence"].get(root_pass)
+        if not isinstance(root_record, dict) or root_record.get("proof_id") != exposure.get("proof_id"):
+            raise BdrError("final root proof evidence does not match the exposed proof")
+        if not counterfactual_verification_evidence(state, counterfactual_id):
+            raise BdrError("objective closure requires a failing aggregate counterfactual")
+        stale_record = state["evidence"].get(stale_check)
+        if (
+            not isinstance(stale_record, dict)
+            or stale_record.get("kind") != "stale_check"
+            or stale_record.get("stale") is not False
+            or stale_record.get("issue_content_sha256")
+            != objective.get("issue", {}).get("content_sha256")
+            or stale_record.get("starting_head_sha") != state["source"].get("starting_head_sha")
+            or not successful_command_records(stale_record.get("commands"))
+        ):
+            raise BdrError("objective closure requires a successful issue/revision stale check")
+        current = workspace_snapshot(
+            root, state["source"].get("audit_dir", ".bdr"), state["source"].get("tracker_path"),
+            require_visible_index=True,
+        )
+        if current["dirty"]:
+            raise BdrError("objective closure requires a clean code worktree")
+        counterfactual = state["evidence"].get(counterfactual_id)
+        required_slice_ids = sorted(state["slices"])
+        if (
+            not isinstance(counterfactual, dict)
+            or counterfactual.get("proof_id") != exposure.get("proof_id")
+            or counterfactual.get("assertion_fingerprint") != exposure.get("assertion_fingerprint")
+            or counterfactual.get("removed_root_reachable_slices") != required_slice_ids
+            or counterfactual.get("proof_harness_retained") is not True
+            or counterfactual.get("workspace_restored") is not True
+            or counterfactual.get("restored_worktree_sha256") != current["worktree_sha256"]
+        ):
+            raise BdrError("aggregate counterfactual must restore the exact final workspace and root proof")
+        closure = {
+            "proof_id": exposure["proof_id"],
+            "root_passing_evidence": root_pass,
+            "regression_evidence": regression,
+            "aggregate_counterfactual_evidence": counterfactual_id,
+            "stale_check_evidence": stale_check,
+            "rescan_evidence": rescans[-1]["evidence"],
+            "semantic_revision": state["semantic_revision"],
+            "workspace_sha256": current["worktree_sha256"],
+            "at": utc_now(),
+        }
+        objective["closure"] = closure
+        state["run"]["state"] = "verifying"
+        state["run"]["terminal_reason"] = None
+        return {"objective": objective["id"], "proof_id": closure["proof_id"]}
 
     if kind == "record_delivery":
         slice_id = operation.get("slice")
@@ -3201,9 +3965,21 @@ def apply_one(
                 reason if is_nonempty_string(reason)
                 else "baseline verification is not usable in the isolated environment"
             )
+            if tracker_mode(state) == "fix":
+                dependency_id = next_id(state["dependencies"], "D")
+                state["dependencies"][dependency_id] = {
+                    "kind": "environment",
+                    "locator": "baseline execution environment",
+                    "status": "open",
+                    "blocking_scope": "execution_environment",
+                    "created_at": utc_now(),
+                    "notes": state["run"]["terminal_reason"],
+                }
         return {"usable": baseline.get("usable")}
 
     if kind == "record_fixed_point":
+        if tracker_mode(state) == "fix":
+            raise BdrError("fix mode closes a root objective; it does not record a repository fixed point")
         incomplete = [
             sid for sid, slice_ in state["slices"].items()
             if slice_.get("merge_policy") == "required"
@@ -3243,6 +4019,8 @@ def apply_one(
         mode = operation.get("mode")
         if not is_enum(mode, {"off", "outbox", "sync"}):
             raise BdrError("GitHub mode must be off, outbox, or sync")
+        if tracker_mode(state) == "fix" and mode != "off":
+            raise BdrError("fix mode is read-only on GitHub")
         if mode == "off" and state["github"].get("outbox"):
             raise BdrError("acknowledge every pending GitHub outbox item before turning projection off")
         state["policy"]["github_projection"] = mode
@@ -3329,6 +4107,30 @@ def apply_one(
         reason = operation.get("reason")
         if target in INTERVENTION_RUN_STATES and not is_nonempty_string(reason):
             raise BdrError(f"terminal/intervention state {target} requires a reason")
+        if tracker_mode(state) == "fix":
+            open_dependencies = [
+                dependency for dependency in state["dependencies"].values()
+                if dependency.get("status") == "open"
+            ]
+            if target == "blocked" and not any(
+                dependency.get("blocking_scope") == "objective_prerequisite"
+                for dependency in open_dependencies
+            ):
+                raise BdrError("blocked requires an open objective-prerequisite dependency")
+            if target == "blocked_environment" and not any(
+                dependency.get("blocking_scope") == "execution_environment"
+                for dependency in open_dependencies
+            ):
+                raise BdrError("blocked_environment requires an open execution-environment dependency")
+            if target == "not_reproduced":
+                if state["objective"].get("exposure") is not None:
+                    raise BdrError("not_reproduced is invalid after root exposure")
+                if not evidence_exists(state, operation.get("evidence")):
+                    raise BdrError("not_reproduced requires attempted reproduction evidence")
+            if target == "needs_human" and not any(
+                decision.get("status") == "open" for decision in state["decisions"].values()
+            ):
+                raise BdrError("needs_human requires an open decision packet")
         if target == "ready_for_review":
             if current != "verifying":
                 raise BdrError("ready_for_review may only follow the verifying state")
@@ -3355,9 +4157,14 @@ def operation_affects_semantics(operation: dict[str, Any]) -> bool:
         return isinstance(children, list) and any(
             isinstance(child, dict) and operation_affects_semantics(child) for child in children
         )
+    if operation.get("type") == "add_finding":
+        scope = operation.get("objective_scope")
+        if isinstance(scope, dict) and scope.get("classification") == "out_of_scope":
+            return False
     return operation.get("type") not in {
         "add_evidence", "record_delivery", "record_fixed_point", "configure_github", "project_github", "map_issue",
-        "enqueue_github", "ack_github", "set_run_state",
+        "enqueue_github", "ack_github", "set_run_state", "record_objective_rescan",
+        "record_objective_closure",
     }
 
 
@@ -3546,6 +4353,22 @@ def local_lineage_errors(state: dict[str, Any], root: Path) -> list[str]:
 
 
 def fixed_point_workspace_errors(state: dict[str, Any], root: Path) -> list[str]:
+    if tracker_mode(state) == "fix":
+        objective = state.get("objective")
+        closure = objective.get("closure") if isinstance(objective, dict) else None
+        if not isinstance(closure, dict):
+            return []
+        source = state.get("source") or {}
+        observed = workspace_snapshot(
+            root, source.get("audit_dir", ".bdr"), source.get("tracker_path"),
+            require_visible_index=True,
+        )
+        errors: list[str] = []
+        if observed.get("worktree_sha256") != closure.get("workspace_sha256"):
+            errors.append("code workspace changed after root-objective closure")
+        if observed.get("dirty"):
+            errors.append("root-objective closure workspace is not clean")
+        return errors
     passes = (state.get("fixed_point") or {}).get("passes")
     if not isinstance(passes, list) or not passes:
         return []
@@ -3599,6 +4422,56 @@ def gh_pr_metadata(root: Path, selector: str) -> dict[str, Any]:
     return metadata
 
 
+def gh_issue_metadata(root: Path, selector: str) -> dict[str, Any]:
+    if shutil.which("gh") is None:
+        raise BdrError("GitHub CLI is required to resolve --issue")
+    if not valid_issue_selector(selector):
+        raise BdrError("issue selector must be a positive number or an https GitHub issue URL")
+    repository_result = run_command(
+        ["gh", "repo", "view", "--json", "id,nameWithOwner"], root
+    )
+    issue_result = run_command(
+        ["gh", "issue", "view", "--json", "number,url,id,title,body,updatedAt", "--", selector], root
+    )
+    try:
+        repository = json.loads(repository_result.stdout)
+        issue = json.loads(issue_result.stdout)
+    except json.JSONDecodeError as exc:
+        raise BdrError("GitHub CLI returned malformed repository or issue metadata") from exc
+    if (
+        not isinstance(repository, dict)
+        or not is_nonempty_string(repository.get("id"))
+        or not is_nonempty_string(repository.get("nameWithOwner"))
+        or not isinstance(issue, dict)
+    ):
+        raise BdrError("GitHub CLI did not return a canonical repository and issue identity")
+    try:
+        path = urlsplit(issue.get("url", "")).path.strip("/").split("/")
+    except ValueError as exc:
+        raise BdrError("GitHub CLI returned an invalid issue URL") from exc
+    issue_repository = "/".join(path[:2]) if len(path) == 4 and path[2] == "issues" else ""
+    if issue_repository.casefold() != repository["nameWithOwner"].casefold():
+        raise BdrError("the selected issue does not belong to the checked-out GitHub repository")
+    if (
+        not is_json_integer(issue.get("number"), 1)
+        or not valid_issue_selector(issue.get("url"))
+        or not is_nonempty_string(issue.get("id"))
+        or not is_nonempty_string(issue.get("updatedAt"))
+        or not isinstance(issue.get("title"), str)
+        or not isinstance(issue.get("body"), str)
+    ):
+        raise BdrError("GitHub CLI returned incomplete issue metadata")
+    return {
+        "repository": repository["nameWithOwner"],
+        "repository_id": repository["id"],
+        "number": issue["number"],
+        "node_id": issue["id"],
+        "url": issue["url"],
+        "updated_at": issue["updatedAt"],
+        "content_sha256": digest({"title": issue["title"], "body": issue["body"]}),
+    }
+
+
 def preflight_report(cwd: Path, pr: str | None = None) -> dict[str, Any]:
     root = git_root(cwd)
     changes = working_tree_changes(root)
@@ -3646,7 +4519,7 @@ def derive_next_action(state: dict[str, Any]) -> dict[str, Any]:
         return {"action": "handoff", "reason": "the verified run is ready for review"}
     if run_state in {
         "verification_pending", "needs_human", "blocked_environment", "stale_input",
-        "non_convergent", "failed_verification",
+        "non_convergent", "failed_verification", "not_reproduced", "blocked",
     }:
         return {
             "action": "handoff_terminal",
@@ -3677,6 +4550,24 @@ def derive_next_action(state: dict[str, Any]) -> dict[str, Any]:
     ]
     if unassigned:
         return {"action": "assign_or_split_findings", "findings": sorted(unassigned)}
+    if tracker_mode(state) == "fix" and state["objective"].get("exposure") is None:
+        for sid, slice_ in sorted(state["slices"].items()):
+            scope = slice_.get("objective_scope")
+            if not isinstance(scope, dict) or scope.get("classification") != "root":
+                continue
+            progress = slice_progress(slice_)
+            if progress["passed"] >= 1:
+                gate = latest_passed_gate(state, sid, "expose")
+                return {
+                    "action": "record_objective_exposure",
+                    "slice": sid,
+                    "evidence": gate.get("_evidence_id") if isinstance(gate, dict) else None,
+                }
+            return {
+                "action": "begin_phase", "slice": sid, "phase": "expose",
+                "operation": {"type": "begin_phase", "slice": sid, "phase": "expose"},
+            }
+        return {"action": "discover_root_boundaries", "objective": "O-0001"}
     waiting: list[str] = []
     open_decisions = {
         qid: decision for qid, decision in state.get("decisions", {}).items()
@@ -3726,6 +4617,18 @@ def derive_next_action(state: dict[str, Any]) -> dict[str, Any]:
             "remaining_stale_slices": stale_deliveries,
             "operation": "record_delivery",
         }
+    if tracker_mode(state) == "fix":
+        objective = state["objective"]
+        rescans = objective.get("rescans", [])
+        if (
+            not rescans
+            or rescans[-1].get("semantic_revision") != state.get("semantic_revision")
+            or rescans[-1].get("unresolved_required") != 0
+        ):
+            return {"action": "rescan_root_objective", "pass": len(rescans) + 1}
+        if not isinstance(objective.get("closure"), dict):
+            return {"action": "record_objective_closure", "objective": objective["id"]}
+        return {"action": "completion_check_then_mark_ready"}
     passes = state["fixed_point"].get("passes", [])
     if (
         not passes
@@ -3739,6 +4642,8 @@ def derive_next_action(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def status_document(state: dict[str, Any]) -> dict[str, Any]:
+    if tracker_mode(state) == "fix":
+        return fix_status_document(state)
     slices: dict[str, Any] = {}
     for sid, slice_ in sorted(state["slices"].items()):
         progress = slice_progress(slice_)
@@ -3769,6 +4674,189 @@ def status_document(state: dict[str, Any]) -> dict[str, Any]:
         "slices": slices,
         "next": derive_next_action(state),
     }
+
+
+def derived_objective_status(state: dict[str, Any]) -> str:
+    run_state = state["run"].get("state")
+    if run_state == "ready_for_review":
+        return "closed"
+    if run_state in {"not_reproduced", "blocked", "blocked_environment", "needs_human"}:
+        return str(run_state)
+    objective = state.get("objective") or {}
+    if not isinstance(objective.get("exposure"), dict):
+        return "awaiting_reproduction"
+    required = [
+        sid for sid, slice_ in state["slices"].items()
+        if isinstance(slice_.get("objective_scope"), dict)
+        and slice_["objective_scope"].get("classification") in {"root", "required"}
+    ]
+    if any(not slice_complete(state, sid) or not fresh_deliveries(state, sid) for sid in required):
+        return "repairing"
+    return "verifying"
+
+
+def last_update_age(updated_at: Any) -> int | None:
+    if not isinstance(updated_at, str):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(updated_at)
+        now = dt.datetime.now(dt.timezone.utc)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return max(0, int((now - parsed).total_seconds()))
+    except ValueError:
+        return None
+
+
+def latest_meaningful_evidence(state: dict[str, Any]) -> dict[str, Any] | None:
+    candidates: list[tuple[str, str, dict[str, Any]]] = []
+    for evidence_id, record in state.get("evidence", {}).items():
+        if not isinstance(record, dict) or record.get("kind") not in {
+            "test", "verification", "counterfactual_test", "phase_gate", "rescan", "stale_check",
+        }:
+            continue
+        recorded = record.get("recorded_at")
+        if isinstance(recorded, str):
+            candidates.append((recorded, evidence_id, record))
+    if not candidates:
+        return None
+    _, evidence_id, record = max(candidates, key=lambda item: item[0])
+    commands = record.get("commands")
+    outcome = None
+    if isinstance(commands, list) and commands:
+        outcome = "passed" if all(item.get("exit_code") == 0 for item in commands if isinstance(item, dict)) else "failed"
+    return {
+        "id": evidence_id,
+        "kind": record.get("kind"),
+        "phase": record.get("phase"),
+        "slice": record.get("slice"),
+        "outcome": outcome,
+        "recorded_at": record.get("recorded_at"),
+    }
+
+
+def fix_status_document(state: dict[str, Any]) -> dict[str, Any]:
+    objective = state["objective"]
+    required: list[dict[str, Any]] = []
+    for sid, slice_ in sorted(state["slices"].items()):
+        scope = slice_.get("objective_scope")
+        if not isinstance(scope, dict) or scope.get("classification") not in {"root", "required"}:
+            continue
+        progress = slice_progress(slice_)
+        required.append({
+            "id": sid,
+            "name": slice_.get("name"),
+            "classification": scope.get("classification"),
+            "relation": scope.get("relation"),
+            "parent": scope.get("parent"),
+            "current_phase": progress.get("next_phase"),
+            "phases_passed": progress.get("passed"),
+            "phases_total": len(PHASES),
+            "complete": slice_complete(state, sid),
+            "delivered": bool(fresh_deliveries(state, sid)),
+        })
+    out_of_scope = [
+        {"id": fid, "title": finding.get("title"), "site": finding.get("site")}
+        for fid, finding in sorted(state["findings"].items())
+        if isinstance(finding.get("objective_scope"), dict)
+        and finding["objective_scope"].get("classification") == "out_of_scope"
+    ]
+    active = state.get("active_operation")
+    next_action = derive_next_action(state)
+    if isinstance(active, dict):
+        activity = f"{active.get('phase')} {active.get('slice')}"
+    elif next_action.get("action") == "begin_phase":
+        activity = f"{next_action.get('phase')} {next_action.get('slice')}"
+    elif next_action.get("action") == "record_delivery":
+        activity = f"delivery {next_action.get('slice')}"
+    elif next_action.get("action") == "record_objective_exposure":
+        activity = f"record root proof {next_action.get('slice')}"
+    else:
+        activity = str(next_action.get("action", "unknown")).replace("_", " ")
+    open_dependencies = [
+        {"id": did, "scope": dependency.get("blocking_scope"), "locator": dependency.get("locator")}
+        for did, dependency in sorted(state["dependencies"].items())
+        if dependency.get("status") == "open"
+    ]
+    open_decisions = [
+        {"id": qid, "question": decision.get("question"), "owner": decision.get("owner")}
+        for qid, decision in sorted(state["decisions"].items())
+        if decision.get("status") == "open"
+    ]
+    return {
+        "schema": "bdr.dev/fix-status/v1",
+        "run_id": state["run"].get("id"),
+        "run_state": state["run"].get("state"),
+        "revision": state.get("revision"),
+        "root": {
+            "id": objective.get("id"),
+            "issue": objective.get("issue"),
+            "status": derived_objective_status(state),
+            "proof": (
+                "reproduced" if isinstance(objective.get("exposure"), dict)
+                else "not_reproduced" if state["run"].get("state") == "not_reproduced"
+                else "pending"
+            ),
+            "rescan_count": len(objective.get("rescans", [])),
+        },
+        "required": required,
+        "out_of_scope": out_of_scope,
+        "current": {
+            "activity": activity,
+            "active_operation": active,
+            "next": next_action,
+            "last_update": state["run"].get("updated_at"),
+            "last_update_age_seconds": last_update_age(state["run"].get("updated_at")),
+            "latest_evidence": latest_meaningful_evidence(state),
+            "blocked": bool(open_dependencies or open_decisions),
+        },
+        "blockers": {"dependencies": open_dependencies, "decisions": open_decisions},
+        "bounds": {
+            "phase_attempts": state["policy"].get("max_phase_attempts"),
+            "root_rescans": state["policy"].get("max_fixed_point_passes"),
+        },
+        "terminal_reason": state["run"].get("terminal_reason"),
+    }
+
+
+def render_fix_status(document: dict[str, Any]) -> str:
+    root = document["root"]
+    issue = root.get("issue") or {}
+    lines = [
+        f"BAT /fix #{issue.get('number', '?')}", "", "ROOT",
+        f"  status: {root.get('status')}", f"  proof: {root.get('proof')}", "", "REQUIRED",
+    ]
+    required = document.get("required", [])
+    if required:
+        for item in required:
+            phase = "DONE" if item.get("complete") else str(item.get("current_phase") or "-").upper()
+            lines.append(
+                f"  {item.get('id')} {item.get('name')}  {phase}  "
+                f"{item.get('phases_passed')}/{item.get('phases_total')}"
+            )
+    else:
+        lines.append("  (none yet)")
+    lines.extend(["", "OUT OF SCOPE"])
+    outside = document.get("out_of_scope", [])
+    lines.extend(
+        [f"  {item.get('id')} {item.get('title')}" for item in outside]
+        if outside else ["  (none)"]
+    )
+    current = document["current"]
+    latest = current.get("latest_evidence")
+    latest_text = "none" if not isinstance(latest, dict) else " ".join(
+        str(value) for value in (latest.get("id"), latest.get("kind"), latest.get("outcome")) if value
+    )
+    age = current.get("last_update_age_seconds")
+    lines.extend([
+        "", "CURRENT", f"  activity: {current.get('activity')}",
+        f"  last update: {age}s ago" if isinstance(age, int) else f"  last update: {current.get('last_update')}",
+        f"  latest evidence: {latest_text}",
+        f"  blocked: {'yes' if current.get('blocked') else 'no'}",
+    ])
+    if document.get("terminal_reason"):
+        lines.append(f"  terminal reason: {document['terminal_reason']}")
+    return "\n".join(lines)
 
 
 def legacy_load(path: Path) -> dict[str, Any]:
@@ -4088,6 +5176,106 @@ def fixture_state(root: Path) -> dict[str, Any]:
     return state
 
 
+def fix_fixture_state(root: Path) -> dict[str, Any]:
+    state = fixture_state(root)
+    state["minimum_validator_version"] = VERSION
+    state["mode"] = "fix"
+    state["source"]["base_sha"] = state["source"]["starting_head_sha"]
+    state["policy"]["github_projection"] = "off"
+    state["fixed_point"]["passes"] = []
+    state["objective"] = {
+        "id": "O-0001",
+        "kind": "github_issue",
+        "issue": {
+            "repository": "example/selftest",
+            "repository_id": "R_example",
+            "number": 123,
+            "node_id": "I_example",
+            "url": "https://github.com/example/selftest/issues/123",
+            "updated_at": "2026-08-20T00:00:00Z",
+            "content_sha256": "a" * 64,
+        },
+        "root_findings": ["F-0001"],
+        "exposure": {
+            "proof_id": "root-proof",
+            "assertion_fingerprint": "expected explicit owner token",
+            "evidence": "E-0020",
+            "behavioral_production_unchanged": True,
+            "recorded_at": utc_now(),
+        },
+        "rescans": [],
+        "closure": None,
+    }
+    state["slices"]["S-0001"]["objective_scope"] = {
+        "classification": "root", "parent": "O-0001", "relation": "root", "evidence": "E-0001",
+    }
+    state["findings"]["F-0001"]["objective_scope"] = {
+        "classification": "root", "parent": "O-0001", "relation": "root", "evidence": "E-0001",
+    }
+    falsify = state["evidence"]["E-0025"]
+    falsify["validator_version"] = VERSION
+    falsify["saturate_evidence"] = "E-0024"
+    falsify["objective_scope_review"] = {
+        "performed": True, "attributed_findings": ["F-0001"], "out_of_scope_changes": [],
+    }
+    falsify["failure_channel_review"] = {
+        "performed": True,
+        "expected_failures": [],
+        "introduced_or_broadened_exceptions": [],
+    }
+    state["evidence"]["E-0002"]["proof_id"] = "root-proof"
+    state["evidence"]["E-0003"].update({
+        "proof_id": "root-proof",
+        "assertion_fingerprint": "expected explicit owner token",
+        "removed_root_reachable_slices": ["S-0001"],
+        "proof_harness_retained": True,
+        "workspace_restored": True,
+    })
+    state["evidence"]["E-0030"] = {
+        "kind": "verification",
+        "claim": "relevant regressions pass",
+        "commands": [{
+            "command": "fixture-regressions", "exit_code": 0,
+            "output_digest": "sha256:regressions",
+        }],
+    }
+    state["evidence"]["E-0031"] = {
+        "kind": "stale_check",
+        "claim": "issue and starting revision remain pinned",
+        "stale": False,
+        "issue_content_sha256": "a" * 64,
+        "starting_head_sha": state["source"]["starting_head_sha"],
+        "commands": [{
+            "command": "bdr stale-check", "exit_code": 0,
+            "output_digest": "sha256:stale-check",
+        }],
+    }
+    state["evidence"]["E-0032"] = {"kind": "rescan", "claim": "root-relevant closure is clean"}
+    snapshot = workspace_snapshot(root, include_content_delta=True)
+    state["evidence"]["E-0003"]["restored_worktree_sha256"] = snapshot["worktree_sha256"]
+    state["objective"]["rescans"] = [{
+        "number": 1,
+        "evidence": "E-0032",
+        "new_required_findings": [],
+        "out_of_scope_findings": [],
+        "unresolved_required": 0,
+        "semantic_revision": state["semantic_revision"],
+        "at": utc_now(),
+    }]
+    state["objective"]["closure"] = {
+        "proof_id": "root-proof",
+        "root_passing_evidence": "E-0002",
+        "regression_evidence": "E-0030",
+        "aggregate_counterfactual_evidence": "E-0003",
+        "stale_check_evidence": "E-0031",
+        "rescan_evidence": "E-0032",
+        "semantic_revision": state["semantic_revision"],
+        "workspace_sha256": snapshot["worktree_sha256"],
+        "at": utc_now(),
+    }
+    return state
+
+
 def selftest() -> list[str]:
     passed: list[str] = []
     with tempfile.TemporaryDirectory(prefix="bdr-selftest-") as temporary:
@@ -4111,6 +5299,323 @@ def selftest() -> list[str]:
         if validate_state(legacy_v2):
             raise BdrError("safe command-backed 2.1.0 tracker is no longer valid")
         passed.append("safe command-backed 2.1.0 tracker compatibility")
+
+        fix_state = fix_fixture_state(root)
+        fix_errors = validate_state(fix_state)
+        if fix_errors:
+            raise BdrError("fix-mode fixture is not valid: " + render_validation(fix_errors))
+        passed.append("bounded fix objective fixture")
+
+        missing_failure_review = copy.deepcopy(fix_state)
+        missing_failure_review["evidence"]["E-0025"].pop("failure_channel_review")
+        if "V005" not in {rule for rule, _ in validate_state(missing_failure_review)}:
+            raise BdrError("fix-mode FALSIFY accepted a missing failure-channel review")
+        passed.append("fix FALSIFY scope and failure-channel reviews")
+
+        out_of_scope = copy.deepcopy(fix_state)
+        out_of_scope["findings"]["F-0002"] = {
+            "title": "unrelated cleanup", "site": "Other.java:1", "severity": "low",
+            "merge_blocking": False, "found_by": "root rescan",
+            "missing_fact": {
+                "authority": "other", "fact": "cleanup", "consumer_decision": "format",
+                "inferred_from": "legacy text", "initial_shape": "direct", "normalized_as": "direct",
+            },
+            "fix_direction": "follow-up only", "origin": None, "ownership": [],
+            "unassigned_reason": "observed outside root objective", "resolution": None,
+            "resolution_history": [], "created_at": utc_now(),
+            "objective_scope": {
+                "classification": "out_of_scope", "parent": "S-0001",
+                "relation": "observed", "evidence": "E-0001",
+            },
+        }
+        out_of_scope["objective"]["rescans"][-1]["out_of_scope_findings"] = ["F-0002"]
+        if validate_state(out_of_scope):
+            raise BdrError("an honestly recorded out-of-scope finding blocked fix closure")
+        status = fix_status_document(out_of_scope)
+        if (
+            status.get("schema") != "bdr.dev/fix-status/v1"
+            or status["root"].get("status") != "closed"
+            or [item["id"] for item in status["out_of_scope"]] != ["F-0002"]
+            or "BAT /fix #123" not in render_fix_status(status)
+        ):
+            raise BdrError("fix status projection lost root or out-of-scope state")
+        status["current"]["last_update_age_seconds"] = 18
+        expected_human_status = "\n".join([
+            "BAT /fix #123", "", "ROOT", "  status: closed", "  proof: reproduced", "",
+            "REQUIRED", "  S-0001 explicit release authority  DONE  6/6", "",
+            "OUT OF SCOPE", "  F-0002 unrelated cleanup", "", "CURRENT",
+            "  activity: handoff", "  last update: 18s ago", "  latest evidence: none",
+            "  blocked: no",
+        ])
+        if render_fix_status(status) != expected_human_status:
+            raise BdrError("human fix status snapshot changed unexpectedly")
+        passed.append("out-of-scope closure and fix status projection")
+
+        scope_cycle = copy.deepcopy(fix_state)
+        for sid, parent in (("S-0002", "S-0003"), ("S-0003", "S-0002")):
+            scope_cycle["slices"][sid] = {
+                "name": sid, "kind": "boundary", "merge_policy": "required",
+                "boundary": {"authority": sid, "fact": "fact", "consumer_decision": "decision"},
+                "depends_on": [], "collapse_predictions": {}, "operational_obligations": [],
+                "phase_attempts": [], "deliveries": [], "created_at": utc_now(),
+                "objective_scope": {
+                    "classification": "required", "parent": parent,
+                    "relation": "same_boundary", "evidence": "E-0001",
+                },
+            }
+        if "V002" not in {rule for rule, _ in validate_state(scope_cycle)}:
+            raise BdrError("objective reachability cycle was accepted")
+        passed.append("root reachability cycle rejection")
+
+        scope_edges = copy.deepcopy(fix_state)
+        dependency_result = apply_one(scope_edges, {
+            "type": "add_slice", "id": "S-0002", "name": "required dependency",
+            "boundary": {
+                "authority": "retry producer", "fact": "generation",
+                "consumer_decision": "which retry completes",
+            },
+            "depends_on": ["S-0001"],
+            "objective_scope": {
+                "classification": "required", "parent": "S-0001",
+                "relation": "dependency", "evidence": "E-0001",
+            },
+        }, root)
+        same_boundary_result = apply_one(scope_edges, {
+            "type": "add_slice", "id": "S-0003", "name": "same authority edge",
+            "boundary": {
+                "authority": "producer", "fact": "ownership",
+                "consumer_decision": "retain or transfer",
+            },
+            "objective_scope": {
+                "classification": "required", "parent": "S-0001",
+                "relation": "same_boundary", "evidence": "E-0001",
+            },
+        }, root)
+        if dependency_result.get("slice_id") != "S-0002" or same_boundary_result.get("slice_id") != "S-0003":
+            raise BdrError("valid root-reachable scope edges were rejected")
+        try:
+            apply_one(scope_edges, {
+                "type": "add_slice", "id": "S-0004", "name": "false same boundary",
+                "boundary": {
+                    "authority": "different", "fact": "different",
+                    "consumer_decision": "unrelated",
+                },
+                "objective_scope": {
+                    "classification": "required", "parent": "S-0001",
+                    "relation": "same_boundary", "evidence": "E-0001",
+                },
+            }, root)
+            raise BdrError("a false same-boundary scope edge was accepted")
+        except BdrError as exc:
+            if "share the parent authority" not in str(exc):
+                raise
+        passed.append("dependency and same-boundary root reachability")
+
+        pre_exposure = copy.deepcopy(fix_state)
+        pre_exposure["run"]["state"] = "auditing"
+        pre_exposure["objective"]["exposure"] = None
+        pre_exposure["objective"]["rescans"] = []
+        pre_exposure["objective"]["closure"] = None
+        pre_exposure["slices"]["S-0001"]["phase_attempts"] = pre_exposure["slices"]["S-0001"]["phase_attempts"][:1]
+        pre_exposure["slices"]["S-0001"]["deliveries"] = []
+        pre_exposure["findings"]["F-0001"]["resolution"] = None
+        try:
+            apply_one(pre_exposure, {"type": "begin_phase", "slice": "S-0001", "phase": "represent"}, root)
+            raise BdrError("REPRESENT began before root-objective exposure")
+        except BdrError as exc:
+            if "root EXPOSE" not in str(exc):
+                raise
+        passed.append("root exposure gates behavioral phases")
+
+        promoted = copy.deepcopy(out_of_scope)
+        promoted["run"]["state"] = "auditing"
+        promoted["objective"]["closure"] = None
+        result = apply_one(promoted, {
+            "type": "promote_finding_to_required", "finding": "F-0002",
+            "objective_scope": {
+                "classification": "required", "parent": "S-0001",
+                "relation": "dependency", "evidence": "E-0001",
+            },
+        }, root)
+        if result.get("classification") != "required" or promoted["findings"]["F-0002"]["merge_blocking"] is not True:
+            raise BdrError("out-of-scope promotion did not become required")
+        passed.append("evidence-backed scope promotion")
+
+        if operation_affects_semantics({
+            "type": "add_finding",
+            "objective_scope": {
+                "classification": "out_of_scope", "parent": "S-0001",
+                "relation": "observed", "evidence": "E-0001",
+            },
+        }):
+            raise BdrError("an out-of-scope observation incorrectly invalidated repair deliveries")
+        rescan_expansion = copy.deepcopy(fix_state)
+        rescan_expansion["objective"].update(rescans=[], closure=None)
+        apply_one(rescan_expansion, {
+            "type": "add_finding", "id": "F-0002", "title": "required retry edge",
+            "site": "Retry.java:2", "merge_blocking": True,
+            "missing_fact": {
+                "authority": "retry producer", "fact": "generation",
+                "consumer_decision": "which retry completes", "inferred_from": "arrival order",
+                "initial_shape": "concurrency", "normalized_as": "concurrency_order",
+            },
+            "fix_direction": "route the generation token",
+            "objective_scope": {
+                "classification": "required", "parent": "S-0001",
+                "relation": "dependency", "evidence": "E-0001",
+            },
+        }, root)
+        rescan_expansion["evidence"]["E-0033"] = {
+            "kind": "rescan", "claim": "retry edge is necessary to challenge the root proof",
+        }
+        rescan_result = apply_one(rescan_expansion, {
+            "type": "record_objective_rescan",
+            "rescan": {
+                "new_required_findings": ["F-0002"], "out_of_scope_findings": [],
+                "unresolved_required": 1, "evidence": "E-0033",
+            },
+        }, root)
+        if rescan_result.get("rescan") != 1 or rescan_expansion["run"]["state"] != "verifying":
+            raise BdrError("root rescan did not admit bounded required work")
+        try:
+            apply_one(rescan_expansion, {
+                "type": "record_objective_closure", "closure": {
+                    "proof_id": "root-proof", "root_passing_evidence": "E-0002",
+                    "regression_evidence": "E-0030",
+                    "aggregate_counterfactual_evidence": "E-0003",
+                    "stale_check_evidence": "E-0031",
+                },
+            }, root)
+            raise BdrError("objective closure accepted unresolved required rescan work")
+        except BdrError as exc:
+            if "zero-unresolved" not in str(exc):
+                raise
+        passed.append("root rescan expansion and unresolved-work closure rejection")
+
+        blocked_without_dependency = copy.deepcopy(fix_state)
+        blocked_without_dependency["run"].update(state="blocked", terminal_reason="external prerequisite")
+        if "V008" not in {rule for rule, _ in validate_state(blocked_without_dependency)}:
+            raise BdrError("blocked was accepted without an objective prerequisite")
+        blocked_with_dependency = copy.deepcopy(blocked_without_dependency)
+        blocked_with_dependency["objective"]["closure"] = None
+        blocked_with_dependency["dependencies"]["D-0001"] = {
+            "kind": "external_contract", "locator": "external artifact", "status": "open",
+            "blocking_scope": "objective_prerequisite", "created_at": utc_now(),
+        }
+        if validate_state(blocked_with_dependency):
+            raise BdrError("objective-level blocked state was rejected")
+        wrong_environment = copy.deepcopy(blocked_with_dependency)
+        wrong_environment["run"].update(state="blocked_environment", terminal_reason="toolchain unavailable")
+        if "V008" not in {rule for rule, _ in validate_state(wrong_environment)}:
+            raise BdrError("blocked_environment accepted an objective prerequisite as its environment proof")
+        passed.append("blocked and blocked_environment remain distinct")
+
+        environment_block = copy.deepcopy(fix_state)
+        environment_block["objective"]["closure"] = None
+        environment_block["run"].update(
+            state="blocked_environment", terminal_reason="sandbox cannot execute the toolchain",
+        )
+        environment_block["dependencies"]["D-0001"] = {
+            "kind": "environment", "locator": "sandbox toolchain", "status": "open",
+            "blocking_scope": "execution_environment", "created_at": utc_now(),
+        }
+        if validate_state(environment_block):
+            raise BdrError("a valid execution-environment block was rejected")
+
+        baseline_args = argparse.Namespace(
+            mode="fix", issue=copy.deepcopy(fix_state["objective"]["issue"]),
+            head_sha=git_value(root, "rev-parse", "HEAD"),
+            base_sha=git_value(root, "rev-parse", "HEAD"), repository="selftest",
+            pr=None, github_mode="off", max_fixed_point_passes=3,
+            max_phase_attempts=3, run_id="BDR-FIX-BASELINE-BLOCK",
+        )
+        baseline_block = new_state(root, baseline_args)
+        apply_one(baseline_block, {
+            "type": "set_baseline",
+            "baseline": {"usable": False, "reason": "JDK 25 unavailable"},
+        }, root)
+        environment_dependencies = [
+            dependency for dependency in baseline_block["dependencies"].values()
+            if dependency.get("blocking_scope") == "execution_environment"
+        ]
+        if (
+            baseline_block["run"]["state"] != "blocked_environment"
+            or len(environment_dependencies) != 1
+            or validate_state(baseline_block)
+        ):
+            raise BdrError("unusable fix baseline did not create an execution-environment dependency")
+
+        human_stop = copy.deepcopy(fix_state)
+        human_stop["objective"]["closure"] = None
+        human_stop["run"].update(state="needs_human", terminal_reason="intended behavior is ambiguous")
+        human_stop["decisions"]["Q-0001"] = {
+            "slice": "S-0001", "question": "Which public behavior is intended?",
+            "alternatives": ["preserve A", "adopt B"], "blast_radius": "root contract",
+            "owner": "developer", "evidence": ["E-0001"], "status": "open",
+            "created_at": utc_now(),
+        }
+        if validate_state(human_stop):
+            raise BdrError("a valid needs_human stop was rejected")
+
+        not_reproduced = copy.deepcopy(fix_state)
+        not_reproduced["run"].update(
+            state="not_reproduced", terminal_reason="focused reproduction attempts remained green",
+        )
+        not_reproduced["objective"].update(exposure=None, rescans=[], closure=None)
+        not_reproduced["slices"]["S-0001"]["phase_attempts"] = []
+        not_reproduced["slices"]["S-0001"]["deliveries"] = []
+        not_reproduced["findings"]["F-0001"]["resolution"] = None
+        not_reproduced["evidence"]["E-NOT-REPRODUCED"] = {
+            "kind": "test", "claim": "root reproduction was attempted but did not fail",
+            "commands": [{
+                "command": "focused-reproduction", "exit_code": 0,
+                "output_digest": "sha256:not-reproduced",
+            }],
+        }
+        if validate_state(not_reproduced):
+            raise BdrError("a valid not_reproduced stop was rejected")
+        passed.append("legal fix-mode non-success terminal states")
+
+        from unittest import mock
+
+        repository_metadata = {"id": "R_repository", "nameWithOwner": "owner/repo"}
+        issue_metadata = {
+            "number": 123, "url": "https://github.com/owner/repo/issues/123",
+            "id": "I_issue", "title": "Pinned defect", "body": "Reproduction details",
+            "updatedAt": "2026-08-20T00:00:00Z",
+        }
+        original_run_command = run_command
+        gh_commands: list[list[str]] = []
+
+        def fake_gh(command: list[str], cwd: Path, required: bool = True, **_: Any) -> subprocess.CompletedProcess[str]:
+            if command[0] != "gh":
+                return original_run_command(command, cwd, required=required)
+            gh_commands.append(command)
+            payload = repository_metadata if command[1:3] == ["repo", "view"] else issue_metadata
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+        fix_args = argparse.Namespace(
+            mode="fix", issue="123", pr=None, base_sha=None, head_sha=None,
+            github_mode=None, repository=None, run_id=None,
+            max_fixed_point_passes=3, max_phase_attempts=3,
+        )
+        with (
+            mock.patch.object(shutil, "which", return_value="/trusted/fake-gh"),
+            mock.patch.object(sys.modules[__name__], "run_command", side_effect=fake_gh),
+        ):
+            resolve_init_args(fix_args, root)
+        if (
+            fix_args.issue.get("repository") != "owner/repo"
+            or fix_args.issue.get("repository_id") != "R_repository"
+            or fix_args.issue.get("node_id") != "I_issue"
+            or fix_args.base_sha != fix_args.head_sha
+            or fix_args.github_mode != "off"
+            or fix_args.issue.get("content_sha256")
+            != digest({"title": issue_metadata["title"], "body": issue_metadata["body"]})
+            or [command[1:3] for command in gh_commands] != [["repo", "view"], ["issue", "view"]]
+        ):
+            raise BdrError("read-only fake-gh issue initialization did not pin the objective")
+        passed.append("read-only GitHub issue pinning")
 
         upgraded_legacy_history = copy.deepcopy(state)
         upgraded_legacy_history["minimum_validator_version"] = LEAN_GATE_MINIMUM_VERSION
@@ -5499,6 +7004,27 @@ def resolve_init_args(args: argparse.Namespace, root: Path) -> None:
     graft_errors = git_graft_errors(root)
     if graft_errors:
         raise BdrError("; ".join(graft_errors))
+    mode = getattr(args, "mode", "refactor")
+    issue_selector = getattr(args, "issue", None)
+    if mode == "fix":
+        if args.pr:
+            raise BdrError("fix mode accepts a GitHub issue, not a PR")
+        if not isinstance(issue_selector, str):
+            raise BdrError("fix mode requires --issue NUMBER_OR_URL")
+        if args.base_sha or args.head_sha:
+            raise BdrError("fix mode pins both base and head to the checked-out HEAD")
+        if args.github_mode not in {None, "off"}:
+            raise BdrError("fix mode is read-only on GitHub and requires projection mode off")
+        actual_head = canonical_commit_oid(root, "HEAD", "checked-out HEAD")
+        args.base_sha = actual_head
+        args.head_sha = actual_head
+        args.issue = gh_issue_metadata(root, issue_selector)
+        args.github_mode = "off"
+        args.pr = None
+        return
+    if issue_selector is not None:
+        raise BdrError("--issue is available only with --mode fix")
+    args.github_mode = args.github_mode or "outbox"
     selector = args.pr
     metadata: dict[str, Any] | None = None
     if selector and (not args.base_sha or not args.head_sha):
@@ -5548,6 +7074,8 @@ def command_init(args: argparse.Namespace) -> int:
 
 def command_migrate(args: argparse.Namespace) -> int:
     root = git_root(Path.cwd())
+    if getattr(args, "mode", "refactor") != "refactor":
+        raise BdrError("legacy migration creates refactor trackers; start a new tracker for fix mode")
     resolve_init_args(args, root)
     legacy_path = state_path(args.from_path, root)
     legacy = legacy_load(legacy_path)
@@ -5634,8 +7162,15 @@ def command_status(args: argparse.Namespace) -> int:
     state = checked_state(state_path(args.state, root), root)
     document = status_document(state)
     if args.next:
-        document = {"revision": state["revision"], "run_state": state["run"]["state"], "next": document["next"]}
-    print(json.dumps(document, indent=2))
+        document = {
+            "revision": state["revision"],
+            "run_state": state["run"]["state"],
+            "next": derive_next_action(state),
+        }
+    if tracker_mode(state) == "fix" and not args.next and not args.json:
+        print(render_fix_status(document))
+    else:
+        print(json.dumps(document, indent=2))
     return 0
 
 
@@ -5734,6 +7269,27 @@ def command_audit(args: argparse.Namespace) -> int:
 def command_stale_check(args: argparse.Namespace) -> int:
     root = git_root(Path.cwd())
     state = checked_state(state_path(args.state, root), root)
+    if tracker_mode(state) == "fix":
+        objective = state.get("objective") or {}
+        expected_issue = objective.get("issue")
+        if not isinstance(expected_issue, dict):
+            raise BdrError("fix tracker has no pinned issue metadata")
+        current = gh_issue_metadata(root, expected_issue["url"])
+        keys = (
+            "repository", "repository_id", "number", "node_id", "url", "updated_at", "content_sha256",
+        )
+        expected = {key: expected_issue.get(key) for key in keys}
+        observed = {key: current.get(key) for key in keys}
+        stale = expected != observed
+        print(json.dumps({
+            "stale": stale,
+            "mode": "fix",
+            "issue": expected_issue["url"],
+            "starting_head_sha": state["source"]["starting_head_sha"],
+            "expected": expected,
+            "observed": observed,
+        }, indent=2))
+        return 3 if stale else 0
     pr = state["source"].get("pr")
     if not isinstance(pr, dict):
         raise BdrError("tracker has no resolvable PR metadata; staleness must be checked by the host")
@@ -5971,6 +7527,90 @@ def command_examples(_: argparse.Namespace) -> int:
                 }],
             },
         },
+        "fix_add_root_slice": {
+            "type": "add_slice", "id": "S-0001", "name": "root boundary",
+            "merge_policy": "required",
+            "boundary": {
+                "authority": "authoritative producer", "fact": "missing root fact",
+                "consumer_decision": "root acceptance decision",
+            },
+            "depends_on": [], "collapse_predictions": {}, "operational_obligations": [],
+            "objective_scope": {
+                "classification": "root", "parent": "O-0001", "relation": "root",
+                "evidence": "E-ROOT-SCOPE",
+            },
+        },
+        "fix_add_root_finding": {
+            "type": "add_finding", "id": "F-0001", "title": "selected issue symptom",
+            "site": "Root.java:42", "merge_blocking": True,
+            "missing_fact": {
+                "authority": "authoritative producer", "fact": "missing root fact",
+                "consumer_decision": "root acceptance decision", "inferred_from": "arrival order",
+                "initial_shape": "concurrency", "normalized_as": "concurrency_order",
+            },
+            "fix_direction": "represent and route the authoritative fact",
+            "objective_scope": {
+                "classification": "root", "parent": "O-0001", "relation": "root",
+                "evidence": "E-ROOT-SCOPE",
+            },
+        },
+        "fix_add_out_of_scope_finding": {
+            "type": "add_finding", "id": "F-0017", "title": "unrelated observation",
+            "site": "Other.java:17", "merge_blocking": False,
+            "missing_fact": {
+                "authority": "other producer", "fact": "unrelated fact",
+                "consumer_decision": "unrelated decision", "inferred_from": "legacy state",
+                "initial_shape": "direct", "normalized_as": "direct",
+            },
+            "fix_direction": "record for a separate objective",
+            "objective_scope": {
+                "classification": "out_of_scope", "parent": "S-0001",
+                "relation": "observed", "evidence": "E-OBSERVATION",
+            },
+        },
+        "fix_record_objective_exposure": {
+            "type": "record_objective_exposure", "proof_id": "root-regression-test",
+            "assertion_fingerprint": "expected root behavior but observed defect",
+            "evidence": "E-ROOT-EXPOSE", "behavioral_production_unchanged": True,
+        },
+        "fix_promote_observed_finding": {
+            "type": "promote_finding_to_required", "finding": "F-0017",
+            "objective_scope": {
+                "classification": "required", "parent": "S-0001",
+                "relation": "dependency", "evidence": "E-ROOT-CLOSURE-NECESSITY",
+            },
+        },
+        "fix_finish_falsify_review": {
+            "type": "finish_phase", "slice": "S-0001", "phase": "falsify", "result": "passed",
+            "gate": {
+                "saturate_evidence": "E-SATURATE",
+                "finding_verdicts": {"F-0001": "fixed"}, "rescan": {"performed": True},
+                "objective_scope_review": {
+                    "performed": True, "attributed_findings": ["F-0001"],
+                    "out_of_scope_changes": [],
+                },
+                "failure_channel_review": {
+                    "performed": True, "expected_failures": [],
+                    "introduced_or_broadened_exceptions": [],
+                },
+            },
+        },
+        "fix_record_root_rescan": {
+            "type": "record_objective_rescan",
+            "rescan": {
+                "new_required_findings": [], "out_of_scope_findings": ["F-0017"],
+                "unresolved_required": 0, "evidence": "E-ROOT-RESCAN",
+            },
+        },
+        "fix_record_root_closure": {
+            "type": "record_objective_closure",
+            "closure": {
+                "proof_id": "root-regression-test", "root_passing_evidence": "E-ROOT-GREEN",
+                "regression_evidence": "E-REGRESSIONS-GREEN",
+                "aggregate_counterfactual_evidence": "E-AGGREGATE-RED",
+                "stale_check_evidence": "E-PINS-CURRENT",
+            },
+        },
     }
     print(json.dumps(examples, indent=2))
     return 0
@@ -5988,12 +7628,14 @@ def add_mutation_arguments(parser: argparse.ArgumentParser) -> None:
 
 def add_init_arguments(parser: argparse.ArgumentParser) -> None:
     add_state_argument(parser)
+    parser.add_argument("--mode", choices=("refactor", "fix"), default="refactor")
+    parser.add_argument("--issue", help="same-repository GitHub issue number or URL; read-only and fix mode only")
     parser.add_argument("--pr", help="GitHub PR number/URL, or 'current'; resolved and pinned with gh")
     parser.add_argument("--base-sha")
     parser.add_argument("--head-sha")
     parser.add_argument("--repository")
     parser.add_argument("--run-id")
-    parser.add_argument("--github-mode", choices=("off", "outbox", "sync"), default="outbox")
+    parser.add_argument("--github-mode", choices=("off", "outbox", "sync"))
     parser.add_argument("--max-fixed-point-passes", type=int, default=3)
     parser.add_argument("--max-phase-attempts", type=int, default=3)
     parser.add_argument("--actor", default=os.environ.get("BDR_ACTOR", "agent"))
@@ -6024,6 +7666,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = commands.add_parser("status", help="show derived progress")
     add_state_argument(status)
+    status.add_argument("--json", action="store_true", help="render the complete machine-readable status projection")
     status.add_argument("--next", action="store_true", help="show only the next legal action")
     status.set_defaults(handler=command_status)
 

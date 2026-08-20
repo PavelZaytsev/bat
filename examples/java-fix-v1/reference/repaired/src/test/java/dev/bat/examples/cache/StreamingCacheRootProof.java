@@ -1,0 +1,25 @@
+package dev.bat.examples.cache;
+
+public final class StreamingCacheRootProof {
+    public static void main(String[] args) {
+        var cache = new StreamingCache<String>();
+        var coordinator = new RetryCoordinator();
+        var oldAttempt = cache.beginRefresh();
+        var activeAttempt = cache.beginRefresh();
+
+        var stale = coordinator.complete(cache, oldAttempt, new CacheOutcome.Found<>("old"));
+        var staleRejected = stale == CompletionDisposition.STALE
+                && cache.visible() instanceof CacheOutcome.Missing<?>;
+        var committed = coordinator.complete(cache, activeAttempt, new CacheOutcome.Missing<>());
+        var missRemainedAValue = committed == CompletionDisposition.COMMITTED
+                && cache.visible() instanceof CacheOutcome.Missing<?>;
+
+        if (!staleRejected) {
+            throw new AssertionError(
+                    "stale completion must be rejected without changing the visible result");
+        }
+        if (!missRemainedAValue) {
+            throw new AssertionError("expected backend miss must remain a domain value");
+        }
+    }
+}
