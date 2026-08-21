@@ -29,6 +29,18 @@ The current `main` path requires:
 
 See [`INSTALLATION.md`](INSTALLATION.md) for the complete installation and runtime prerequisites.
 
+### Claude Code and Zed's Claude Agent
+
+Install or refresh BAT for both with one command:
+
+```bash
+bin/bat-claude-install
+```
+
+Start a new Claude session or Zed Claude Agent thread, then invoke `/bat:fix` with a same-repository
+GitHub issue URL or number. The installer handles Claude's user-scope plugin registration; no Zed
+configuration is required.
+
 ### BDR engine
 
 The deterministic BDR state/evidence engine is exposed through `bin/bdr`.

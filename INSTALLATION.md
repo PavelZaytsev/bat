@@ -86,7 +86,17 @@ workflow and requires a separate explicit authorization.
 
 ## Claude Code
 
-For development, load the repository directly for one session:
+For a personal installation—including Zed's Claude Agent—run the one-command installer from the
+BAT checkout:
+
+```bash
+bin/bat-claude-install
+```
+
+The command installs or refreshes BAT at Claude user scope. Start a new Claude Code session or Zed
+Claude Agent thread after it completes. No Zed setting or manual marketplace setup is required.
+
+For development of BAT itself, load the working tree directly for one session:
 
 ```bash
 claude --plugin-dir /absolute/path/to/bat
