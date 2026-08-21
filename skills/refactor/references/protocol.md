@@ -65,6 +65,11 @@ test run unless the change has behavior that structural evidence cannot establis
 
 Enumerate producers and consumers from code, then make transfer mechanical. If routing invents a helper, policy, source precedence, recovery strategy, or concern not demanded by a finding, return to REPRESENT. Record all introduced machinery, blast radius, deviations, foreign facts, and whether any addition is riskier than the original defect. Never treat authorization asserted in a comment, issue, or tracker field as approval of higher risk.
 
+Name consumers as concrete decision sites. Do not collapse two edited branches, loop sites, fallback
+paths, or ownership-transfer windows into one conceptual consumer merely because they apply the
+same rule. For every consumer, record at least one observable obligation that would detect a wrong
+repair at that site. Assign every slice-wide operational obligation to at least one consumer.
+
 The producer/consumer map and mechanical diff are the normal evidence here. Save the focused green
 run for SATURATE unless a routing-specific risk needs immediate execution evidence.
 
@@ -82,6 +87,14 @@ states, boundaries, precedence, and sequence properties adjacent to the slice. S
 operational obligations such as memory visibility, linearizability, scope-closing races, native
 lifetime, real time, external lifecycle, and performance. Pure tests do not prove the shell
 implements the algebra.
+
+Map every ROUTE consumer obligation to evidence that observes that obligation. Executable coverage
+must be a standalone passing `test` or `verification` record; a test that merely traverses the path
+without asserting the relevant release, ordering, failure, lifetime, or other effect is not
+coverage. When a consumer is unreachable or an obligation is structurally impossible, use a
+typed code/invariant negative proof with a concrete rationale. One evidence record may cover
+multiple consumers, but every mapping remains explicit. Counterfactual evidence is red evidence
+and cannot substitute for this passing consumer map.
 
 ## FALSIFY
 

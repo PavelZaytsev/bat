@@ -388,7 +388,8 @@ Add the following phase fields:
   the attempt began;
   `failed_at_assertion:true`; nonempty `assertion_fingerprint`; nonempty `input_space` list.
 - **REPRESENT:** `behavior_changed:false`; nonempty `artifacts` list.
-- **ROUTE:** nonempty `producers` and `consumers`; `predictions_frozen:true`;
+- **ROUTE:** nonempty `producers` and `consumers`; `consumer_obligations` keyed exactly by every
+  consumer, with a nonempty unique claim list for each consumer; `predictions_frozen:true`;
   `new_abstraction_introduced:false`; `introduced` list, including `[]` when empty. Every item
   needs `risk.comparison` of `lower`, `equivalent`, `higher`, or `unknown`. `unknown` cannot pass.
   `higher` needs existing `human_approval` evidence or
@@ -399,7 +400,12 @@ Add the following phase fields:
   pass. Record a nonempty `died` list or nonempty `no_death_expected`. Prefer structural death;
   do not use the latter to excuse an ineffective representation.
 - **SATURATE:** nonempty `structural_tests`; `operational_proofs` with exactly every slice
-  `operational_obligations` key and existing evidence IDs as values; `input_space_covered:true`.
+  `operational_obligations` key and existing evidence IDs as values; `consumer_coverage` keyed
+  exactly by ROUTE consumer and then by that consumer's obligation. Each leaf is either
+  `{"kind":"executable","evidence":"E-..."}` naming standalone passing `test`/`verification`
+  evidence, or `{"kind":"negative_proof","evidence":"E-...","rationale":"..."}` naming a
+  `code_read`/`invariant` record. Counterfactual evidence is not passing consumer coverage.
+  `input_space_covered:true`.
   Its live successful gate evidence may also serve as a fixed/split finding's `passing_test` during
   the linked FALSIFY attempt and as that slice's delivery evidence after FALSIFY passes; the
   separate `counterfactual_test` requirement is unchanged.
@@ -412,7 +418,13 @@ Add the following phase fields:
   the standalone `finish_phase`. Every fixed/split finding separately requires passing and
   counterfactual evidence.
 
-The tracker schema remains V2. A fully command-backed 2.1 phase history with explicit
+The tracker schema remains V2. Validator 2.4 adds the ROUTE/SATURATE consumer-coverage contract.
+Completing either phase under 2.4 raises `minimum_validator_version` to 2.4.0. A run resumed from an
+older validator that still needs ROUTE, SATURATE, or FALSIFY work must rewind to ROUTE when necessary
+to enumerate concrete consumers and their obligations; historical completed trackers remain valid
+under their recorded floor.
+
+A fully command-backed 2.1 phase history with explicit
 `foreign_fact_review` records remains valid under 2.2. Finishing an existing tracker with a
 commandless REPRESENT/ROUTE/COLLAPSE gate, a FALSIFY `saturate_evidence` reference, or an omitted
 `foreign_fact_review` raises `minimum_validator_version` to 2.2.0. Reusing a SATURATE gate for a
