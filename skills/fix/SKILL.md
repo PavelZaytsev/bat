@@ -52,6 +52,14 @@ Run each required slice through the existing sequence:
 
 `EXPOSE → REPRESENT → ROUTE → COLLAPSE → SATURATE → FALSIFY`
 
+At ROUTE, enumerate consumers as concrete decision sites rather than collapsing duplicated paths
+under one conceptual label, and assign at least one observable obligation to every consumer. At
+SATURATE, map every consumer obligation to a standalone passing test/verification that observes
+that obligation, or to a justified code/invariant negative proof. A green path test that does not
+observe the claimed lifetime, release, ordering, failure, or other obligation is not coverage.
+One parameterized proof may cover multiple consumers when the mapping makes that coverage explicit.
+Do not use a whole-slice counterfactual failure as passing consumer coverage.
+
 At every fix-mode FALSIFY gate, record the required objective-scope review and failure-channel
 review described in the tracker runbook. For Java, expected business or domain outcomes should be
 values where practical. Follow the repository's convention or use the smallest domain-specific

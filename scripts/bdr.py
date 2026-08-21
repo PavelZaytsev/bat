@@ -27,10 +27,11 @@ from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
 
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 SCHEMA = "bdr.dev/tracker"
 SCHEMA_VERSION = 2
 LEAN_GATE_MINIMUM_VERSION = "2.2.0"
+CONSUMER_COVERAGE_MINIMUM_VERSION = "2.4.0"
 PHASES = ("expose", "represent", "route", "collapse", "saturate", "falsify")
 STRUCTURAL_PHASES = {"represent", "route", "collapse"}
 RUN_STATES = {
@@ -1373,6 +1374,128 @@ def command_records_valid(records: Any) -> bool:
     )
 
 
+def live_phase_gate(
+    state: dict[str, Any], slice_: dict[str, Any], phase: str,
+) -> dict[str, Any] | None:
+    attempts = slice_.get("phase_attempts", [])
+    if not isinstance(attempts, list):
+        return None
+    live_positions = live_passed_attempt_positions(slice_)
+    for position, attempt in enumerate(attempts):
+        if (
+            position in live_positions
+            and isinstance(attempt, dict)
+            and attempt.get("phase") == phase
+            and attempt.get("result") == "passed"
+        ):
+            gate = state.get("evidence", {}).get(attempt.get("gate_evidence"))
+            return gate if isinstance(gate, dict) else None
+    return None
+
+
+def consumer_obligation_errors(
+    consumers: Any, obligations: Any, slice_obligations: Any,
+) -> list[str]:
+    errors: list[str] = []
+    if (
+        not isinstance(consumers, list)
+        or not consumers
+        or any(not is_nonempty_string(consumer) for consumer in consumers)
+        or len(consumers) != len(set(consumers))
+    ):
+        return ["ROUTE consumers must be a non-empty unique decision-site list"]
+    consumer_set = set(consumers)
+    if not isinstance(obligations, dict) or set(obligations) != consumer_set:
+        return ["ROUTE consumer_obligations must exactly map every routed consumer"]
+    claimed: set[str] = set()
+    for consumer, claims in obligations.items():
+        if (
+            not isinstance(claims, list)
+            or not claims
+            or any(not is_nonempty_string(claim) for claim in claims)
+            or len(claims) != len(set(claims))
+        ):
+            errors.append(
+                f"ROUTE consumer_obligations[{consumer!r}] must be a non-empty unique claim list"
+            )
+            continue
+        claimed.update(claims)
+    required = (
+        set(slice_obligations)
+        if isinstance(slice_obligations, list)
+        and all(is_nonempty_string(obligation) for obligation in slice_obligations)
+        else set()
+    )
+    missing = required - claimed
+    if missing:
+        errors.append(
+            f"ROUTE consumer obligations do not assign slice obligations: {sorted(missing)}"
+        )
+    return errors
+
+
+def consumer_coverage_errors(
+    state: dict[str, Any], route_gate: Any, coverage: Any,
+) -> list[str]:
+    if not isinstance(route_gate, dict):
+        return ["SATURATE requires a current live ROUTE consumer map"]
+    obligations = route_gate.get("consumer_obligations")
+    if not isinstance(obligations, dict):
+        return ["SATURATE requires ROUTE consumer_obligations"]
+    if not isinstance(coverage, dict) or set(coverage) != set(obligations):
+        return ["SATURATE consumer_coverage must exactly map every routed consumer"]
+    errors: list[str] = []
+    for consumer, claims in obligations.items():
+        proof_map = coverage.get(consumer)
+        expected_claims = (
+            set(claims)
+            if isinstance(claims, list) and all(is_nonempty_string(claim) for claim in claims)
+            else set()
+        )
+        if not isinstance(proof_map, dict) or set(proof_map) != expected_claims:
+            errors.append(
+                f"SATURATE consumer_coverage[{consumer!r}] must exactly map its ROUTE obligations"
+            )
+            continue
+        for claim, proof in proof_map.items():
+            if not isinstance(proof, dict):
+                errors.append(
+                    f"SATURATE coverage for {consumer!r}/{claim!r} must be an object"
+                )
+                continue
+            unknown = set(proof) - {"kind", "evidence", "rationale"}
+            if unknown:
+                errors.append(
+                    f"SATURATE coverage for {consumer!r}/{claim!r} has unsupported fields: "
+                    f"{sorted(unknown)}"
+                )
+            kind = proof.get("kind")
+            evidence_id = proof.get("evidence")
+            if kind == "executable":
+                if not standalone_passing_verification_evidence(state, evidence_id):
+                    errors.append(
+                        f"SATURATE executable coverage for {consumer!r}/{claim!r} must reference "
+                        "a passing standalone test or verification"
+                    )
+            elif kind == "negative_proof":
+                evidence = state.get("evidence", {}).get(evidence_id)
+                if (
+                    not evidence_has_kind(state, evidence_id, {"code_read", "invariant"})
+                    or not isinstance(evidence, dict)
+                    or not is_nonempty_string(evidence.get("claim"))
+                    or not is_nonempty_string(proof.get("rationale"))
+                ):
+                    errors.append(
+                        f"SATURATE negative proof for {consumer!r}/{claim!r} requires typed "
+                        "code/invariant evidence and a rationale"
+                    )
+            else:
+                errors.append(
+                    f"SATURATE coverage for {consumer!r}/{claim!r} must be executable or negative_proof"
+                )
+    return errors
+
+
 def phase_gate_errors(state: dict[str, Any], sid: str, slice_: dict[str, Any], attempt: dict[str, Any]) -> list[str]:
     phase = attempt.get("phase")
     if attempt.get("result") != "passed":
@@ -1454,14 +1577,27 @@ def phase_gate_errors(state: dict[str, Any], sid: str, slice_: dict[str, Any], a
             errors.append("REPRESENT must name representation artifacts")
     elif phase == "route":
         for key in ("producers", "consumers"):
-            if not isinstance(gate.get(key), list) or not gate[key]:
-                errors.append(f"ROUTE must enumerate {key}")
+            items = gate.get(key)
+            if (
+                not isinstance(items, list)
+                or not items
+                or any(not is_nonempty_string(item) for item in items)
+                or len(items) != len(set(items))
+            ):
+                errors.append(f"ROUTE must enumerate {key} as unique non-empty strings")
         if gate.get("predictions_frozen") is not True:
             errors.append("ROUTE must confirm collapse predictions were frozen before routing")
         if gate.get("new_abstraction_introduced") is not False:
             errors.append("ROUTE invented an abstraction; rewind to REPRESENT")
         if not isinstance(gate.get("introduced"), list):
             errors.append("ROUTE must record introduced machinery, using [] when empty")
+        coverage_minimum = version_tuple(CONSUMER_COVERAGE_MINIMUM_VERSION)
+        if minimum is not None and coverage_minimum is not None and minimum >= coverage_minimum:
+            errors.extend(consumer_obligation_errors(
+                gate.get("consumers"),
+                gate.get("consumer_obligations"),
+                slice_.get("operational_obligations"),
+            ))
     elif phase == "collapse":
         raw_predictions = slice_.get("collapse_predictions", {})
         predictions = set(raw_predictions) if isinstance(raw_predictions, dict) else set()
@@ -1492,6 +1628,13 @@ def phase_gate_errors(state: dict[str, Any], sid: str, slice_: dict[str, Any], a
             errors.append("SATURATE operational proofs must reference existing evidence")
         if gate.get("input_space_covered") is not True:
             errors.append("SATURATE must cover the EXPOSE input space")
+        coverage_minimum = version_tuple(CONSUMER_COVERAGE_MINIMUM_VERSION)
+        if minimum is not None and coverage_minimum is not None and minimum >= coverage_minimum:
+            errors.extend(consumer_coverage_errors(
+                state,
+                live_phase_gate(state, slice_, "route"),
+                gate.get("consumer_coverage"),
+            ))
     elif phase == "falsify":
         saturate_supplied = "saturate_evidence" in gate
         saturate_evidence = gate.get("saturate_evidence")
@@ -1873,9 +2016,15 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
             specific = {
                 "expose": {"finding_id", "test", "baseline_ref", "failed_at_assertion", "assertion_fingerprint", "input_space"},
                 "represent": {"behavior_changed", "artifacts"},
-                "route": {"producers", "consumers", "predictions_frozen", "new_abstraction_introduced", "introduced"},
+                "route": {
+                    "producers", "consumers", "consumer_obligations", "predictions_frozen",
+                    "new_abstraction_introduced", "introduced",
+                },
                 "collapse": {"prediction_verdicts", "died", "no_death_expected"},
-                "saturate": {"structural_tests", "operational_proofs", "input_space_covered"},
+                "saturate": {
+                    "structural_tests", "operational_proofs", "consumer_coverage",
+                    "input_space_covered",
+                },
                 "falsify": {
                     "finding_verdicts", "rescan", "saturate_evidence",
                     "objective_scope_review", "failure_channel_review",
@@ -1896,6 +2045,18 @@ def validate_state(state: Any) -> list[tuple[str, str]]:
                 add_error(
                     errors, "V005",
                     f"phase gate {evidence_id} uses SATURATE reuse below validator {LEAN_GATE_MINIMUM_VERSION}",
+                )
+            if (
+                ("consumer_obligations" in value or "consumer_coverage" in value)
+                and (
+                    minimum is None
+                    or minimum < version_tuple(CONSUMER_COVERAGE_MINIMUM_VERSION)  # type: ignore[operator]
+                )
+            ):
+                add_error(
+                    errors, "V005",
+                    f"phase gate {evidence_id} uses consumer coverage below validator "
+                    f"{CONSUMER_COVERAGE_MINIMUM_VERSION}",
                 )
             gate_validator = version_tuple(value.get("validator_version"))
             if "validator_version" in value and (
@@ -3533,6 +3694,9 @@ def apply_one(
         if result == "passed" and phase == "falsify":
             gate["validator_version"] = VERSION
             require_validator_version(state, VERSION)
+        if result == "passed" and phase in {"route", "saturate"}:
+            gate["validator_version"] = CONSUMER_COVERAGE_MINIMUM_VERSION
+            require_validator_version(state, CONSUMER_COVERAGE_MINIMUM_VERSION)
         gate["kind"] = "phase_gate"
         gate["phase"] = phase
         gate["slice"] = slice_id
@@ -5212,6 +5376,16 @@ def fix_fixture_state(root: Path) -> dict[str, Any]:
     state["findings"]["F-0001"]["objective_scope"] = {
         "classification": "root", "parent": "O-0001", "relation": "root", "evidence": "E-0001",
     }
+    state["evidence"]["E-0022"]["consumer_obligations"] = {
+        "release": ["release decision observes explicit ownership"],
+    }
+    state["evidence"]["E-0024"]["consumer_coverage"] = {
+        "release": {
+            "release decision observes explicit ownership": {
+                "kind": "executable", "evidence": "E-0002",
+            },
+        },
+    }
     falsify = state["evidence"]["E-0025"]
     falsify["validator_version"] = VERSION
     falsify["saturate_evidence"] = "E-0024"
@@ -5300,11 +5474,94 @@ def selftest() -> list[str]:
             raise BdrError("safe command-backed 2.1.0 tracker is no longer valid")
         passed.append("safe command-backed 2.1.0 tracker compatibility")
 
+        historical_23 = copy.deepcopy(state)
+        historical_23["minimum_validator_version"] = "2.3.0"
+        historical_23["fixed_point"]["passes"][0]["commands"] = [{
+            "command": "fixture-final-suite", "exit_code": 0,
+            "output_digest": "sha256:historical-final-suite",
+        }]
+        if validate_state(historical_23):
+            raise BdrError("completed 2.3.0 tracker without consumer coverage is no longer valid")
+        passed.append("completed 2.3 tracker remains valid without retrospective consumer coverage")
+
         fix_state = fix_fixture_state(root)
         fix_errors = validate_state(fix_state)
         if fix_errors:
             raise BdrError("fix-mode fixture is not valid: " + render_validation(fix_errors))
         passed.append("bounded fix objective fixture")
+
+        incomplete_consumer_coverage = copy.deepcopy(fix_state)
+        consumer_release_obligation = "allocated slices release when registration throws"
+        incomplete_consumer_coverage["slices"]["S-0001"]["operational_obligations"] = [
+            consumer_release_obligation,
+        ]
+        incomplete_consumer_coverage["evidence"]["E-0022"].update({
+            "consumers": ["retained path", "oversize fallback"],
+            "consumer_obligations": {
+                "retained path": [consumer_release_obligation],
+                "oversize fallback": [consumer_release_obligation],
+            },
+        })
+        incomplete_consumer_coverage["evidence"]["E-0024"]["operational_proofs"] = {
+            consumer_release_obligation: "E-0002",
+        }
+        incomplete_consumer_coverage["evidence"]["E-0024"]["consumer_coverage"] = {
+            "retained path": {
+                consumer_release_obligation: {
+                    "kind": "executable", "evidence": "E-0002",
+                },
+            },
+        }
+        if "V005" not in {rule for rule, _ in validate_state(incomplete_consumer_coverage)}:
+            raise BdrError("multi-consumer SATURATE accepted a missing consumer proof")
+
+        counterfactual_only_coverage = copy.deepcopy(incomplete_consumer_coverage)
+        counterfactual_only_coverage["evidence"]["E-0024"]["consumer_coverage"][
+            "oversize fallback"
+        ] = {
+            consumer_release_obligation: {
+                "kind": "executable", "evidence": "E-0003",
+            },
+        }
+        if "V005" not in {rule for rule, _ in validate_state(counterfactual_only_coverage)}:
+            raise BdrError("whole-slice counterfactual was accepted as consumer passing coverage")
+
+        complete_consumer_coverage = copy.deepcopy(counterfactual_only_coverage)
+        complete_consumer_coverage["evidence"]["E-0033"] = {
+            "kind": "test",
+            "claim": "oversize fallback releases allocated slices when registration throws",
+            "commands": [{
+                "command": "fixture-oversize-leak-test", "exit_code": 0,
+                "output_digest": "sha256:oversize-leak-green",
+            }],
+        }
+        complete_consumer_coverage["evidence"]["E-0024"]["consumer_coverage"][
+            "oversize fallback"
+        ][consumer_release_obligation]["evidence"] = "E-0033"
+        if validate_state(complete_consumer_coverage):
+            raise BdrError("complete multi-consumer obligation coverage was rejected")
+
+        negative_consumer_coverage = copy.deepcopy(complete_consumer_coverage)
+        negative_consumer_coverage["evidence"]["E-0034"] = {
+            "kind": "invariant",
+            "claim": "oversize fallback cannot allocate slices before registration",
+        }
+        negative_consumer_coverage["evidence"]["E-0024"]["consumer_coverage"][
+            "oversize fallback"
+        ][consumer_release_obligation] = {
+            "kind": "negative_proof",
+            "evidence": "E-0034",
+            "rationale": "control flow returns before allocation at this consumer",
+        }
+        if validate_state(negative_consumer_coverage):
+            raise BdrError("justified consumer negative proof was rejected")
+        missing_negative_rationale = copy.deepcopy(negative_consumer_coverage)
+        missing_negative_rationale["evidence"]["E-0024"]["consumer_coverage"][
+            "oversize fallback"
+        ][consumer_release_obligation].pop("rationale")
+        if "V005" not in {rule for rule, _ in validate_state(missing_negative_rationale)}:
+            raise BdrError("consumer negative proof without rationale was accepted")
+        passed.append("multi-consumer obligation coverage rejects partial and counterfactual-only proof")
 
         missing_failure_review = copy.deepcopy(fix_state)
         missing_failure_review["evidence"]["E-0025"].pop("failure_channel_review")
@@ -6522,10 +6779,24 @@ def selftest() -> list[str]:
             "represent": {"behavior_changed": False, "artifacts": ["ReleaseCapability"]},
             "route": {
                 "producers": ["owner"], "consumers": ["close"], "predictions_frozen": True,
+                "consumer_obligations": {
+                    "close": ["close observes explicit release authority"],
+                },
                 "new_abstraction_introduced": False, "introduced": [],
             },
             "collapse": {"prediction_verdicts": {}, "died": [], "no_death_expected": "direct replacement"},
-            "saturate": {"structural_tests": ["borrower cannot close"], "operational_proofs": {}, "input_space_covered": True},
+            "saturate": {
+                "structural_tests": ["borrower cannot close"],
+                "operational_proofs": {},
+                "consumer_coverage": {
+                    "close": {
+                        "close observes explicit release authority": {
+                            "kind": "executable", "evidence": "E-0002",
+                        },
+                    },
+                },
+                "input_space_covered": True,
+            },
             "falsify": {"finding_verdicts": {"F-0001": "fixed"}, "rescan": {"performed": True}},
         }
         saturate_evidence: str | None = None
@@ -7472,6 +7743,10 @@ def command_examples(_: argparse.Namespace) -> int:
             "type": "finish_phase", "slice": "S-0001", "phase": "route", "result": "passed",
             "gate": {
                 "producers": ["allocation owner"], "consumers": ["close", "retain"],
+                "consumer_obligations": {
+                    "close": ["backing allocation remains live for every borrower"],
+                    "retain": ["retained allocation remains live until its owner releases it"],
+                },
                 "predictions_frozen": True, "new_abstraction_introduced": False, "introduced": [],
             },
         },
@@ -7493,6 +7768,18 @@ def command_examples(_: argparse.Namespace) -> int:
                 "structural_tests": ["borrower cannot close", "owner can close exactly once"],
                 "operational_proofs": {
                     "backing allocation remains live for every borrower": "E-OPERATIONAL",
+                },
+                "consumer_coverage": {
+                    "close": {
+                        "backing allocation remains live for every borrower": {
+                            "kind": "executable", "evidence": "E-CLOSE-PROOF",
+                        },
+                    },
+                    "retain": {
+                        "retained allocation remains live until its owner releases it": {
+                            "kind": "executable", "evidence": "E-RETAIN-PROOF",
+                        },
+                    },
                 },
                 "input_space_covered": True,
             },
