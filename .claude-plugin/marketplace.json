@@ -1,0 +1,15 @@
+{
+  "name": "bat-local",
+  "description": "Local one-command installation source for the BAT Claude plugin.",
+  "owner": {
+    "name": "BAT Contributors"
+  },
+  "plugins": [
+    {
+      "name": "bat",
+      "source": "./",
+      "description": "BAT implements bounded issue fixing and Boundary-Driven Refactoring with evidence-backed phase gates and a resumable audit trail.",
+      "version": "0.6.1"
+    }
+  ]
+}

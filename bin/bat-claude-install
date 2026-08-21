@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -eu
+
+BAT_BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 "$BAT_BIN_DIR/../scripts/install_claude.py" "$@"
+fi
+
+if command -v python >/dev/null 2>&1; then
+  exec python "$BAT_BIN_DIR/../scripts/install_claude.py" "$@"
+fi
+
+echo "bat-claude-install: Python 3.10 or newer is required" >&2
+exit 127

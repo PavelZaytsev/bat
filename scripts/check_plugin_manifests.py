@@ -57,10 +57,12 @@ def require_safe_relative(path_text: str, source: str) -> None:
 def validate() -> None:
     codex_path = ".codex-plugin/plugin.json"
     claude_path = ".claude-plugin/plugin.json"
-    marketplace_path = "adapters/openai-marketplace/marketplace.json"
+    claude_marketplace_path = ".claude-plugin/marketplace.json"
+    openai_marketplace_path = "adapters/openai-marketplace/marketplace.json"
     codex = load_object(codex_path)
     claude = load_object(claude_path)
-    marketplace = load_object(marketplace_path)
+    claude_marketplace = load_object(claude_marketplace_path)
+    openai_marketplace = load_object(openai_marketplace_path)
 
     codex_name = required_text(codex, "name", codex_path)
     codex_version = required_text(codex, "version", codex_path)
@@ -86,20 +88,61 @@ def validate() -> None:
             )
     required_text(claude, "description", claude_path)
 
-    required_text(marketplace, "name", marketplace_path)
-    plugins = marketplace.get("plugins")
+    claude_marketplace_name = required_text(
+        claude_marketplace, "name", claude_marketplace_path
+    )
+    if claude_marketplace_name != "bat-local":
+        raise ContractError(
+            f"{claude_marketplace_path}: name must remain 'bat-local' for the installer"
+        )
+    required_text(claude_marketplace, "description", claude_marketplace_path)
+    claude_plugins = claude_marketplace.get("plugins")
+    if not isinstance(claude_plugins, list) or not claude_plugins:
+        raise ContractError(f"{claude_marketplace_path}: plugins must be a non-empty array")
+    claude_matches = [
+        plugin
+        for plugin in claude_plugins
+        if isinstance(plugin, dict) and plugin.get("name") == codex_name
+    ]
+    if len(claude_matches) != 1:
+        raise ContractError(
+            f"{claude_marketplace_path}: expected exactly one plugin named "
+            f"{codex_name!r}, found {len(claude_matches)}"
+        )
+    claude_source = required_text(
+        claude_matches[0], "source", f"{claude_marketplace_path}: plugin source"
+    )
+    if claude_source != "./":
+        raise ContractError(f"{claude_marketplace_path}: bat plugin source must be './'")
+    claude_marketplace_version = required_text(
+        claude_matches[0], "version", f"{claude_marketplace_path}: bat plugin"
+    )
+    if claude_marketplace_version != codex_version:
+        raise ContractError(
+            f"{claude_marketplace_path}: version {claude_marketplace_version!r} does not "
+            f"match {codex_path} {codex_version!r}"
+        )
+
+    required_text(openai_marketplace, "name", openai_marketplace_path)
+    plugins = openai_marketplace.get("plugins")
     if not isinstance(plugins, list) or not plugins:
-        raise ContractError(f"{marketplace_path}: plugins must be a non-empty array")
+        raise ContractError(f"{openai_marketplace_path}: plugins must be a non-empty array")
     matches = [plugin for plugin in plugins if isinstance(plugin, dict) and plugin.get("name") == codex_name]
     if len(matches) != 1:
         raise ContractError(
-            f"{marketplace_path}: expected exactly one plugin named {codex_name!r}, found {len(matches)}"
+            f"{openai_marketplace_path}: expected exactly one plugin named {codex_name!r}, found {len(matches)}"
         )
     source = matches[0].get("source")
     if not isinstance(source, dict) or source.get("source") != "local":
-        raise ContractError(f"{marketplace_path}: {codex_name} must use a local source object")
-    marketplace_plugin_path = required_text(source, "path", f"{marketplace_path}: plugin source")
-    require_safe_relative(marketplace_plugin_path, f"{marketplace_path}: plugin source")
+        raise ContractError(
+            f"{openai_marketplace_path}: {codex_name} must use a local source object"
+        )
+    marketplace_plugin_path = required_text(
+        source, "path", f"{openai_marketplace_path}: plugin source"
+    )
+    require_safe_relative(
+        marketplace_plugin_path, f"{openai_marketplace_path}: plugin source"
+    )
 
 
 def main() -> int:
