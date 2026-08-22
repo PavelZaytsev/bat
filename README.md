@@ -10,10 +10,10 @@
   <p><strong>"It's time to kill bugs and chew bubble gum... and I'm all outta gum" - BAT</strong></p>
 </div>
 
+---
+
 BAT is an experimental autonomous agentic refactoring loop built around **Boundary-Driven Refactoring
 (BDR)**: a method for finding facts that code is inferring, representing those facts explicitly at their authority boundary, routing them to the decisions that need them, and deleting the obsolete inference.
-
-
 
 ## Run it
 
@@ -118,7 +118,7 @@ After auditing the closed checkpoint, restart the same logical run without the p
 
 The direct runtime expects an explicitly configured OpenAI-compatible Chat Completions endpoint.
 Recent live work has exercised this path with Qwen3.8-27B, GPT-OSS-120B, and Gemma-family
-deployments. 
+deployments.
 
 See [`docs/direct-runtime.md`](docs/direct-runtime.md) for the current runtime contract and
 [`experiments/bdrv1/`](experiments/bdrv1/) for the recorded qualification evidence.
@@ -150,7 +150,7 @@ dependencies, evidence, foreign facts, decisions, and phase state in `.bdr/`. Tr
 treated as semantic proof: transitions require code-derived or execution-derived evidence, and the
 final repository is rescanned before completion.
 
-BDR distinguishes a locally correct patch from an honestly completed repair. 
+BDR distinguishes a locally correct patch from an honestly completed repair.
 
 The theory behind BAT is that if each discovered boundary is taken honestly through that complete loop, then repeated discovery/repair/rescan passes should drive the repository toward a fixed point rather than accumulating a collection of locally plausible patches.
 
