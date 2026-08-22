@@ -27,7 +27,7 @@ from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
 
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 SCHEMA = "bdr.dev/tracker"
 SCHEMA_VERSION = 2
 LEAN_GATE_MINIMUM_VERSION = "2.2.0"
@@ -125,6 +125,17 @@ def is_sha256(value: Any) -> bool:
         isinstance(value, str)
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+COMMAND_DIGEST_PREFIX = "sha256:"
+
+
+def is_command_digest(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith(COMMAND_DIGEST_PREFIX)
+        and is_sha256(value[len(COMMAND_DIGEST_PREFIX):])
     )
 
 
@@ -1369,7 +1380,7 @@ def command_records_valid(records: Any) -> bool:
         isinstance(item, dict)
         and is_nonempty_string(item.get("command"))
         and is_json_integer(item.get("exit_code"))
-        and (is_nonempty_string(item.get("output_digest")) or is_nonempty_string(item.get("artifact")))
+        and (is_command_digest(item.get("output_digest")) or is_nonempty_string(item.get("artifact")))
         for item in records
     )
 
@@ -3656,7 +3667,18 @@ def apply_one(
             raise BdrError(f"slice {slice_id} has incomplete dependencies: {', '.join(incomplete)}")
         maximum = int((state.get("policy") or {}).get("max_phase_attempts", 3))
         if phase_attempt_count(slice_, phase) >= maximum:
-            raise BdrError(f"slice {slice_id} reached the configured attempt bound for {phase}")
+            reason = (
+                f"slice {slice_id} exhausted the configured {phase} attempt bound "
+                f"({maximum}) without a passed gate"
+            )
+            state["run"]["state"] = "non_convergent"
+            state["run"]["terminal_reason"] = reason
+            return {
+                "slice_id": slice_id,
+                "phase": phase,
+                "non_convergent": True,
+                "terminal_reason": reason,
+            }
         pre = checkpoint(state, root, f"{slice_id}:{phase}:pre")
         state["active_operation"] = {
             "slice": slice_id,
@@ -5253,7 +5275,7 @@ def fixture_state(root: Path) -> dict[str, Any]:
     state = new_state(root, args)
     # This fixture intentionally models the fully command-backed 2.1 form.
     state["minimum_validator_version"] = "2.1.0"
-    command = [{"command": "fixture-test", "exit_code": 0, "output_digest": "sha256:fixture"}]
+    command = [{"command": "fixture-test", "exit_code": 0, "output_digest": "sha256:f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d"}]
     state["run"]["baseline"] = {"usable": True, "commands": command, "captured_at": utc_now()}
     snapshot = workspace_snapshot(root, include_content_delta=True)
     state["checkpoints"] = {
@@ -5266,14 +5288,14 @@ def fixture_state(root: Path) -> dict[str, Any]:
             "kind": "test", "claim": "finding passes",
             "commands": [{
                 "command": "fixture-passing-test", "exit_code": 0,
-                "output_digest": "sha256:passing-test",
+                "output_digest": "sha256:4af5948f8c2b652cb93a11acfc5175f7deb9b3ffe6acc20b4d35487c7d482c1a",
             }],
         },
         "E-0003": {
             "kind": "counterfactual_test", "claim": "reversion fails",
             "commands": [{
                 "command": "fixture-counterfactual", "exit_code": 1,
-                "output_digest": "sha256:counterfactual-failure",
+                "output_digest": "sha256:4b75bd0f9e4b75bf7ced3dc057937c5640726aa4eb11e1842c8b4ec18fd9e3e5",
             }],
         },
         "E-0010": {"kind": "rescan", "claim": "no new merge blockers"},
@@ -5321,7 +5343,7 @@ def fixture_state(root: Path) -> dict[str, Any]:
     for index, phase in enumerate(PHASES, 20):
         evidence_id = f"E-{index:04d}"
         phase_commands = (
-            [{"command": "fixture-expose-test", "exit_code": 1, "output_digest": "sha256:expected-failure"}]
+            [{"command": "fixture-expose-test", "exit_code": 1, "output_digest": "sha256:2a75a3f68ddda4c5f002348cb30c404a92d31a4097438e84f644d040d1e3b061"}]
             if phase == "expose" else command
         )
         state["evidence"][evidence_id] = {
@@ -5410,7 +5432,7 @@ def fix_fixture_state(root: Path) -> dict[str, Any]:
         "claim": "relevant regressions pass",
         "commands": [{
             "command": "fixture-regressions", "exit_code": 0,
-            "output_digest": "sha256:regressions",
+            "output_digest": "sha256:ae48416365cb412d676b87f3969670a61a6f25ebc460dc7dd1f8e069c69f1d5e",
         }],
     }
     state["evidence"]["E-0031"] = {
@@ -5421,7 +5443,7 @@ def fix_fixture_state(root: Path) -> dict[str, Any]:
         "starting_head_sha": state["source"]["starting_head_sha"],
         "commands": [{
             "command": "bdr stale-check", "exit_code": 0,
-            "output_digest": "sha256:stale-check",
+            "output_digest": "sha256:986a9c9bc9837bd34bb1104495559c7264db6a35c1bdce48af50ba963d5b60d5",
         }],
     }
     state["evidence"]["E-0032"] = {"kind": "rescan", "claim": "root-relevant closure is clean"}
@@ -5478,7 +5500,7 @@ def selftest() -> list[str]:
         historical_23["minimum_validator_version"] = "2.3.0"
         historical_23["fixed_point"]["passes"][0]["commands"] = [{
             "command": "fixture-final-suite", "exit_code": 0,
-            "output_digest": "sha256:historical-final-suite",
+            "output_digest": "sha256:df6a1ddfcd0575261da7f56f56fe8485c9c17808e1be4985a98ea60c34c7f93f",
         }]
         if validate_state(historical_23):
             raise BdrError("completed 2.3.0 tracker without consumer coverage is no longer valid")
@@ -5532,7 +5554,7 @@ def selftest() -> list[str]:
             "claim": "oversize fallback releases allocated slices when registration throws",
             "commands": [{
                 "command": "fixture-oversize-leak-test", "exit_code": 0,
-                "output_digest": "sha256:oversize-leak-green",
+                "output_digest": "sha256:af417a3b2bad3dc3a27bdb879ffe5d3c969a50feaef349da4aa33ee09952d74b",
             }],
         }
         complete_consumer_coverage["evidence"]["E-0024"]["consumer_coverage"][
@@ -5826,7 +5848,7 @@ def selftest() -> list[str]:
             "kind": "test", "claim": "root reproduction was attempted but did not fail",
             "commands": [{
                 "command": "focused-reproduction", "exit_code": 0,
-                "output_digest": "sha256:not-reproduced",
+                "output_digest": "sha256:d8084f960615aa2b7c977c32d60c5073d844ffd1a5459a2a073f341c9862738e",
             }],
         }
         if validate_state(not_reproduced):
@@ -5885,7 +5907,7 @@ def selftest() -> list[str]:
         lean_state["minimum_validator_version"] = LEAN_GATE_MINIMUM_VERSION
         lean_state["fixed_point"]["passes"][0]["commands"] = [{
             "command": "fixture-final-suite", "exit_code": 0,
-            "output_digest": "sha256:final-suite",
+            "output_digest": "sha256:bc119777e9d82b36a6c8a32372e229bcd9a84baea18f515ddee494474369bb29",
         }]
         for evidence_id in ("E-0021", "E-0022", "E-0023"):
             lean_state["evidence"][evidence_id].pop("commands")
@@ -5908,7 +5930,7 @@ def selftest() -> list[str]:
             for label, commands in (
                 ("empty", []),
                 ("malformed", [{"command": "fixture", "exit_code": 0}]),
-                ("failing", [{"command": "fixture", "exit_code": 1, "output_digest": "sha256:failure"}]),
+                ("failing", [{"command": "fixture", "exit_code": 1, "output_digest": "sha256:16d34b5e7bcb341ee6cb3d16495d90e93fbe57c46d3827432613210a24ebca30"}]),
             ):
                 broken = copy.deepcopy(lean_state)
                 broken["evidence"][evidence_id]["commands"] = commands
@@ -5920,7 +5942,7 @@ def selftest() -> list[str]:
             ("missing", lambda gate: gate.pop("commands")),
             ("empty", lambda gate: gate.update(commands=[])),
             ("all green", lambda gate: gate.update(commands=[{
-                "command": "fixture-expose", "exit_code": 0, "output_digest": "sha256:green",
+                "command": "fixture-expose", "exit_code": 0, "output_digest": "sha256:ba4788b226aa8dc2e6dc74248bb9f618cfa8c959e0c26c147be48f6839a0b088",
             }])),
         ):
             broken = copy.deepcopy(state)
@@ -5933,7 +5955,7 @@ def selftest() -> list[str]:
             ("missing", lambda gate: gate.pop("commands")),
             ("empty", lambda gate: gate.update(commands=[])),
             ("failing", lambda gate: gate.update(commands=[{
-                "command": "fixture-saturate", "exit_code": 1, "output_digest": "sha256:failure",
+                "command": "fixture-saturate", "exit_code": 1, "output_digest": "sha256:16d34b5e7bcb341ee6cb3d16495d90e93fbe57c46d3827432613210a24ebca30",
             }])),
         ):
             broken = copy.deepcopy(state)
@@ -5946,7 +5968,7 @@ def selftest() -> list[str]:
             ("missing", None),
             ("all green", [{
                 "command": "fixture-counterfactual", "exit_code": 0,
-                "output_digest": "sha256:unexpected-success",
+                "output_digest": "sha256:2bba8c2730d578212e5175a27bcaa2c1e095e22f248dcfdad6776874ba2f9dea",
             }]),
         ):
             broken = copy.deepcopy(state)
@@ -5962,7 +5984,7 @@ def selftest() -> list[str]:
             ("missing", None),
             ("all red", [{
                 "command": "fixture-passing-test", "exit_code": 1,
-                "output_digest": "sha256:passing-test-failure",
+                "output_digest": "sha256:96f7f93072d56857fd96cdca5fde75c4a882bff6f62d7176d6e5ea9f79dae2a2",
             }]),
         ):
             broken = copy.deepcopy(state)
@@ -5978,7 +6000,7 @@ def selftest() -> list[str]:
             ("missing", None),
             ("all red", [{
                 "command": "fixture-passing-test", "exit_code": 1,
-                "output_digest": "sha256:passing-test-failure",
+                "output_digest": "sha256:96f7f93072d56857fd96cdca5fde75c4a882bff6f62d7176d6e5ea9f79dae2a2",
             }]),
         ):
             broken = copy.deepcopy(state)
@@ -6005,7 +6027,7 @@ def selftest() -> list[str]:
             ("missing", None),
             ("failing", [{
                 "command": "fixture-baseline", "exit_code": 1,
-                "output_digest": "sha256:baseline-failure",
+                "output_digest": "sha256:485c7ddfd98e375c1092e3fbf95376fcf5a511cade680af6dfc0107405556c46",
             }]),
         ):
             broken = copy.deepcopy(state)
@@ -6077,7 +6099,7 @@ def selftest() -> list[str]:
         command_only_falsify["evidence"]["E-0025"].pop("saturate_evidence")
         command_only_falsify["evidence"]["E-0025"]["commands"] = [{
             "command": "not-a-focused-proof", "exit_code": 0,
-            "output_digest": "sha256:irrelevant-success",
+            "output_digest": "sha256:f155917eb545caff442e4ae9d7bb85f2adccb549fc43d732feb3b623bac6e977",
         }]
         if "V005" not in {rule for rule, _ in validate_state(command_only_falsify)}:
             raise BdrError("2.2 FALSIFY accepted commands as a substitute for fresh SATURATE proof")
@@ -6094,7 +6116,7 @@ def selftest() -> list[str]:
             ("empty", []),
             ("failing", [{
                 "command": "fixture-final-suite", "exit_code": 1,
-                "output_digest": "sha256:final-suite-failure",
+                "output_digest": "sha256:6b979cdfe2a352d9da3fb12390af136a3f85ce0cc78156e5935452f5a42f41dd",
             }]),
         ):
             broken = copy.deepcopy(lean_state)
@@ -6726,7 +6748,7 @@ def selftest() -> list[str]:
             "type": "set_baseline",
             "baseline": {
                 "usable": True,
-                "commands": [{"command": "fixture-baseline", "exit_code": 0, "output_digest": "sha256:baseline"}],
+                "commands": [{"command": "fixture-baseline", "exit_code": 0, "output_digest": "sha256:8ba8496a2525ae171ffd104d632dede6ef418d9b95962a9d88e2fcdbc8d48d24"}],
             },
         })
         perform({
@@ -6739,7 +6761,7 @@ def selftest() -> list[str]:
                         "kind": "test", "claim": "intermediate commit verification",
                         "commands": [{
                             "command": "fixture-passing-test", "exit_code": 0,
-                            "output_digest": "sha256:passing-test",
+                            "output_digest": "sha256:4af5948f8c2b652cb93a11acfc5175f7deb9b3ffe6acc20b4d35487c7d482c1a",
                         }],
                     },
                 },
@@ -6749,7 +6771,7 @@ def selftest() -> list[str]:
                         "kind": "counterfactual_test", "claim": "reversion fails",
                         "commands": [{
                             "command": "fixture-counterfactual", "exit_code": 1,
-                            "output_digest": "sha256:counterfactual-failure",
+                            "output_digest": "sha256:4b75bd0f9e4b75bf7ced3dc057937c5640726aa4eb11e1842c8b4ec18fd9e3e5",
                         }],
                     },
                 },
@@ -6821,12 +6843,12 @@ def selftest() -> list[str]:
             if phase == "expose":
                 gate["commands"] = [{
                     "command": "fixture-focused-expose", "exit_code": 1,
-                    "output_digest": "sha256:expose-assertion-failure",
+                    "output_digest": "sha256:052fb7e418467fc42bbe6dc49e0a5bbae916d82f418403d6f33a8705c73125ac",
                 }]
             elif phase == "saturate":
                 gate["commands"] = [{
                     "command": "fixture-focused-saturate", "exit_code": 0,
-                    "output_digest": "sha256:saturate-focused-success",
+                    "output_digest": "sha256:139c3c7b4d4f0747db5b3e2ea1a4f11f4b5471db9cbb9272e2234facc610fdc6",
                 }]
             elif phase == "falsify":
                 gate["saturate_evidence"] = saturate_evidence
@@ -6913,7 +6935,7 @@ def selftest() -> list[str]:
                 "evidence": "E-0004",
                 "commands": [{
                     "command": "fixture-final-public-suite", "exit_code": 0,
-                    "output_digest": "sha256:final-public-suite-success",
+                    "output_digest": "sha256:9f2637b585dd50afad245a341c934e1faf45dc8d648f1ce755a1dbf82106db2f",
                 }],
             },
         })
@@ -6974,6 +6996,119 @@ def selftest() -> list[str]:
         if derive_next_action(final_state).get("action") != "handoff":
             raise BdrError("completed integration run did not derive handoff")
         passed.append("full six-phase state-machine run")
+
+        for label, mutation in (
+            ("baseline", lambda broken: broken["run"]["baseline"]["commands"][0].update(
+                output_digest="sha256:dummy")),
+            ("EXPOSE gate", lambda broken: broken["evidence"]["E-0020"]["commands"][0].update(
+                output_digest="sha256:no_executable_test")),
+            ("bare hex", lambda broken: broken["evidence"]["E-0020"]["commands"][0].update(
+                output_digest="8ba8496a2525ae171ffd104d632dede6ef418d9b95962a9d88e2fcdbc8d48d24")),
+        ):
+            broken = copy.deepcopy(state)
+            mutation(broken)
+            if not validate_state(broken):
+                raise BdrError(f"{label} accepted a label in place of a command digest")
+        artifact_backed = copy.deepcopy(state)
+        record = artifact_backed["evidence"]["E-0020"]["commands"][0]
+        record.pop("output_digest")
+        record["artifact"] = "audit/expose-run.log"
+        if validate_state(artifact_backed):
+            raise BdrError("artifact-backed command record was rejected")
+        passed.append("command digests must be real sha256 digests")
+
+        bound = root / "bound"
+        bound.mkdir()
+        run_command(["git", "init", "-q"], bound)
+        run_command(["git", "config", "user.email", "bdr-selftest@example.invalid"], bound)
+        run_command(["git", "config", "user.name", "BDR Selftest"], bound)
+        (bound / "Fixture.java").write_text("final class Fixture {}\n", encoding="utf-8")
+        run_command(["git", "add", "Fixture.java"], bound)
+        run_command(["git", "commit", "-q", "-m", "base"], bound)
+        (bound / "Fixture.java").write_text("final class Fixture { int value; }\n", encoding="utf-8")
+        run_command(["git", "add", "Fixture.java"], bound)
+        run_command(["git", "commit", "-q", "-m", "head"], bound)
+        bound_args = argparse.Namespace(
+            head_sha=None, base_sha=git_value(bound, "rev-parse", "HEAD^"), repository="bound",
+            pr=None, github_mode="off", max_fixed_point_passes=3, max_phase_attempts=1,
+            run_id="BDR-BOUND",
+        )
+        bound_tracker = bound / ".bdr" / "progress.yaml"
+        write_initial(bound_tracker, new_state(bound, bound_args), {"type": "init"}, "selftest")
+        bound_revision = 0
+
+        def bound_perform(operation: dict[str, Any]) -> dict[str, Any]:
+            nonlocal bound_revision
+            changed, _ = mutate_state(
+                bound_tracker, operation, bound_revision, "selftest", bound,
+            )
+            bound_revision = changed["revision"]
+            return changed
+
+        bound_perform({
+            "type": "set_baseline",
+            "baseline": {
+                "usable": True,
+                "commands": [{
+                    "command": "fixture-baseline", "exit_code": 0, "output_digest": "sha256:8ba8496a2525ae171ffd104d632dede6ef418d9b95962a9d88e2fcdbc8d48d24",
+                }],
+            },
+        })
+        bound_perform({
+            "type": "batch",
+            "operations": [
+                {"type": "add_evidence", "id": "E-0001", "evidence": {
+                    "kind": "code_read", "claim": "K belongs here"}},
+                {
+                    "type": "add_slice", "id": "S-0001", "name": "release authority",
+                    "boundary": {
+                        "authority": "owner", "fact": "release right", "consumer_decision": "close"},
+                    "collapse_predictions": {}, "operational_obligations": [],
+                },
+                {
+                    "type": "add_finding", "id": "F-0001", "title": "implicit release",
+                    "site": "Fixture.java:1",
+                    "missing_fact": {
+                        "authority": "owner", "fact": "release right", "consumer_decision": "close",
+                        "inferred_from": "registry membership", "initial_shape": "temporal",
+                        "normalized_as": "ownership",
+                    },
+                    "fix_direction": "carry release capability",
+                },
+                {"type": "assign_finding", "finding": "F-0001", "slice": "S-0001",
+                 "k_verification": "E-0001"},
+            ],
+        })
+        bound_perform({"type": "begin_phase", "slice": "S-0001", "phase": "expose"})
+        bound_perform({
+            "type": "finish_phase", "slice": "S-0001", "phase": "expose", "result": "failed",
+            "gate": {
+                "finding_id": "F-0001",
+                "commands": [{"command": "false", "exit_code": 1, "output_digest": "sha256:8ba8496a2525ae171ffd104d632dede6ef418d9b95962a9d88e2fcdbc8d48d24"}],
+            },
+        })
+        exhausted = bound_perform({"type": "begin_phase", "slice": "S-0001", "phase": "expose"})
+        if exhausted["run"]["state"] != "non_convergent":
+            raise BdrError("exhausting the phase attempt bound did not terminate the run")
+        if not is_nonempty_string(exhausted["run"].get("terminal_reason")):
+            raise BdrError("non-convergent termination recorded no reason")
+        if exhausted.get("active_operation") is not None:
+            raise BdrError("non-convergent termination left a phase operation active")
+        if validate_state(exhausted) or journal_errors(exhausted, bound_tracker):
+            raise BdrError("non-convergent termination produced invalid state")
+        try:
+            mutate_state(
+                bound_tracker,
+                {"type": "begin_phase", "slice": "S-0001", "phase": "expose"},
+                bound_revision,
+                "selftest",
+                bound,
+            )
+            raise BdrError("a non-convergent run accepted further phase work")
+        except BdrError as exc:
+            if "accepted further phase work" in str(exc):
+                raise
+        passed.append("exhausted phase attempt bound is terminal non-convergence")
         passed.append("complete ordered delivery attribution")
         passed.append("semantic work invalidates stale deliveries")
         passed.append("runnable phases precede final delivery re-attestation")
@@ -7725,7 +7860,7 @@ def command_examples(_: argparse.Namespace) -> int:
             "gate": {
                 "commands": [{
                     "command": "focused regression test", "exit_code": 1,
-                    "output_digest": "sha256:expected-assertion-failure",
+                    "output_digest": "sha256:aed3f09ba5555ef5dc62e1a29152bcf127e703f55641f61f6200fa3a0aa1e09d",
                 }],
                 "finding_id": "F-0001", "test": "ComponentTest.releaseRequiresAuthority",
                 "baseline_ref": "run.baseline", "failed_at_assertion": True,
@@ -7763,7 +7898,7 @@ def command_examples(_: argparse.Namespace) -> int:
             "gate": {
                 "commands": [{
                     "command": "focused owner/borrower boundary tests", "exit_code": 0,
-                    "output_digest": "sha256:focused-success",
+                    "output_digest": "sha256:c3a203cf474f13d96a5720b761ae03e264abb10fd43ef836d548d72d65e17e47",
                 }],
                 "structural_tests": ["borrower cannot close", "owner can close exactly once"],
                 "operational_proofs": {
@@ -7810,7 +7945,7 @@ def command_examples(_: argparse.Namespace) -> int:
                 "commands": [{
                     "command": "project broad integration/chaos/benchmark suite",
                     "exit_code": 0,
-                    "output_digest": "sha256:final-suite-success",
+                    "output_digest": "sha256:d42ca8d12bb0fc293664b4edc955de98596f0e4d4173037c884fa6f77a76a25d",
                 }],
             },
         },
