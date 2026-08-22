@@ -7393,6 +7393,59 @@ def selftest() -> list[str]:
         if not local_lineage_errors(fixture_state(replace_repo), replace_repo):
             raise BdrError("local lineage accepted a meaningful legacy Git graft entry")
         passed.append("legacy Git graft ancestry rejection")
+
+        guide_state = fixture_state(integration)
+        guide_state["run"]["state"] = "preflighting"
+        guide_state["run"]["baseline"] = None
+        guide_state["findings"] = {}
+        guide_state["slices"] = {}
+        baseline_guide = runtime_guide(guide_state)
+        if baseline_guide.get("next", {}).get("action") != "record_baseline":
+            raise BdrError("runtime guide did not select baseline setup")
+        guide_state["run"]["baseline"] = {
+            "usable": True,
+            "commands": [{"command": "fixture", "exit_code": 0, "output_digest": "sha256:fixture"}],
+        }
+        guide_state["run"]["state"] = "auditing"
+        discovery = runtime_guide(guide_state)
+        discovery_operations = discovery.get("operation_template", {}).get("operations", [])
+        if (
+            discovery.get("next", {}).get("action") != "discover_boundaries"
+            or [item.get("type") for item in discovery_operations]
+            != ["add_evidence", "add_slice", "add_finding", "assign_finding"]
+            or len(json.dumps(discovery).encode()) > 4096
+        ):
+            raise BdrError("runtime guide did not emit a focused atomic discovery batch")
+
+        active_guide_state = fixture_state(integration)
+        active_guide_state["run"]["state"] = "executing"
+        for phase in PHASES:
+            active_guide_state["active_operation"] = {
+                "slice": "S-0001", "phase": phase, "pre_checkpoint": "CP-0001",
+                "started_at": utc_now(), "starting_revision": active_guide_state["revision"],
+            }
+            phase_guide = runtime_guide(active_guide_state)
+            if (
+                phase_guide.get("next", {}).get("action") != "finish_or_recover_phase"
+                or not isinstance(phase_guide.get("gate_template"), dict)
+                or set(phase_guide.get("semantics", {})) != {"claim", "pass_when", "route_back"}
+                or len(json.dumps(phase_guide).encode()) > 4096
+            ):
+                raise BdrError(f"runtime guide omitted the {phase} gate skeleton")
+            if phase == "route" and "consumer_obligations" not in phase_guide["gate_template"]:
+                raise BdrError("runtime guide omitted ROUTE consumer obligations")
+            if phase == "saturate" and "consumer_coverage" not in phase_guide["gate_template"]:
+                raise BdrError("runtime guide omitted SATURATE consumer coverage")
+        fix_guide_state = fix_fixture_state(integration)
+        fix_guide_state["run"]["state"] = "executing"
+        fix_guide_state["active_operation"] = {
+            "slice": "S-0001", "phase": "falsify", "pre_checkpoint": "CP-0001",
+            "started_at": utc_now(), "starting_revision": fix_guide_state["revision"],
+        }
+        fix_gate = runtime_guide(fix_guide_state).get("gate_template", {})
+        if "objective_scope_review" not in fix_gate or "failure_channel_review" not in fix_gate:
+            raise BdrError("fix-mode runtime guide omitted FALSIFY closure reviews")
+        passed.append("compact state-aware runtime guidance")
     return passed
 
 
@@ -7834,7 +7887,447 @@ def command_selftest(_: argparse.Namespace) -> int:
     return 0
 
 
-def command_examples(_: argparse.Namespace) -> int:
+def phase_semantics(phase: str) -> dict[str, Any]:
+    semantics = {
+        "expose": {
+            "claim": "The defect is cheaply reproducible at the intended assertion before production behavior changes.",
+            "pass_when": "A focused command reaches the assertion and fails with a stable fingerprint across the recorded input space.",
+            "route_back": "A setup error, crash, timeout, or missing seam is not proof; establish a safe seam or repair the oracle.",
+        },
+        "represent": {
+            "claim": "The missing fact and its invariants now have an explicit representation without changing routed behavior.",
+            "pass_when": "Artifacts encode every consumer-visible distinction while behavior remains baseline-equivalent.",
+            "route_back": "If this step needs policy, precedence, recovery, or another abstraction, make that design explicit here before routing.",
+        },
+        "route": {
+            "claim": "Every authoritative producer and relevant consumer now transfers the represented fact mechanically.",
+            "pass_when": "The producer/consumer map is complete and the explicit fact reaches each decision; legacy proxies are frozen for COLLAPSE.",
+            "route_back": "Any newly invented helper, policy, or source precedence belongs in REPRESENT; rewind instead of hiding design here.",
+        },
+        "collapse": {
+            "claim": "The obsolete inferences predicted by the slice actually died.",
+            "pass_when": "Every frozen prediction has a verdict and no inference survives; owned or foreign mechanisms are named honestly.",
+            "route_back": "A surviving inference means the representation or routing is incomplete; return to REPRESENT.",
+        },
+        "saturate": {
+            "claim": "The repaired boundary covers its decision algebra and separately discharges operational obligations.",
+            "pass_when": "One focused green selection covers the regression, adjacent cases, illegal states, and every listed obligation has proof.",
+            "route_back": "A broad suite cannot substitute for missing focused or operational proof.",
+        },
+        "falsify": {
+            "claim": "The repair is necessary, sufficient for every sibling finding, and restored exactly after the counterfactual.",
+            "pass_when": "Repair-only removal restores the EXPOSE assertion failure, final code is restored byte-for-byte, and every finding has a typed outcome.",
+            "route_back": "Workspace drift invalidates SATURATE reuse; rewind to SATURATE and rerun green verification.",
+        },
+    }
+    return semantics[phase]
+
+
+def phase_gate_guide(state: dict[str, Any], slice_id: str, phase: str) -> dict[str, Any]:
+    """Return the smallest useful gate skeleton for the active phase."""
+    slice_ = state["slices"][slice_id]
+    command = {
+        "commands": [{
+            "command": "<command that actually ran>",
+            "exit_code": 0,
+            "output_digest": "sha256:<digest-or-stable-summary>",
+        }],
+    }
+    extra: dict[str, Any] = {}
+    if phase == "expose":
+        owned = sorted(required_findings_for_slice(state, slice_id))
+        gate = {
+            **command,
+            "finding_id": owned[0] if len(owned) == 1 else "<owned-finding-id>",
+            "test": "<focused regression test>",
+            "baseline_ref": "run.baseline",
+            "failed_at_assertion": True,
+            "assertion_fingerprint": "<stable expected assertion failure>",
+            "input_space": ["<relevant case or partition>"],
+        }
+        gate["commands"][0]["exit_code"] = 1
+        notes = [f"owned findings: {owned}", "The command must fail at the intended assertion, not setup or timeout."]
+    elif phase == "represent":
+        gate = {"behavior_changed": False, "artifacts": ["<new fact representation and invariant>"]}
+        notes = ["Use structural evidence; add commands only if they actually ran."]
+    elif phase == "route":
+        obligation_placeholder = (
+            list(slice_.get("operational_obligations", []))
+            if slice_.get("operational_obligations") else ["<observable consumer obligation>"]
+        )
+        gate = {
+            "producers": ["<authoritative producer>"],
+            "consumers": ["<concrete consumer decision site>"],
+            "consumer_obligations": {
+                "<concrete consumer decision site>": obligation_placeholder,
+            },
+            "predictions_frozen": True,
+            "new_abstraction_introduced": False,
+            "introduced": [],
+        }
+        notes = [
+            "Use concrete decision sites as consumer keys; assign at least one observable obligation to each.",
+            "Every slice operational obligation must appear under at least one consumer.",
+            "List every introduced mechanism; each needs risk.comparison lower|equivalent|higher.",
+            "If routing invented an abstraction or policy, rewind to REPRESENT.",
+        ]
+    elif phase == "collapse":
+        predictions = slice_.get("collapse_predictions", {})
+        gate = {
+            "prediction_verdicts": {key: "died" for key in predictions},
+            "died": ["<obsolete inference or mechanism removed>"],
+        }
+        notes = ["Verdicts are died|surviving_owned_mechanism|surviving_foreign_mechanism; a surviving inference cannot pass."]
+    elif phase == "saturate":
+        obligations = slice_.get("operational_obligations", [])
+        route_gate = latest_passed_gate(state, slice_id, "route")
+        consumer_obligations = (
+            route_gate.get("consumer_obligations", {}) if isinstance(route_gate, dict) else {}
+        )
+        gate = {
+            **command,
+            "structural_tests": ["<covered boundary or illegal state>"],
+            "operational_proofs": {item: "<existing-evidence-id>" for item in obligations},
+            "consumer_coverage": {
+                consumer: {
+                    claim: {"kind": "executable", "evidence": "<standalone-passing-evidence-id>"}
+                    for claim in claims
+                }
+                for consumer, claims in consumer_obligations.items()
+                if isinstance(claims, list)
+            },
+            "input_space_covered": True,
+        }
+        notes = [
+            "Run one focused green selection covering the regression and adjacent slice cases.",
+            "Each consumer obligation needs standalone executable evidence or a justified code/invariant negative proof; counterfactual red is not coverage.",
+        ]
+    else:
+        saturate = latest_passed_gate(state, slice_id, "saturate")
+        saturate_id = saturate.get("_evidence_id") if isinstance(saturate, dict) else "<saturate-evidence-id>"
+        findings = sorted(ever_findings_for_slice(state, slice_id))
+        active = state.get("active_operation", {})
+        starting_revision = active.get("starting_revision") if isinstance(active, dict) else None
+        counterfactual_candidates = sorted(
+            evidence_id for evidence_id, record in state["evidence"].items()
+            if isinstance(record, dict)
+            and record.get("kind") == "counterfactual_test"
+            and record.get("guide_for") == "falsify"
+            and record.get("slice") == slice_id
+            and record.get("phase_starting_revision") == starting_revision
+        )
+        counterfactual_id = (
+            counterfactual_candidates[0]
+            if len(counterfactual_candidates) == 1 else "<counterfactual-evidence-id>"
+        )
+        gate = {
+            "saturate_evidence": saturate_id,
+            "finding_verdicts": {finding_id: "fixed" for finding_id in findings},
+            "rescan": {"performed": True},
+        }
+        unresolved_owned = [
+            finding_id for finding_id in findings
+            if current_owner(state["findings"][finding_id]) == slice_id
+            and finding_open(state["findings"][finding_id])
+        ]
+        extra["counterfactual_candidates"] = counterfactual_candidates
+        if not counterfactual_candidates:
+            extra["counterfactual_evidence_template"] = {
+                "type": "add_evidence", "id": next_id(state["evidence"], "E"),
+                "evidence": {
+                    "kind": "counterfactual_test", "guide_for": "falsify",
+                    "slice": slice_id, "phase_starting_revision": starting_revision,
+                    "claim": "<removing only this repair restores the EXPOSE assertion failure>",
+                    "commands": [{
+                        "command": "<focused counterfactual command that actually ran>",
+                        "exit_code": 1, "output_digest": "sha256:<expected-assertion-failure>",
+                    }],
+                },
+            }
+        extra["resolution_templates"] = [
+            {
+                "type": "resolve_finding", "finding": finding_id,
+                "resolution": {
+                    "kind": "fixed", "passing_test": saturate_id,
+                    "counterfactual_test": counterfactual_id,
+                },
+            }
+            for finding_id in unresolved_owned
+        ]
+        if tracker_mode(state) == "fix":
+            gate.update({
+                "objective_scope_review": {
+                    "performed": True,
+                    "attributed_findings": findings,
+                    "out_of_scope_changes": [],
+                },
+                "failure_channel_review": {
+                    "performed": True,
+                    "expected_failures": [],
+                    "introduced_or_broadened_exceptions": [],
+                },
+            })
+        notes = [
+            "During the active FALSIFY attempt, add counterfactual evidence and resolve/transfer every finding before finish.",
+            "Reuse SATURATE only after restoring the exact tracked/nonignored workspace.",
+        ]
+    return {
+        "semantics": phase_semantics(phase), "gate_template": gate, **extra, "notes": notes,
+    }
+
+
+def discovery_guide(state: dict[str, Any]) -> dict[str, Any]:
+    evidence_id = next_id(state["evidence"], "E")
+    slice_id = next_id(state["slices"], "S")
+    finding_id = next_id(state["findings"], "F")
+    slice_operation: dict[str, Any] = {
+        "type": "add_slice", "id": slice_id, "name": "<boundary name>",
+        "merge_policy": "required",
+        "boundary": {
+            "authority": "<fact authority>", "fact": "<missing fact>",
+            "consumer_decision": "<consumer decision>",
+        },
+        "depends_on": [],
+        "collapse_predictions": {"P-0001": "<inference expected to die>"},
+        "operational_obligations": [],
+    }
+    finding_operation: dict[str, Any] = {
+        "type": "add_finding", "id": finding_id, "title": "<finding title>",
+        "site": "<path:line>", "merge_blocking": True,
+        "missing_fact": {
+            "authority": "<fact authority>", "fact": "<missing fact>",
+            "consumer_decision": "<consumer decision>", "inferred_from": "<current proxy>",
+            "initial_shape": "value|temporal|concurrency|direct",
+            "normalized_as": "<normalized fact kind>",
+        },
+        "fix_direction": "<how to represent and route the fact>",
+    }
+    if tracker_mode(state) == "fix":
+        scope = {
+            "classification": "root", "parent": "O-0001", "relation": "root",
+            "evidence": evidence_id,
+        }
+        slice_operation["objective_scope"] = copy.deepcopy(scope)
+        finding_operation["objective_scope"] = copy.deepcopy(scope)
+    return {
+        "operation_template": {
+            "type": "batch",
+            "operations": [
+                {"type": "add_evidence", "id": evidence_id, "evidence": {
+                    "kind": "code_read", "claim": "<code-derived authority/fact/decision evidence>",
+                }},
+                slice_operation,
+                finding_operation,
+                {"type": "assign_finding", "finding": finding_id, "slice": slice_id,
+                 "k_verification": evidence_id},
+            ],
+        },
+        "notes": [
+            "Replace every placeholder from code-read evidence; add more grouped slices/findings in the same batch.",
+            "Fix mode records unrelated observations as unassigned out_of_scope findings, never executable slices.",
+        ],
+    }
+
+
+def runtime_guide(state: dict[str, Any]) -> dict[str, Any]:
+    revision = state["revision"]
+    next_action = derive_next_action(state)
+    action = next_action.get("action")
+    guide: dict[str, Any] = {
+        "schema": "bdr.dev/runtime-guide/v1",
+        "revision": revision,
+        "run_state": state["run"]["state"],
+        "next": next_action,
+    }
+    active = state.get("active_operation")
+    if action == "finish_or_recover_phase" and isinstance(active, dict):
+        slice_id = str(active["slice"])
+        phase = str(active["phase"])
+        guide.update(phase_gate_guide(state, slice_id, phase))
+        guide["notes"].append(
+            "On resume, inspect the pre-checkpoint and checkout before finishing; ambiguous recovery requires a human decision."
+        )
+        guide["finish_command"] = [
+            "bdr", "transition", "finish", "--expected-revision", str(revision),
+            slice_id, phase, "--result", "passed", "--evidence", "<temp-gate.json>",
+        ]
+        return guide
+    if action == "record_baseline":
+        guide["operation_template"] = {
+            "type": "set_baseline",
+            "baseline": {"usable": True, "commands": [{
+                "command": "<deterministic baseline command>", "exit_code": 0,
+                "output_digest": "sha256:<digest-or-stable-summary>",
+            }]},
+        }
+    elif action in {"discover_boundaries", "discover_root_boundaries"}:
+        guide.update(discovery_guide(state))
+    elif action == "begin_phase":
+        guide["semantics"] = phase_semantics(str(next_action["phase"]))
+        guide["begin_command"] = [
+            "bdr", "transition", "begin", "--expected-revision", str(revision),
+            str(next_action["slice"]), str(next_action["phase"]),
+        ]
+        guide["notes"] = ["Begin the phase, do its code/evidence work, then run `bdr guide` again for the exact gate."]
+    elif action == "record_objective_exposure":
+        gate = state["evidence"].get(next_action.get("evidence"), {})
+        guide["operation_template"] = {
+            "type": "record_objective_exposure", "proof_id": "<stable-root-proof-id>",
+            "assertion_fingerprint": gate.get("assertion_fingerprint", "<EXPOSE assertion fingerprint>"),
+            "evidence": next_action.get("evidence"), "behavioral_production_unchanged": True,
+        }
+    elif action == "record_delivery":
+        slice_id = str(next_action["slice"])
+        saturate = latest_passed_gate(state, slice_id, "saturate")
+        guide["operation_template"] = {
+            "type": "record_delivery", "slice": slice_id, "kind": "commit", "sha": "HEAD",
+            "evidence": saturate.get("_evidence_id") if isinstance(saturate, dict) else "<verification-evidence-id>",
+        }
+        guide["notes"] = ["Commit the green self-contained slice first; use standalone verification for no_code_change."]
+    elif action == "rescan_root_objective":
+        used = {
+            item.get("evidence") for item in state["objective"].get("rescans", [])
+            if isinstance(item, dict)
+        }
+        candidates = sorted(
+            evidence_id for evidence_id, record in state["evidence"].items()
+            if isinstance(record, dict)
+            and record.get("kind") == "rescan"
+            and record.get("guide_for") == "objective_rescan"
+            and record.get("semantic_revision") == state.get("semantic_revision")
+            and evidence_id not in used
+        )
+        required_open = sorted(
+            fid for fid, finding in state["findings"].items()
+            if isinstance(finding.get("objective_scope"), dict)
+            and finding["objective_scope"].get("classification") in {"root", "required"}
+            and finding_open(finding)
+        )
+        guide["candidate_rescan_evidence"] = candidates
+        if len(candidates) == 1:
+            guide["operation_template"] = {"type": "record_objective_rescan", "rescan": {
+                "new_required_findings": [], "out_of_scope_findings": [],
+                "unresolved_required": len(required_open), "evidence": candidates[0],
+            }}
+        else:
+            guide["operation_template"] = {
+                "type": "add_evidence", "id": next_id(state["evidence"], "E"),
+                "evidence": {
+                    "kind": "rescan", "guide_for": "objective_rescan",
+                    "semantic_revision": state.get("semantic_revision"),
+                    "claim": "<bounded root-focused rescan result>",
+                },
+            }
+            guide["notes"] = [
+                "Add one focused rescan record, then rerun `bdr guide`; it will bind the sole unused candidate.",
+                "If candidates already exist, select the one produced by this exact rescan and do not guess between ambiguous records.",
+            ]
+    elif action == "record_objective_closure":
+        exposure = state["objective"].get("exposure", {})
+        issue = state["objective"].get("issue", {})
+        guide["required_evidence"] = {
+            "root_passing": {
+                "kind": "test|verification", "proof_id": exposure.get("proof_id"),
+                "commands": "successful final root proof",
+            },
+            "regressions": "test|verification with successful commands",
+            "aggregate_counterfactual": {
+                "kind": "counterfactual_test", "proof_id": exposure.get("proof_id"),
+                "assertion_fingerprint": exposure.get("assertion_fingerprint"),
+                "removed_root_reachable_slices": sorted(state["slices"]),
+                "proof_harness_retained": True, "workspace_restored": True,
+                "commands": "expected-red aggregate counterfactual",
+            },
+            "stale_check": {
+                "kind": "stale_check", "stale": False,
+                "issue_content_sha256": issue.get("content_sha256"),
+                "starting_head_sha": state["source"].get("starting_head_sha"),
+                "commands": "successful authenticated issue/revision check",
+            },
+        }
+        guide["operation_template"] = {
+            "type": "record_objective_closure", "closure": {
+                "proof_id": exposure.get("proof_id", "<root-proof-id>"),
+                "root_passing_evidence": "<evidence-id>",
+                "regression_evidence": "<evidence-id>",
+                "aggregate_counterfactual_evidence": "<evidence-id>",
+                "stale_check_evidence": "<evidence-id>",
+            },
+        }
+        guide["notes"] = [
+            "Use `bdr examples fix_closure_evidence fix_record_root_closure` for focused strict-JSON payloads."
+        ]
+    elif action == "rescan_fixed_point":
+        used = {
+            item.get("evidence") for item in state["fixed_point"].get("passes", [])
+            if isinstance(item, dict)
+        }
+        candidates = sorted(
+            evidence_id for evidence_id, record in state["evidence"].items()
+            if isinstance(record, dict)
+            and record.get("kind") == "rescan"
+            and record.get("guide_for") == "fixed_point"
+            and record.get("semantic_revision") == state.get("semantic_revision")
+            and evidence_id not in used
+        )
+        guide["candidate_rescan_evidence"] = candidates
+        if len(candidates) == 1:
+            guide["operation_template"] = {"type": "record_fixed_point", "pass": {
+                "new_merge_blocking_findings": 0, "evidence": candidates[0],
+                "commands": [{"command": "<final broad suite>", "exit_code": 0,
+                              "output_digest": "sha256:<digest-or-stable-summary>"}],
+            }}
+        else:
+            guide["operation_template"] = {
+                "type": "add_evidence", "id": next_id(state["evidence"], "E"),
+                "evidence": {
+                    "kind": "rescan", "guide_for": "fixed_point",
+                    "semantic_revision": state.get("semantic_revision"),
+                    "claim": "<fixed-point rescan result>",
+                },
+            }
+            guide["notes"] = [
+                "Add one fixed-point rescan record, then rerun `bdr guide`; it will bind the sole unused candidate.",
+                "Run the broad suite only when recording the fixed-point pass, after the rescan is clean.",
+            ]
+    elif action == "completion_check_then_mark_ready":
+        guide["commands_in_order"] = [
+            ["bdr", "completion-check"],
+            ["bdr", "apply", "--expected-revision", str(revision), "<temp-operation.json>"],
+        ]
+        guide["operation_template"] = {"type": "set_run_state", "state": "ready_for_review"}
+    elif action == "assign_or_split_findings":
+        guide["operation_template"] = {
+            "type": "assign_finding", "finding": "<listed-finding-id>",
+            "slice": "<matching-boundary-slice-id>", "k_verification": "<code-read-evidence-id>",
+        }
+    elif action == "resolve_or_reassign_findings":
+        guide["notes"] = [
+            "Resolve fixed/split findings during their active FALSIFY attempt, or reassign with fresh code-read evidence.",
+            "Use `bdr examples resolve_finding_with_saturate` for the compact resolution shape.",
+        ]
+    elif action == "synchronize_github":
+        guide["commands_in_order"] = [["bdr", "github-outbox"]]
+        guide["notes"] = ["Authenticate remote results and acknowledge idempotently; never infer ownership from remote prose."]
+    elif action in {"handoff", "handoff_terminal", "needs_human_decisions", "audit_only"}:
+        guide["notes"] = ["No routine mutation is legal; preserve evidence and prepare the terminal/decision handoff."]
+    else:
+        guide["notes"] = ["This path needs a focused tracker reference; do not load unrelated runbook sections."]
+    if "operation_template" in guide or "operations_in_order" in guide:
+        guide["apply_command"] = [
+            "bdr", "apply", "--expected-revision", str(revision), "<temp-operation.json>",
+        ]
+    return guide
+
+
+def command_guide(args: argparse.Namespace) -> int:
+    root = git_root(Path.cwd())
+    state = checked_state(state_path(args.state, root), root)
+    print(json.dumps(runtime_guide(state), indent=2))
+    return 0
+
+
+def command_examples(args: argparse.Namespace) -> int:
     examples = {
         "add_evidence": {
             "type": "add_evidence",
@@ -8024,6 +8517,54 @@ def command_examples(_: argparse.Namespace) -> int:
                 "unresolved_required": 0, "evidence": "E-ROOT-RESCAN",
             },
         },
+        "fix_closure_evidence": {
+            "root_passing": {
+                "type": "add_evidence", "id": "E-ROOT-GREEN",
+                "evidence": {
+                    "kind": "test", "proof_id": "root-regression-test",
+                    "commands": [{
+                        "command": "focused root proof on final code", "exit_code": 0,
+                        "output_digest": "sha256:root-green",
+                    }],
+                },
+            },
+            "regressions": {
+                "type": "add_evidence", "id": "E-REGRESSIONS-GREEN",
+                "evidence": {
+                    "kind": "verification",
+                    "commands": [{
+                        "command": "relevant regression selection", "exit_code": 0,
+                        "output_digest": "sha256:regressions-green",
+                    }],
+                },
+            },
+            "aggregate_counterfactual": {
+                "type": "add_evidence", "id": "E-AGGREGATE-RED",
+                "evidence": {
+                    "kind": "counterfactual_test", "proof_id": "root-regression-test",
+                    "assertion_fingerprint": "expected root behavior but observed defect",
+                    "removed_root_reachable_slices": ["S-0001"],
+                    "proof_harness_retained": True, "workspace_restored": True,
+                    "restored_worktree_sha256": "<final-worktree-sha256>",
+                    "commands": [{
+                        "command": "aggregate repair-removed root proof", "exit_code": 1,
+                        "output_digest": "sha256:original-assertion-failure",
+                    }],
+                },
+            },
+            "stale_check": {
+                "type": "add_evidence", "id": "E-PINS-CURRENT",
+                "evidence": {
+                    "kind": "stale_check", "stale": False,
+                    "issue_content_sha256": "<pinned-issue-content-sha256>",
+                    "starting_head_sha": "<pinned-starting-head-sha>",
+                    "commands": [{
+                        "command": "authenticated issue and revision stale check", "exit_code": 0,
+                        "output_digest": "sha256:pins-current",
+                    }],
+                },
+            },
+        },
         "fix_record_root_closure": {
             "type": "record_objective_closure",
             "closure": {
@@ -8034,6 +8575,14 @@ def command_examples(_: argparse.Namespace) -> int:
             },
         },
     }
+    names = list(getattr(args, "names", []))
+    if names:
+        unknown = [name for name in names if name not in examples]
+        if unknown:
+            raise BdrError(
+                f"unknown example(s) {unknown}; available: {sorted(examples)}"
+            )
+        examples = {name: examples[name] for name in names}
     print(json.dumps(examples, indent=2))
     return 0
 
@@ -8092,6 +8641,10 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--next", action="store_true", help="show only the next legal action")
     status.set_defaults(handler=command_status)
 
+    guide = commands.add_parser("guide", help="show compact state-aware guidance for the next legal action")
+    add_state_argument(guide)
+    guide.set_defaults(handler=command_guide)
+
     apply = commands.add_parser("apply", help="atomically apply one JSON operation or batch")
     add_mutation_arguments(apply)
     apply.add_argument("operation", nargs="?", default="-", help="operation file, or - for stdin")
@@ -8145,7 +8698,8 @@ def build_parser() -> argparse.ArgumentParser:
     rules.set_defaults(handler=command_rules)
     tests = commands.add_parser("selftest", help="run adversarial engine tests")
     tests.set_defaults(handler=command_selftest)
-    examples = commands.add_parser("examples", help="print example mutation payloads")
+    examples = commands.add_parser("examples", help="print named example mutation payloads")
+    examples.add_argument("names", nargs="*", help="example names; omit to print all for compatibility")
     examples.set_defaults(handler=command_examples)
     return parser
 

@@ -47,7 +47,7 @@ are projections only.
 Before each mutation:
 
 1. Run `bdr check`.
-2. Run `bdr status --next` and read its `revision` and next legal action.
+2. Run `bdr guide` and read its `revision`, next legal action, and focused payload or gate skeleton.
 3. Re-read the affected code and prepare one operation against that exact revision.
 4. Supply `--expected-revision N`. On a stale-revision error, inspect the new state and rebuild
    the operation; never retry by merely substituting the newer number.
@@ -89,6 +89,10 @@ a durable actor name.
   In fix mode it is a compact human projection; `bdr status --json` emits
   `bdr.dev/fix-status/v1`. Both derive activity mechanically from durable state and evidence.
   `bdr status --next` returns only revision, run state, and next action.
+- `bdr guide` validates the bound state and emits `bdr.dev/runtime-guide/v1`: the same revision and
+  next action plus only the operation or active-phase gate skeleton relevant now. It is the normal
+  model-facing mutation interface; placeholders are not evidence and must be replaced from observed
+  code and command results.
 - `bdr apply --expected-revision N operation.json` applies one operation. Use `-` instead of a
   path only when the host can safely supply strict JSON on standard input.
 - There is no separate `batch` command. Apply `{ "type": "batch", ... }` through `bdr apply`.
@@ -100,8 +104,9 @@ a durable actor name.
   `ready_for_review` would validate.
 - `bdr audit [--summary]` verifies and prints the journal. Full audit includes complete operation
   payloads; summary prints sequence, revision, actor, operation type, timestamp, and event hash.
-- `bdr rules`, `bdr selftest`, and `bdr examples` describe validator claims, exercise the engine,
-  and print a small payload sample.
+- `bdr rules`, `bdr selftest`, and `bdr examples NAME...` describe validator claims, exercise the
+  engine, and print requested payload samples. Omitting names still prints every example for
+  compatibility, but normal runs use `guide` or named examples to avoid loading unrelated schemas.
 - `bdr stale-check` compares the pinned PR base/head or fix-mode issue identity/content plus starting
   revision with authenticated GitHub and local metadata. Exit 3 means the target changed; record
   `stale_input` and do not rebase automatically.
@@ -161,8 +166,8 @@ value when writing the strict JSON operation.
   Only an unresolved, unowned out-of-scope finding may be promoted. The evidence must explain why a
   named root acceptance obligation cannot otherwise be proven.
 
-When `status --next` says `discover_boundaries`, run `bdr examples` for a concrete discovery batch,
-replace every sample value from code-read evidence, then apply that one batch. Its order is:
+When `guide` says `discover_boundaries`, use its concrete discovery batch, replace every placeholder
+from code-read evidence, then apply that one batch. Its order is:
 `add_evidence(kind=code_read)` → `add_slice` → `add_finding` → `assign_finding`; explicit IDs let
 the later children refer to objects created earlier in the same atomic mutation.
 
@@ -313,7 +318,7 @@ The agent may not create its own human approval evidence.
 Run exactly EXPOSE → REPRESENT → ROUTE → COLLAPSE → SATURATE → FALSIFY. Progress is replayed from
 append-only attempts; slice status is derived.
 
-Begin only the phase returned by `status --next`:
+Begin only the phase returned by `guide` (or the equivalent `status --next` projection):
 
 `bdr transition begin --expected-revision N S-0001 expose`
 
@@ -567,7 +572,7 @@ disabled. `ready_for_review` is the only positive readiness state.
 
 Every semantic mutation increments a separate `semantic_revision`; evidence-only, GitHub, journal,
 and run-state bookkeeping does not. A clean pass predating semantic work is stale even when its
-count was zero. Finish all runnable phases before final delivery re-attestation: `status --next`
+count was zero. Finish all runnable phases before final delivery re-attestation: `guide`
 prioritizes runnable slice work, then asks for each stale delivery in frontier order. Tracked and
 nonignored-untracked code changes after the pass are caught by its Git/worktree fingerprint.
 SATURATE-to-FALSIFY reuse deliberately uses checkpoint workspace equality rather than
@@ -594,7 +599,7 @@ event/state hashes, resulting state hash, and event hash. Do not put secrets or 
 proprietary data in operations or evidence. `bdr audit` refuses broken sequences, hashes, or state
 agreement.
 
-If `status --next` reports `finish_or_recover_phase`, a valid active operation survived:
+If `guide` reports `finish_or_recover_phase`, a valid active operation survived:
 
 1. Inspect its pre-checkpoint and the current checkout; do not assume either that work landed or
    that it did not.

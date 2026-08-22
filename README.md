@@ -66,6 +66,7 @@ For one developer-selected GitHub issue, initialize the bounded primitive with:
 
 ```bash
 bin/bdr init --mode fix --issue 123
+bin/bdr guide
 bin/bdr status
 bin/bdr status --json
 ```
@@ -73,6 +74,10 @@ bin/bdr status --json
 The issue and current revision are pinned read-only. Root and causally required slices use the
 existing six phases; unrelated findings remain visible without being repaired or blocking closure.
 Activity is projected mechanically from durable state rather than model-authored telemetry.
+`bdr guide` is the compact model-facing projection: it validates state and returns only the next
+legal action, that gate's meaning, and the relevant payload skeleton. The full tracker runbook
+remains available for exceptional recovery and protocol work without becoming a fixed context cost
+for every ordinary run.
 
 > The developer chooses the objective; the model chooses the repair path; BDR determines what
 > evidence constitutes closure.
@@ -216,6 +221,7 @@ For the architecture and current experimental evidence:
 | [`docs/adr/0004-run-telemetry.md`](docs/adr/0004-run-telemetry.md) | run telemetry contract |
 | [`docs/adr/0005-wire-dialect-seam.md`](docs/adr/0005-wire-dialect-seam.md) | provider/serving wire-dialect boundary |
 | [`docs/exo-efficiency.md`](docs/exo-efficiency.md) | distributed-inference and exo efficiency notes |
+| [`docs/claude-token-efficiency.md`](docs/claude-token-efficiency.md) | progressive-disclosure design and live A/B plan for Claude-hosted BAT runs |
 | [`experiments/bdrv1/README.md`](experiments/bdrv1/README.md) | current BDRv1 open-weight qualification program and findings |
 | [`experiments/bdrv1/results/`](experiments/bdrv1/results/) | preserved Qwen, GPT-OSS, and Gemma run records and artifacts |
 | [`experiments/bdrv1/MONDAY-TARGET.md`](experiments/bdrv1/MONDAY-TARGET.md) | frozen production-scale CorfuDB qualification target |
