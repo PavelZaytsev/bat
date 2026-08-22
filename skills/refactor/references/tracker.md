@@ -317,8 +317,12 @@ Begin only the phase returned by `status --next`:
 
 `bdr transition begin --expected-revision N S-0001 expose`
 
-Begin rejects incomplete slice dependencies and the configured per-phase attempt bound, captures
-a pre-checkpoint, sets `active_operation`, and moves the run to `executing`. It also requires a
+Begin rejects incomplete slice dependencies, captures a pre-checkpoint, sets
+`active_operation`, and moves the run to `executing`. Beginning a phase that has already reached
+the configured per-phase attempt bound does not raise a recoverable error: it terminates the run in
+`non_convergent` with a `terminal_reason`, starts no attempt, and leaves no active operation. That
+run state permits no further phase work. Exhausting the bound is non-convergence, not a retry
+budget to spend down. It also requires a
 usable baseline and an executable nonterminal run state. Do not batch begin with code work or
 finish.
 
@@ -351,10 +355,20 @@ Command records have this shape; use `artifact` instead of `output_digest` when 
 ```json
 {
   "commands": [
-    {"command": "descriptive command", "exit_code": 0, "output_digest": "sha256:..."}
+    {"command": "descriptive command", "exit_code": 0, "output_digest": "sha256:<64 hex digits>"}
   ]
 }
 ```
+
+`output_digest` must be literal `sha256:` followed by 64 lowercase hexadecimal digits. A label such
+as `sha256:dummy`, a bare digest with no prefix, or any other free text is rejected wherever command
+records are validated: baselines, phase gates, evidence records, stale checks, rescans, and
+fixed-point passes. Supply `artifact` instead when the observation lives in a committed path or a
+trusted artifact store and no output digest applies.
+
+The engine does not execute recorded commands, so a well-formed digest is not proof that the command
+ran or that its output matched. The format requirement makes fabrication costly and later auditable;
+it does not make the record true.
 
 The six phases remain mandatory, but their command rules differ:
 
