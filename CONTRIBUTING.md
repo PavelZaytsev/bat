@@ -47,6 +47,7 @@ python3 -m py_compile \
   scripts/bdr.py \
   scripts/install_claude.py \
   skills/fix/scripts/bdr.py \
+  skills/fix/scripts/target.py \
   skills/refactor/scripts/bdr.py \
   scripts/check_plugin_manifests.py \
   scripts/check_java_fix_fixture.py \
@@ -55,6 +56,7 @@ python3 scripts/bdr.py examples | python3 -m json.tool >/dev/null
 python3 scripts/bdr.py selftest
 python3 scripts/check_plugin_manifests.py
 python3 scripts/check_claude_installer.py
+python3 scripts/check_fix_target.py
 python3 scripts/check_java_fix_fixture.py
 python3 scripts/check_benchmark_artifacts.py
 bin/bdr --version

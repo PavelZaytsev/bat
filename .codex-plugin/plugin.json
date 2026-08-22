@@ -1,6 +1,6 @@
 {
   "name": "bat",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "BAT implements bounded issue fixing and Boundary-Driven Refactoring with evidence-backed phase gates and a resumable audit trail.",
   "author": {
     "name": "BAT Contributors"

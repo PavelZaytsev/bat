@@ -37,9 +37,17 @@ Install or refresh BAT for both with one command:
 bin/bat-claude-install
 ```
 
-Start a new Claude session or Zed Claude Agent thread, then invoke `/bat:fix` with a same-repository
-GitHub issue URL or number. The installer handles Claude's user-scope plugin registration; no Zed
-configuration is required.
+Start a new Claude session or Zed Claude Agent thread, then invoke `/bat:fix` with a project
+location, base branch, BDR branch, and same-repository GitHub issue URL or number:
+
+```text
+/bat:fix . main bdr/issue-123 https://github.com/ORG/REPO/issues/123
+/bat:fix /Users/developer/project cache-experiments bdr/cache-fix 123
+/bat:fix developer@192.0.2.10:/home/developer/project main bdr/issue-123 123
+```
+
+The first two forms run in a local checkout; the third keeps repository work on the SSH host. The
+installer handles Claude's user-scope plugin registration; no Zed configuration is required.
 
 ### BDR engine
 

@@ -114,17 +114,24 @@ An organization can instead register the private marketplace and enable BAT thro
 settings. A repository-level plugin declaration is not a zero-install distribution mechanism:
 each collaborator must still trust the repository and consent to installing external plugin code.
 
-Start a new session, check out the PR head, and run:
+Start a new session and run:
 
 ```text
-/bat:fix 123
+/bat:fix . main bdr/issue-123 123
+/bat:fix /absolute/path/to/project cache-experiments bdr/cache-fix 123
+/bat:fix developer@192.0.2.10:/home/developer/project main bdr/issue-123 123
 /bat:refactor this PR
 ```
 
-Pass a same-repository GitHub issue number or URL to `/bat:fix`. It is the V1 path for a bounded,
-developer-selected bug and performs no GitHub writes. You may pass a PR number or URL to
-`/bat:refactor`. These are the stable namespaced forms. Claude Code can also expose bare names when
-there is no collision.
+Pass four positional arguments to `/bat:fix`: the project location, base branch, new or resumable
+BDR branch, and same-repository GitHub issue number or URL. A project location may be `.`, an
+absolute local path, or `user@host:/absolute/path`. BAT refuses a dirty target, creates the BDR
+branch from the local base (or `origin/<base>`), and keeps SSH-targeted reads, edits, tests, Git, and
+BDR operations on the remote machine. It does not fetch, pull, reset, delete, or overwrite a branch
+as part of setup. The fix workflow performs no GitHub writes.
+
+You may pass a PR number or URL to `/bat:refactor`. These are the stable namespaced forms. Claude
+Code can also expose bare names when there is no collision.
 
 For the exact short command on clients that do not expose it, deploy
 `adapters/claude-bare/refactor/` as a standalone personal or managed Claude skill named `refactor`
