@@ -85,7 +85,7 @@ def install(claude: str) -> None:
     print()
     print("BAT is ready for Claude Code and Zed's Claude Agent.")
     print("Start a new Claude session or Zed Claude Agent thread, then run:")
-    print("  /bat:fix https://github.com/ORG/REPO/issues/NN")
+    print("  /bat:fix . main bdr/issue-NN https://github.com/ORG/REPO/issues/NN")
 
 
 def parse_args() -> argparse.Namespace:
